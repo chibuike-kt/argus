@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: argus
+      POSTGRES_PASSWORD: argus
+      POSTGRES_DB: argus
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U argus"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://argus:argus@postgres:5432/argus?sslmode=disable"
+      - "up"
+    restart: on-failure
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ARGUS_DATABASE_URL: postgres://argus:argus@postgres:5432/argus?sslmode=disable
+      ARGUS_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8080:8080"
+
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ARGUS_DATABASE_URL: postgres://argus:argus@postgres:5432/argus?sslmode=disable
+      ARGUS_REDIS_URL: redis://redis:6379/0
+
+volumes:
+  pgdata:
+  redisdata:

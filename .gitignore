@@ -1,0 +1,27 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# Node / frontend
+web/node_modules/
+web/dist/
+web/.vite/
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts
+/tmp/
+dist/
