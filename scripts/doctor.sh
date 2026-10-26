@@ -14,7 +14,7 @@ check () {
   fi
 }
 echo "ARGUS toolchain check"
-check "go"            go            "1.24"
+check "go"            go            "1.26"
 check "node"          node          "22"
 check "pnpm"          pnpm          "9"
 check "docker"        docker        "24"

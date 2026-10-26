@@ -11,7 +11,7 @@ still open decisions; see `docs/adr`.
 
 ## Stack
 
-- Go 1.24 modular monolith (API + worker)
+- Go 1.26 modular monolith (API + worker)
 - PostgreSQL (sqlc) and Redis
 - golang-migrate (expand-contract migrations)
 - React + TypeScript + Vite frontend
@@ -22,7 +22,7 @@ Full rationale is in `docs/adr` (ADR-001 to ADR-020). Start at `docs/adr/README.
 
 ## Prerequisites
 
-- Go 1.24+
+- Go 1.26+
 - Node 22+ and pnpm 9+
 - Docker and Docker Compose
 - Git

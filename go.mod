@@ -1,13 +1,13 @@
 module github.com/chibuike-kt/argus
 
-go 1.24
+go 1.26.10
 
 require (
 	github.com/caarlos0/env/v11 v11.2.0
-	github.com/go-chi/chi/v5 v5.1.0
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.10.9
-	github.com/redis/go-redis/v9 v9.7.0
+	github.com/redis/go-redis/v9 v9.7.3
 )
 
 require (
