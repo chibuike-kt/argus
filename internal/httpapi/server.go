@@ -25,7 +25,11 @@ func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// middleware.RealIP is deliberately not used: it trusts X-Forwarded-For
+	// unconditionally, which is spoofable by any client unless we sit
+	// behind a trusted proxy that sets it (guide 12; GO-2026-5777,
+	// GO-2026-5775). Re-add it once deployed behind one, with an explicit
+	// trusted-proxy configuration rather than chi's unconditional default.
 	r.Use(requestLogger(d.Logger))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
