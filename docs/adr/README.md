@@ -1,12 +1,12 @@
 # ARGUS Architecture Decision Records
 
-Product: ARGUS (Autonomous Market Intelligence)  
-Tagline: Always watching. Always adapting.  
-Document type: Architecture Decision Records, split from the consolidated master ADR  
-Version: 0.1.0-draft  
-Status: Draft for review. Not approved for implementation  
-Last updated: 26 October 2026  
-Primary implementation language: Go  
+Product: ARGUS (Autonomous Market Intelligence)
+Tagline: Always watching. Always adapting.
+Document type: Architecture Decision Records, split from the consolidated master ADR
+Version: 0.1.0-draft
+Status: Draft for review. Not approved for implementation
+Last updated: 26 October 2026
+Primary implementation language: Go
 Initial deployment model: Hosted public application with local Docker development
 
 ## How this is organized
@@ -108,7 +108,7 @@ Draft, then review trade-offs and evidence, then approve, revise or reject, then
 | ADR | Title | Status |
 | --- | --- | --- |
 | [ADR-019](ADR-019-testing-and-point-in-time-reproducibility.md) | Testing and point-in-time reproducibility | Confirmed direction; some acceptance criteria open |
-| [ADR-020](ADR-020-database-migrations-and-release-management.md) | Database migrations and release management | Confirmed direction; migration tooling open |
+| [ADR-020](ADR-020-database-migrations-and-release-management.md) | Database migrations and release management | Confirmed direction; migration tool selected (golang-migrate) |
 
 ## Appendices
 
