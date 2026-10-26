@@ -29,6 +29,7 @@ jobs:
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.6.0
+          install-mode: goinstall
       - name: Test
         run: go test -race -cover ./...
       - name: Build
