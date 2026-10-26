@@ -1,6 +1,6 @@
 # ADR-020: Database migrations and release management
 
-- Status: Confirmed direction; migration tooling open
+- Status: Confirmed direction; migration tool selected (golang-migrate)
 - Category: Testing, reproducibility and deployment
 - Version: 0.1.0-draft
 - Last updated: 26 October 2026
@@ -17,6 +17,8 @@ Production release requires manual approval after the required automated checks 
 Container images must use immutable, traceable tags.
 
 Database migrations follow expand-contract by default and run as a dedicated, serialized release step.
+
+The migration tool is golang-migrate, selected during project scaffolding. Migrations are plain SQL `up`/`down` files under `db/migrations`. This supersedes the earlier open status for the migration tool.
 
 ## CI gates
 
@@ -63,8 +65,6 @@ Post-deployment validation checks:
 Secrets must remain outside source code and container images. Secret rotation and revocation procedures must be documented.
 
 ## Open decisions
-
-- Migration tool.
 
 - Production secret-management approach.
 
