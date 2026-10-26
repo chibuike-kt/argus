@@ -176,6 +176,39 @@ func TestPrice_Rescale(t *testing.T) {
 	})
 }
 
+func TestPrice_IsMultipleOf(t *testing.T) {
+	tests := []struct {
+		name string
+		p    Price
+		step Price
+		want bool
+	}{
+		{"exact multiple", 150, 5, true},
+		{"not a multiple", 152, 5, false},
+		{"zero step means no constraint", 1, 0, true},
+		{"zero value is always a multiple", 0, 5, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.p.IsMultipleOf(tt.step); got != tt.want {
+				t.Errorf("Price(%d).IsMultipleOf(%d) = %v, want %v", tt.p, tt.step, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQty_IsMultipleOf(t *testing.T) {
+	if !Qty(100).IsMultipleOf(25) {
+		t.Error("Qty(100).IsMultipleOf(25) = false, want true")
+	}
+	if Qty(101).IsMultipleOf(25) {
+		t.Error("Qty(101).IsMultipleOf(25) = true, want false")
+	}
+	if !Qty(1).IsMultipleOf(0) {
+		t.Error("Qty(1).IsMultipleOf(0) = false, want true (zero step means no constraint)")
+	}
+}
+
 func TestPrice_AddSub(t *testing.T) {
 	a, b := Price(100), Price(40)
 
