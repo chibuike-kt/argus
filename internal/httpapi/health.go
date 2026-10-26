@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -11,18 +12,21 @@ import (
 )
 
 type healthHandler struct {
-	db    *sql.DB
-	redis *redis.Client
+	db     *sql.DB
+	redis  *redis.Client
+	logger *slog.Logger
 }
 
-// live reports process liveness. It does not touch dependencies.
+// live reports process liveness. It does not touch dependencies (guide 15:
+// liveness is distinct from readiness).
 func (h *healthHandler) live(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // ready reports dependency readiness. Per ADR-006 and ADR-018, data freshness
 // is a separate concern and is not asserted here; this only checks that the
-// datastores are reachable.
+// datastores are reachable. Error detail is logged, not returned, so internal
+// information does not leak to callers (guide 12).
 func (h *healthHandler) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
@@ -30,22 +34,24 @@ func (h *healthHandler) ready(w http.ResponseWriter, r *http.Request) {
 	checks := map[string]string{"postgres": "ok", "redis": "ok"}
 	status := http.StatusOK
 
-	if h.db != nil {
-		if err := h.db.PingContext(ctx); err != nil {
-			checks["postgres"] = "error: " + err.Error()
-			status = http.StatusServiceUnavailable
+	if h.db == nil {
+		checks["postgres"] = "not_configured"
+	} else if err := h.db.PingContext(ctx); err != nil {
+		if h.logger != nil {
+			h.logger.Error("readiness: postgres ping failed", "error", err)
 		}
-	} else {
-		checks["postgres"] = "not configured"
+		checks["postgres"] = "error"
+		status = http.StatusServiceUnavailable
 	}
 
-	if h.redis != nil {
-		if err := h.redis.Ping(ctx).Err(); err != nil {
-			checks["redis"] = "error: " + err.Error()
-			status = http.StatusServiceUnavailable
+	if h.redis == nil {
+		checks["redis"] = "not_configured"
+	} else if err := h.redis.Ping(ctx).Err(); err != nil {
+		if h.logger != nil {
+			h.logger.Error("readiness: redis ping failed", "error", err)
 		}
-	} else {
-		checks["redis"] = "not configured"
+		checks["redis"] = "error"
+		status = http.StatusServiceUnavailable
 	}
 
 	writeJSON(w, status, checks)

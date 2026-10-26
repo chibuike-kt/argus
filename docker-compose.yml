@@ -50,6 +50,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       ARGUS_DATABASE_URL: postgres://argus:argus@postgres:5432/argus?sslmode=disable
       ARGUS_REDIS_URL: redis://redis:6379/0
@@ -65,6 +67,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       ARGUS_DATABASE_URL: postgres://argus:argus@postgres:5432/argus?sslmode=disable
       ARGUS_REDIS_URL: redis://redis:6379/0

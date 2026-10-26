@@ -1,19 +1,58 @@
-# ARGUS: notes for Claude Code
+# ARGUS: instructions for Claude Code
 
 ARGUS is an autonomous market-intelligence tool for crypto perpetual futures
-and forex. It does deterministic, versioned, multi-timeframe technical analysis
-and proposes trade plans. It does not place real orders (ADR-001).
+and forex. It runs deterministic, versioned, multi-timeframe technical analysis
+and proposes trade plans with the evidence behind them. It does not place real
+orders (ADR-001).
 
-## Source of truth
+## Operating rules (read first, always apply)
 
-- Architecture decisions: `docs/adr` (ADR-001 to ADR-020, plus appendices and a
-  README index). These decide how things are built. Read the relevant ADR before
-  changing an area, and do not silently deviate from a decision.
-- Product requirements: `docs/prd`.
+1. Never commit and never push. Do not run `git commit`, `git push`, `git tag`,
+   or anything that writes to git history. Stage and describe changes if asked,
+   but the human makes every commit. This is absolute.
+2. When writing, changing, or reviewing Go, follow
+   `docs/writing_go_like_a_senior_engineer.md`. It is the coding standard for
+   this repo. Section 13 (financial and numerical correctness) and section 16
+   (autonomous and market-data systems) are written for ARGUS specifically.
+3. The ADRs in `docs/adr` are the source of truth for how the system is built.
+   Read the relevant ADR before changing an area. Do not silently deviate from a
+   decision. Many decisions are deliberately open ("partially confirmed",
+   "open", "validation required"); do not invent values for open rules. If an
+   open item blocks the work, stop and flag it rather than guessing.
+4. Do not edit generated code (sqlc output in `internal/store`, oapi-codegen
+   output) by hand, and do not change the exported API of a shared package
+   without asking.
+5. Do not rewrite working code for taste. Flag it and move on.
+6. Run `make check` (fmt, vet, lint, test) before telling the human a change is
+   done. A passing suite is necessary, not sufficient (guide section 17).
+7. No secrets in code, config, logs, or telemetry (ADR-015, ADR-020, guide 12).
 
-Many decisions are deliberately open (status "partially confirmed", "open",
-"validation required"). Do not invent values for open rules. If an open item
-blocks work, flag it rather than guessing.
+## Onboarding: read these before changing anything
+
+In this order:
+
+1. `docs/writing_go_like_a_senior_engineer.md` (how to write the code)
+2. `docs/adr/README.md` (index of decisions and their status)
+3. The ADRs relevant to your task. Map of areas to ADRs:
+   - product scope and the no-real-execution boundary: ADR-001
+   - deployment, scale, budget: ADR-002, ADR-017, ADR-018
+   - backend structure and API: ADR-003, ADR-004
+   - Postgres, Redis, background work: ADR-005
+   - market data contracts, candles, freshness, market calendar: ADR-006, ADR-007
+   - charts and drawings: ADR-008
+   - analysis engine and strategy semantics: ADR-009
+   - setup lifecycle, invalidation, re-entry: ADR-010
+   - immutable decisions and corrections: ADR-011
+   - plans, sizing, targets: ADR-012
+   - notifications and WebSocket recovery: ADR-013
+   - paper trading: ADR-014
+   - auth and authorization: ADR-015
+   - retention, deletion, privacy: ADR-016
+   - testing and reproducibility: ADR-019
+   - migrations and releases: ADR-020
+4. `docs/adr/appendix-a-strategy-defaults.md` and
+   `docs/adr/appendix-c-unresolved-decisions.md` for what is still open.
+5. The code map below, then the actual package you will touch.
 
 ## Stack
 
@@ -24,18 +63,18 @@ blocks work, flag it rather than guessing.
 - Migrations: golang-migrate, expand-contract, `db/migrations` (ADR-020).
 - Frontend: React + TypeScript + Vite in `web` (ADR-004).
 
-Note: the backend driver is `lib/pq` for now. pgx is a reasonable later swap and
+The backend driver is `lib/pq` for now. pgx is a reasonable later swap and
 touches `sqlc.yaml` and `internal/platform/postgres` only.
 
-## Layout
+## Code map
 
 ```
 cmd/argus-api        API server entrypoint
 cmd/argus-worker     background worker entrypoint
-internal/config      env-based configuration
+internal/config      env-based configuration, validated at startup
 internal/httpapi     router, middleware, health, handlers
 internal/platform    postgres, redis, logging
-internal/store       sqlc-generated query code (run `make generate`)
+internal/store       sqlc-generated query code (run make generate; do not hand-edit)
 internal/<feature>   marketdata, instruments, analysis, setups, notifications, identity
 api                  OpenAPI spec and codegen config
 db/migrations        SQL migrations (up/down)
@@ -43,6 +82,7 @@ db/queries           sqlc query sources
 deploy               Dockerfiles
 web                  frontend
 docs/adr, docs/prd   decisions and requirements
+docs/writing_go_like_a_senior_engineer.md  the Go coding standard
 ```
 
 ## Commands
@@ -54,21 +94,27 @@ make infra        # start postgres + redis
 make migrate-up   # apply migrations
 make run-api      # run the API
 make run-worker   # run the worker
-make generate     # sqlc + oapi-codegen
-make check        # fmt, vet, lint, test  (run before every commit)
+make generate     # sqlc + oapi-codegen (regenerates internal/store and API types)
+make check        # fmt, vet, lint, test  (run before saying a change is done)
 make web-dev      # frontend dev server
 ```
 
-## Conventions
+## Domain rules that are easy to get wrong
 
-- Run `make check` before committing. CI runs the same gates plus migrations,
-  CodeQL and dependency review.
-- Conventional Commits.
-- No secrets in code, config or logs (ADR-020, ADR-015).
-- Deny-by-default authorization; every user-owned resource is ownership-checked
-  at the server boundary (ADR-015).
-- Market data quality is first-class: stale or incomplete data blocks
-  confirmation (ADR-006, ADR-009). Do not emit actionable results from provisional
-  or stale data.
-- Decisions and plan versions are immutable; corrections append revisions and
-  amendments rather than rewriting history (ADR-011).
+- Money, prices, and quantities are never `float64`. Use integer units or a
+  decimal type, with price precision, quantity precision, tick size, and step
+  size defined separately (guide 13, ADR-006, ADR-012). Floating point is only
+  for statistical calculations where its limits are understood.
+- Market data has freshness, finality, validity, and provenance. Never treat
+  stale, incomplete, or invalid data as current and complete. Stale or
+  insufficient data blocks confirmation (ADR-006, ADR-009, guide 16).
+- Distinguish exchange event time, ingestion time, processing time, and
+  evaluation time. UTC internally. Inject a clock where time affects logic or
+  tests (guide 13, 16).
+- Decisions and plan versions are immutable. Corrections append revisions and
+  amendments; history is never rewritten (ADR-011, guide 16).
+- Deny-by-default authorization. Every user-owned resource is ownership-checked
+  at the server boundary. A client-supplied tenant or owner id is not proof of
+  authorization (ADR-015, guide 12).
+- Strategy eligibility is not execution permission. A valid setup is not an
+  authorised trade (guide 16, ADR-001).

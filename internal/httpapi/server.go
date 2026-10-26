@@ -30,7 +30,7 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	h := &healthHandler{db: d.DB, redis: d.Redis}
+	h := &healthHandler{db: d.DB, redis: d.Redis, logger: d.Logger}
 	r.Get("/healthz", h.live)
 	r.Get("/readyz", h.ready)
 
