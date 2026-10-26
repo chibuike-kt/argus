@@ -80,6 +80,10 @@ vet: ## Run go vet
 test: ## Run tests with race detector and coverage
 	go test -race -cover ./...
 
+.PHONY: test-integration
+test-integration: ## Run integration tests against a real Postgres (needs: make infra && make migrate-up)
+	go test -tags=integration -race -cover ./...
+
 .PHONY: vuln
 vuln: ## Run govulncheck
 	govulncheck ./...
