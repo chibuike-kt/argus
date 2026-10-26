@@ -225,6 +225,27 @@ func formatScaled(v int64, scale Scale) string {
 	return intPart + "." + fracPart
 }
 
+// IsMultipleOf reports whether p is an exact multiple of step, both at
+// the same (implicit, caller-supplied) scale -- e.g. whether a price
+// lands on an instrument's tick_size, or a quantity on its qty_step_size.
+// A step of 0 is treated as "no constraint" and always reports true,
+// matching a tick/step size of 0 meaning no minimum increment is
+// enforced.
+func (p Price) IsMultipleOf(step Price) bool {
+	if step == 0 {
+		return true
+	}
+	return int64(p)%int64(step) == 0
+}
+
+// IsMultipleOf is Qty's counterpart to Price.IsMultipleOf.
+func (q Qty) IsMultipleOf(step Qty) bool {
+	if step == 0 {
+		return true
+	}
+	return int64(q)%int64(step) == 0
+}
+
 // Add returns p+q, or ErrOverflow if the result does not fit in int64.
 func (p Price) Add(q Price) (Price, error) {
 	v, err := addChecked(int64(p), int64(q))
