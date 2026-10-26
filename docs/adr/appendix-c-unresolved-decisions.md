@@ -27,7 +27,6 @@ These items must remain visible in planning until they are resolved or explicitl
 | High | Load-test acceptance | 1,000 active users and one host are unvalidated | Defined workload and measured pass criteria |
 | High | Backup strategy | Daily backup alone does not establish a 15-minute RPO | Recovery design and tested restore |
 | Medium | Queue library | Affects worker reliability and operations | Compare options against workload needs |
-| Medium | Database migration tool | Needed for safe schema evolution | Compare tools before selection |
 | Medium | Session and cookie parameters | Security and user experience | Explicit policy and security tests |
 | Medium | Retention periods | Storage, privacy and reproducibility trade-offs | Data-class retention matrix |
 | Medium | Replay cursor and snapshot protocol | Needed for reliable WebSocket recovery | Versioned protocol and recovery tests |
