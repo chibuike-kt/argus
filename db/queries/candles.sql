@@ -2,6 +2,16 @@
 SELECT * FROM candles
 WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL;
 
+-- GetLatestClosedCandle returns the most recent current, closed candle
+-- for an instrument -- used to bound a replay (e.g. a candle
+-- correction's recompute) at "now" in candle terms, without the caller
+-- needing to know what "now" means for this instrument's series.
+-- name: GetLatestClosedCandle :one
+SELECT * FROM candles
+WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+ORDER BY open_time DESC
+LIMIT 1;
+
 -- ListCurrentCandlesInRange is the read path aggregation uses: the current
 -- (non-superseded) row for every open_time in [start, end), ordered so the
 -- caller can scan once for first/last open/close and reduce for high/low/

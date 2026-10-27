@@ -209,3 +209,17 @@ func (s *Store) GetCurrent(ctx context.Context, instrumentID int64, openTime clo
 	}
 	return fromCandleRow(row), nil
 }
+
+// GetLatestClosed returns the most recent current, closed candle for
+// instrumentID, or ErrCandleNotFound. Used to bound a replay at "now"
+// in candle terms (e.g. internal/analysis's correction recompute).
+func (s *Store) GetLatestClosed(ctx context.Context, instrumentID int64) (Candle, error) {
+	row, err := s.q.GetLatestClosedCandle(ctx, instrumentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Candle{}, fmt.Errorf("marketdata: get latest closed candle instrument=%d: %w", instrumentID, ErrCandleNotFound)
+		}
+		return Candle{}, fmt.Errorf("marketdata: get latest closed candle instrument=%d: %w", instrumentID, err)
+	}
+	return fromCandleRow(row), nil
+}

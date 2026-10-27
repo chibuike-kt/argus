@@ -39,6 +39,22 @@ type CandleGap struct {
 	Resolution   sql.NullString `json:"resolution"`
 }
 
+type ConfirmedSwing struct {
+	ID               int64         `json:"id"`
+	InstrumentID     int64         `json:"instrument_id"`
+	Timeframe        string        `json:"timeframe"`
+	SwingType        string        `json:"swing_type"`
+	PivotTime        time.Time     `json:"pivot_time"`
+	Price            int64         `json:"price"`
+	ConfirmedAt      time.Time     `json:"confirmed_at"`
+	EvaluationTime   time.Time     `json:"evaluation_time"`
+	AlgorithmVersion string        `json:"algorithm_version"`
+	SourceCandleIds  []int64       `json:"source_candle_ids"`
+	SupersededAt     sql.NullTime  `json:"superseded_at"`
+	SupersededBy     sql.NullInt64 `json:"superseded_by"`
+	CreatedAt        time.Time     `json:"created_at"`
+}
+
 type Instrument struct {
 	ID                 int64           `json:"id"`
 	Provider           string          `json:"provider"`
@@ -76,4 +92,31 @@ type LatestQuote struct {
 	QuoteTime    time.Time `json:"quote_time"`
 	IngestedAt   time.Time `json:"ingested_at"`
 	Provider     string    `json:"provider"`
+}
+
+type StructureEvent struct {
+	ID                int64         `json:"id"`
+	InstrumentID      int64         `json:"instrument_id"`
+	Timeframe         string        `json:"timeframe"`
+	EventType         string        `json:"event_type"`
+	DirectionBefore   string        `json:"direction_before"`
+	DirectionAfter    string        `json:"direction_after"`
+	TriggerCandleID   int64         `json:"trigger_candle_id"`
+	ReferenceSwingIds []int64       `json:"reference_swing_ids"`
+	EvaluationTime    time.Time     `json:"evaluation_time"`
+	AlgorithmVersion  string        `json:"algorithm_version"`
+	SupersededAt      sql.NullTime  `json:"superseded_at"`
+	SupersededBy      sql.NullInt64 `json:"superseded_by"`
+	CreatedAt         time.Time     `json:"created_at"`
+}
+
+type StructureState struct {
+	InstrumentID          int64         `json:"instrument_id"`
+	Timeframe             string        `json:"timeframe"`
+	Direction             string        `json:"direction"`
+	ReferenceSwingHighID  sql.NullInt64 `json:"reference_swing_high_id"`
+	ReferenceSwingLowID   sql.NullInt64 `json:"reference_swing_low_id"`
+	LastEventID           sql.NullInt64 `json:"last_event_id"`
+	LastProcessedCandleID sql.NullInt64 `json:"last_processed_candle_id"`
+	UpdatedAt             time.Time     `json:"updated_at"`
 }
