@@ -78,3 +78,26 @@ WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_a
   AND confirmed_at <= $4
 ORDER BY pivot_time DESC
 LIMIT 1;
+
+-- LatestQualifyingProtectedAnchorBefore finds the latest confirmed
+-- swing of swing_type that is ALSO a protected-anchor-qualifying
+-- position: a current sweep of side exists with trigger_open_time
+-- equal to this swing's own pivot_time (the reversal-origin
+-- relationship, spec section 7). Bounded by confirmed_at <= $5, the
+-- same reason as LatestCurrentSwingConfirmedBefore -- a swing is only
+-- usable once confirmed, not merely once it occurs. Used only to
+-- reconstruct the protected anchor as of a correction's resume point;
+-- the live sweep table is a safe source for "as of" here because
+-- nothing strictly before the resume point has been touched by the
+-- correction yet when this runs.
+-- name: LatestQualifyingProtectedAnchorBefore :one
+SELECT cs.* FROM confirmed_swings cs
+JOIN liquidity_sweeps ls
+    ON ls.instrument_id = cs.instrument_id
+   AND ls.timeframe = cs.timeframe
+   AND ls.trigger_open_time = cs.pivot_time
+WHERE cs.instrument_id = $1 AND cs.timeframe = $2 AND cs.swing_type = $3
+  AND cs.superseded_at IS NULL AND cs.confirmed_at <= $4
+  AND ls.side = $5 AND ls.superseded_at IS NULL
+ORDER BY cs.pivot_time DESC
+LIMIT 1;

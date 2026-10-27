@@ -202,6 +202,30 @@ func (s *Store) LatestSwingConfirmedBefore(ctx context.Context, instrumentID int
 	return fromSwingRow(row)
 }
 
+// LatestQualifyingProtectedAnchorBefore returns the latest confirmed
+// swing of swingType, confirmed_at <= before, that is also a protected-
+// anchor-qualifying position: a current sweep of sweepSide exists at
+// its exact pivot_time (the reversal-origin relationship, spec section
+// 7). Used only to reconstruct a correction replay's resume state --
+// ErrSwingNotFound when neither side has ever qualified before that
+// point.
+func (s *Store) LatestQualifyingProtectedAnchorBefore(ctx context.Context, instrumentID int64, timeframe string, swingType SwingType, sweepSide SweepSide, before time.Time) (Swing, error) {
+	row, err := s.q.LatestQualifyingProtectedAnchorBefore(ctx, store.LatestQualifyingProtectedAnchorBeforeParams{
+		InstrumentID: instrumentID,
+		Timeframe:    timeframe,
+		SwingType:    swingType.String(),
+		ConfirmedAt:  before,
+		Side:         sweepSide.String(),
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Swing{}, ErrSwingNotFound
+		}
+		return Swing{}, fmt.Errorf("analysis: latest qualifying protected anchor before %s: %w", before, err)
+	}
+	return fromSwingRow(row)
+}
+
 // --- structure_events ---
 
 // GetCurrentEvent returns the current event for triggerCandleID, or
@@ -234,6 +258,9 @@ func (s *Store) InsertEvent(ctx context.Context, n NewStructureEvent) (Structure
 		ReferenceSwingIds: n.ReferenceSwingIDs,
 		EvaluationTime:    n.EvaluationTime.Time(),
 		AlgorithmVersion:  n.AlgorithmVersion,
+		SweepValidated:    n.SweepValidated,
+		SweepEventID:      ptrToNullInt64(n.SweepEventID),
+		ProtectedSwingID:  ptrToNullInt64(n.ProtectedSwingID),
 	})
 	if err != nil {
 		return StructureEvent{}, fmt.Errorf("analysis: insert event: %w", err)
@@ -297,6 +324,110 @@ func (s *Store) LatestEventBefore(ctx context.Context, instrumentID int64, timef
 	return fromEventRow(row)
 }
 
+// LatestInvalidatingChochBefore reports whether a current CHOCH with
+// direction_before == fromDirection exists strictly after the anchor's
+// own establishment (after) and strictly before the correction's
+// resume point (before) -- spec section 7's invalidation rule. ok is
+// false, not an error, when none exists: that is the normal "anchor
+// survived to the resume point" case, not a failure.
+func (s *Store) LatestInvalidatingChochBefore(ctx context.Context, instrumentID int64, timeframe string, fromDirection Direction, after, before time.Time) (ok bool, err error) {
+	_, err = s.q.LatestInvalidatingChochAfter(ctx, store.LatestInvalidatingChochAfterParams{
+		InstrumentID:    instrumentID,
+		Timeframe:       timeframe,
+		DirectionBefore: fromDirection.String(),
+		OpenTime:        after,
+		OpenTime_2:      before,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("analysis: latest invalidating choch before %s: %w", before, err)
+	}
+	return true, nil
+}
+
+// --- liquidity_sweeps ---
+
+// GetCurrentSweepByTrigger returns the current liquidity sweep of side
+// at triggerOpenTime, or ErrSweepNotFound. triggerOpenTime, not a
+// candle id, is the position key -- stable across a correction to that
+// exact candle (see 000006's comment on liquidity_sweeps).
+func (s *Store) GetCurrentSweepByTrigger(ctx context.Context, instrumentID int64, timeframe string, triggerOpenTime time.Time, side SweepSide) (Sweep, error) {
+	row, err := s.q.GetCurrentSweepByTrigger(ctx, store.GetCurrentSweepByTriggerParams{
+		InstrumentID:    instrumentID,
+		Timeframe:       timeframe,
+		TriggerOpenTime: triggerOpenTime,
+		Side:            side.String(),
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Sweep{}, ErrSweepNotFound
+		}
+		return Sweep{}, fmt.Errorf("analysis: get current sweep: %w", err)
+	}
+	return fromSweepRow(row)
+}
+
+// InsertSweep inserts a new liquidity sweep where none currently exists
+// for its (trigger open time, side).
+func (s *Store) InsertSweep(ctx context.Context, n NewSweep) (Sweep, error) {
+	row, err := s.q.InsertSweep(ctx, store.InsertSweepParams{
+		InstrumentID:       n.InstrumentID,
+		Timeframe:          n.Timeframe,
+		Side:               n.Side.String(),
+		SweptSwingID:       n.SweptSwingID,
+		TriggerOpenTime:    n.TriggerOpenTime,
+		TriggerCandleID:    n.TriggerCandleID,
+		PenetrationExtreme: int64(n.PenetrationExtreme),
+		ReclaimClose:       int64(n.ReclaimClose),
+		EvaluationTime:     n.EvaluationTime.Time(),
+		AlgorithmVersion:   n.AlgorithmVersion,
+	})
+	if err != nil {
+		return Sweep{}, fmt.Errorf("analysis: insert sweep: %w", err)
+	}
+	return fromSweepRow(row)
+}
+
+// SupersedeSweep is SupersedeSwing/SupersedeEvent's counterpart for
+// liquidity_sweeps: replace, or (replacement == nil) retract with no
+// replacement -- the case a correction needs when a candle no longer
+// sweeps under corrected data.
+func (s *Store) SupersedeSweep(ctx context.Context, oldID int64, now time.Time, replacement *NewSweep) (*Sweep, error) {
+	affected, err := s.q.BeginSupersedeSweep(ctx, store.BeginSupersedeSweepParams{
+		ID:           oldID,
+		SupersededAt: nullTimeFrom(now),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 1 (begin): %w", oldID, err)
+	}
+	if affected != 1 {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 1 (begin): expected to affect 1 row, affected %d (concurrent modification)", oldID, affected)
+	}
+
+	if replacement == nil {
+		return nil, nil
+	}
+
+	newRow, err := s.InsertSweep(ctx, *replacement)
+	if err != nil {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 2 (insert): %w", oldID, err)
+	}
+
+	affected, err = s.q.ResolveSupersedeSweep(ctx, store.ResolveSupersedeSweepParams{
+		ID:           oldID,
+		SupersededBy: sql.NullInt64{Int64: newRow.ID, Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 3 (resolve): %w", oldID, err)
+	}
+	if affected != 1 {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 3 (resolve): expected to affect 1 row, affected %d", oldID, affected)
+	}
+	return &newRow, nil
+}
+
 // --- structure_state ---
 
 // GetState returns the current state projection, or a cold-start
@@ -326,6 +457,8 @@ func (s *Store) SetState(ctx context.Context, snap StateSnapshot, now time.Time)
 		ReferenceSwingLowID:   ptrToNullInt64(snap.ReferenceSwingLowID),
 		LastEventID:           ptrToNullInt64(snap.LastEventID),
 		LastProcessedCandleID: ptrToNullInt64(snap.LastProcessedCandleID),
+		ProtectedLowSwingID:   ptrToNullInt64(snap.ProtectedLowSwingID),
+		ProtectedHighSwingID:  ptrToNullInt64(snap.ProtectedHighSwingID),
 		UpdatedAt:             now,
 	})
 	if err != nil {

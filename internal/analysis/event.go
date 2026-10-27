@@ -8,7 +8,12 @@ import (
 )
 
 // StructureEvent is the domain view of a direction-establishment, BOS,
-// or CHOCH event (spec sections 2-3, 5).
+// or CHOCH event (spec sections 2-3, 5). SweepValidated and the two
+// sweep reference fields are the batch-2 tag (spec section 7): set only
+// for a BOS or CHOCH whose reference swing was itself created by a
+// sweep. direction_established is never tagged -- SweepValidated stays
+// false, the two reference fields stay nil -- because establishment
+// does not break a single reference level the way BOS/CHOCH do.
 type StructureEvent struct {
 	ID                int64
 	InstrumentID      int64
@@ -22,6 +27,9 @@ type StructureEvent struct {
 	AlgorithmVersion  string
 	SupersededAt      *clock.ProcessingTime
 	SupersededBy      *int64
+	SweepValidated    bool
+	SweepEventID      *int64
+	ProtectedSwingID  *int64
 }
 
 func fromEventRow(row store.StructureEvent) (StructureEvent, error) {
@@ -48,6 +56,7 @@ func fromEventRow(row store.StructureEvent) (StructureEvent, error) {
 		ReferenceSwingIDs: row.ReferenceSwingIds,
 		EvaluationTime:    clock.NewEvaluationTime(row.EvaluationTime),
 		AlgorithmVersion:  row.AlgorithmVersion,
+		SweepValidated:    row.SweepValidated,
 	}
 	if row.SupersededAt.Valid {
 		t := clock.NewProcessingTime(row.SupersededAt.Time)
@@ -57,10 +66,21 @@ func fromEventRow(row store.StructureEvent) (StructureEvent, error) {
 		id := row.SupersededBy.Int64
 		e.SupersededBy = &id
 	}
+	if row.SweepEventID.Valid {
+		id := row.SweepEventID.Int64
+		e.SweepEventID = &id
+	}
+	if row.ProtectedSwingID.Valid {
+		id := row.ProtectedSwingID.Int64
+		e.ProtectedSwingID = &id
+	}
 	return e, nil
 }
 
-// NewStructureEvent describes an event to be inserted.
+// NewStructureEvent describes an event to be inserted. SweepValidated/
+// SweepEventID/ProtectedSwingID default to their zero values (false,
+// nil, nil) -- decideEstablishmentCandidate relies on this: it never
+// sets them, leaving an establishment event correctly untagged.
 type NewStructureEvent struct {
 	InstrumentID      int64
 	Timeframe         string
@@ -71,11 +91,18 @@ type NewStructureEvent struct {
 	ReferenceSwingIDs []int64
 	EvaluationTime    clock.EvaluationTime
 	AlgorithmVersion  string
+	SweepValidated    bool
+	SweepEventID      *int64
+	ProtectedSwingID  *int64
 }
 
 // equalEvidence is StructureEvent's counterpart to NewSwing's: whether a
 // freshly decided event is identical to what is already stored for this
-// trigger candle.
+// trigger candle. The sweep tag is evidence like every other field here
+// (spec section 7: a correction can change validity, not just
+// direction), so it participates in this comparison -- a trigger candle
+// whose direction/type are unchanged but whose sweep-validation flipped
+// must still be treated as "different, supersede", not skipped.
 func (n NewStructureEvent) equalEvidence(e StructureEvent) bool {
 	if n.Type != e.Type || n.DirectionBefore != e.DirectionBefore || n.DirectionAfter != e.DirectionAfter {
 		return false
@@ -88,7 +115,20 @@ func (n NewStructureEvent) equalEvidence(e StructureEvent) bool {
 			return false
 		}
 	}
+	if n.SweepValidated != e.SweepValidated {
+		return false
+	}
+	if !equalInt64Ptr(n.SweepEventID, e.SweepEventID) || !equalInt64Ptr(n.ProtectedSwingID, e.ProtectedSwingID) {
+		return false
+	}
 	return true
+}
+
+func equalInt64Ptr(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // decideBreak evaluates a closed candle's close against the current

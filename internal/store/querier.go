@@ -17,6 +17,10 @@ type Querier interface {
 	// The two statements below are the supersede handshake's two steps,
 	// same pattern and same reason as confirmed_swings'.
 	BeginSupersedeEvent(ctx context.Context, arg BeginSupersedeEventParams) (int64, error)
+	// The two statements below are the supersede handshake's two steps,
+	// same pattern and same reason as confirmed_swings' and
+	// structure_events'.
+	BeginSupersedeSweep(ctx context.Context, arg BeginSupersedeSweepParams) (int64, error)
 	// The two statements below are the supersede handshake's two steps (see
 	// 000005's trg_confirmed_swings_enforce_lifecycle comment). Step 1
 	// (begin) removes the old row from idx_confirmed_swings_current, making
@@ -36,6 +40,10 @@ type Querier interface {
 	GetCandleGap(ctx context.Context, arg GetCandleGapParams) (CandleGap, error)
 	GetCurrentCandle(ctx context.Context, arg GetCurrentCandleParams) (Candle, error)
 	GetCurrentEventByTrigger(ctx context.Context, arg GetCurrentEventByTriggerParams) (StructureEvent, error)
+	// GetCurrentSweepByTrigger keys on trigger_open_time, not
+	// trigger_candle_id: see 000006's comment on liquidity_sweeps for why
+	// a row id is not a safe position key across a candle correction.
+	GetCurrentSweepByTrigger(ctx context.Context, arg GetCurrentSweepByTriggerParams) (LiquiditySweep, error)
 	GetCurrentSwing(ctx context.Context, arg GetCurrentSwingParams) (ConfirmedSwing, error)
 	GetInstrumentByID(ctx context.Context, id int64) (Instrument, error)
 	GetInstrumentByProviderAndSymbol(ctx context.Context, arg GetInstrumentByProviderAndSymbolParams) (Instrument, error)
@@ -62,6 +70,7 @@ type Querier interface {
 	// database rejects the insert if any is left out.
 	InsertInstrument(ctx context.Context, arg InsertInstrumentParams) (Instrument, error)
 	InsertStructureEvent(ctx context.Context, arg InsertStructureEventParams) (StructureEvent, error)
+	InsertSweep(ctx context.Context, arg InsertSweepParams) (LiquiditySweep, error)
 	InsertSwing(ctx context.Context, arg InsertSwingParams) (ConfirmedSwing, error)
 	// LatestCurrentEventBefore joins through to the trigger candle's
 	// open_time because ordering "before a point in time" is meaningful in
@@ -86,6 +95,26 @@ type Querier interface {
 	// yet, and that can emit a wrong BOS or CHOCH on the very first
 	// replayed candles.
 	LatestCurrentSwingConfirmedBefore(ctx context.Context, arg LatestCurrentSwingConfirmedBeforeParams) (ConfirmedSwing, error)
+	// LatestInvalidatingChochAfter finds whether a CHOCH flipping away
+	// from direction_before has occurred strictly after a protected
+	// anchor's establishment and strictly before the correction's resume
+	// point (spec section 7: "invalidated... that close is the CHOCH that
+	// flips direction"). Existence alone is enough -- reconstructStateAsOf
+	// only needs to know whether the candidate anchor survived to asOf,
+	// not which exact CHOCH ended it.
+	LatestInvalidatingChochAfter(ctx context.Context, arg LatestInvalidatingChochAfterParams) (StructureEvent, error)
+	// LatestQualifyingProtectedAnchorBefore finds the latest confirmed
+	// swing of swing_type that is ALSO a protected-anchor-qualifying
+	// position: a current sweep of side exists with trigger_open_time
+	// equal to this swing's own pivot_time (the reversal-origin
+	// relationship, spec section 7). Bounded by confirmed_at <= $5, the
+	// same reason as LatestCurrentSwingConfirmedBefore -- a swing is only
+	// usable once confirmed, not merely once it occurs. Used only to
+	// reconstruct the protected anchor as of a correction's resume point;
+	// the live sweep table is a safe source for "as of" here because
+	// nothing strictly before the resume point has been touched by the
+	// correction yet when this runs.
+	LatestQualifyingProtectedAnchorBefore(ctx context.Context, arg LatestQualifyingProtectedAnchorBeforeParams) (ConfirmedSwing, error)
 	// ListCurrentCandlesInRange is the read path aggregation uses: the current
 	// (non-superseded) row for every open_time in [start, end), ordered so the
 	// caller can scan once for first/last open/close and reduce for high/low/
@@ -119,6 +148,7 @@ type Querier interface {
 	ResolveCandleGap(ctx context.Context, arg ResolveCandleGapParams) (CandleGap, error)
 	ResolveSupersedeCandle(ctx context.Context, arg ResolveSupersedeCandleParams) (int64, error)
 	ResolveSupersedeEvent(ctx context.Context, arg ResolveSupersedeEventParams) (int64, error)
+	ResolveSupersedeSweep(ctx context.Context, arg ResolveSupersedeSweepParams) (int64, error)
 	ResolveSupersedeSwing(ctx context.Context, arg ResolveSupersedeSwingParams) (int64, error)
 	// SetStructureState is a plain upsert: structure_state is a mutable
 	// projection, not an evidence record, so it is the one table in this

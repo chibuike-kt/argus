@@ -118,6 +118,16 @@ func (e *Engine) step(ctx context.Context, instrumentID int64, timeframe string,
 		return fmt.Errorf("pivot step: %w", err)
 	}
 
+	// Step 1.5: liquidity sweeps (spec section 6), using candle c's own
+	// high/low/close -- same-candle, no RightBars lag, unlike pivot
+	// confirmation. Runs after step 1 so a swing step 1 just confirmed
+	// at this exact candle (confirmed_at == c.CloseTime) is a legal
+	// sweep target, consistent with decideEstablishmentCandidate's own
+	// "<=, not <" bound for the same reason.
+	if err := e.applySweepStep(ctx, txStore, instrumentID, timeframe, c, now); err != nil {
+		return fmt.Errorf("sweep step: %w", err)
+	}
+
 	// Step 2: break/establishment using candle c's own close, reading
 	// state AFTER step 1's updates. Deliberate (approved review point):
 	// a close can break a swing that step 1 just confirmed two bars
@@ -167,16 +177,29 @@ func (e *Engine) applyPivotStep(ctx context.Context, txStore *Store, instrumentI
 		sourceIDs[i] = c.ID
 	}
 
-	if err := e.reconcileSwing(ctx, txStore, instrumentID, timeframe, SwingHigh, pivot, isHigh, confirmedAt, sourceIDs, now, &state.ReferenceSwingHighID); err != nil {
+	priorHighID, currentHighID, err := e.reconcileSwing(ctx, txStore, instrumentID, timeframe, SwingHigh, pivot, isHigh, confirmedAt, sourceIDs, now, &state.ReferenceSwingHighID)
+	if err != nil {
 		return err
 	}
-	if err := e.reconcileSwing(ctx, txStore, instrumentID, timeframe, SwingLow, pivot, isLow, confirmedAt, sourceIDs, now, &state.ReferenceSwingLowID); err != nil {
+	if err := e.reconcileProtectedAnchor(ctx, txStore, instrumentID, timeframe, SwingHigh, pivot.OpenTime, priorHighID, currentHighID, &state.ProtectedHighSwingID); err != nil {
+		return err
+	}
+
+	priorLowID, currentLowID, err := e.reconcileSwing(ctx, txStore, instrumentID, timeframe, SwingLow, pivot, isLow, confirmedAt, sourceIDs, now, &state.ReferenceSwingLowID)
+	if err != nil {
+		return err
+	}
+	if err := e.reconcileProtectedAnchor(ctx, txStore, instrumentID, timeframe, SwingLow, pivot.OpenTime, priorLowID, currentLowID, &state.ProtectedLowSwingID); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (e *Engine) reconcileSwing(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, swingType SwingType, pivot CandleInput, qualifies bool, confirmedAt time.Time, sourceIDs []int64, now time.Time, refID **int64) error {
+// reconcileSwing additionally returns the swing id that was current at
+// this exact position before this call (nil if none) and the swing id
+// current after (nil if none remains) -- reconcileProtectedAnchor needs
+// position identity across this call without a second query.
+func (e *Engine) reconcileSwing(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, swingType SwingType, pivot CandleInput, qualifies bool, confirmedAt time.Time, sourceIDs []int64, now time.Time, refID **int64) (priorID, currentID *int64, err error) {
 	price := pivot.High
 	if swingType == SwingLow {
 		price = pivot.Low
@@ -199,42 +222,45 @@ func (e *Engine) reconcileSwing(ctx context.Context, txStore *Store, instrumentI
 	case errors.Is(err, ErrSwingNotFound):
 		current = nil
 	case err != nil:
-		return err
+		return nil, nil, err
 	default:
 		current = &row
+		id := current.ID
+		priorID = &id
 	}
 
 	switch decideSwingAction(current, candidate, qualifies) {
 	case actionNone:
-		return nil // never was a pivot here; still isn't
+		return priorID, nil, nil // never was a pivot here; still isn't
 
 	case actionInsert:
 		inserted, err := txStore.InsertSwing(ctx, candidate)
 		if err != nil {
-			return err
+			return priorID, nil, err
 		}
 		id := inserted.ID
 		*refID = &id
-		return nil
+		return priorID, &id, nil
 
 	case actionSkip:
 		*refID = &current.ID // unchanged, but still the latest -- keep the pointer current
-		return nil
+		return priorID, priorID, nil
 
 	case actionReplace:
 		replaced, err := txStore.SupersedeSwing(ctx, current.ID, now, &candidate)
 		if err != nil {
-			return err
+			return priorID, nil, err
 		}
 		*refID = &replaced.ID
-		return nil
+		id := replaced.ID
+		return priorID, &id, nil
 
 	default: // actionRetract: a correction retracted this swing
 		if _, err := txStore.SupersedeSwing(ctx, current.ID, now, nil); err != nil {
-			return err
+			return priorID, nil, err
 		}
 		if *refID == nil || **refID != current.ID {
-			return nil // the retracted swing wasn't the reference pointer
+			return priorID, nil, nil // the retracted swing wasn't the reference pointer
 		}
 		// It was. The new reference is whatever is still current and
 		// strictly earlier than this position -- NOT "re-query the
@@ -249,11 +275,198 @@ func (e *Engine) reconcileSwing(ctx context.Context, txStore *Store, instrumentI
 		case errors.Is(err, ErrSwingNotFound):
 			*refID = nil
 		case err != nil:
-			return err
+			return priorID, nil, err
 		default:
 			*refID = &earlier.ID
 		}
+		return priorID, nil, nil
+	}
+}
+
+// applySweepStep decides the deterministic verdict for each side's
+// liquidity sweep against candle c (spec section 6) and reconciles each
+// against whatever is currently stored for (c, side), with the same
+// five-outcome symmetry as applyPivotStep and applyBreakStep.
+func (e *Engine) applySweepStep(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, c CandleInput, now time.Time) error {
+	if err := e.reconcileSweep(ctx, txStore, instrumentID, timeframe, SweepLow, SwingLow, c, now); err != nil {
+		return err
+	}
+	if err := e.reconcileSweep(ctx, txStore, instrumentID, timeframe, SweepHigh, SwingHigh, c, now); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reconcileSweep is applySweepStep's per-side worker. targetType is the
+// swing type side takes (SweepLow takes a swing low, SweepHigh a swing
+// high -- spec section 6 glossary). The target level is the latest
+// confirmed swing of that type with
+// confirmed_at <= c.CloseTime -- "known" by the time c's own close is
+// evaluated, the same bound and the same reason as
+// decideEstablishmentCandidate's maxPivotTime: an unbounded or
+// occurrence-bounded lookup could read a swing a correction replay has
+// not reconciled yet in this pass.
+func (e *Engine) reconcileSweep(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, side SweepSide, targetType SwingType, c CandleInput, now time.Time) error {
+	target, err := txStore.LatestSwingConfirmedBefore(ctx, instrumentID, timeframe, targetType, c.CloseTime)
+	var candidate *NewSweep
+	switch {
+	case errors.Is(err, ErrSwingNotFound):
+		candidate = nil // nothing confirmed to sweep against yet
+	case err != nil:
+		return err
+	default:
+		if extreme, reclaim, ok := detectSweep(side, int64(target.Price), c.High, c.Low, c.Close); ok {
+			candidate = &NewSweep{
+				InstrumentID: instrumentID, Timeframe: timeframe, Side: side,
+				SweptSwingID: target.ID, TriggerOpenTime: c.OpenTime, TriggerCandleID: c.ID,
+				PenetrationExtreme: quant.Price(extreme), ReclaimClose: quant.Price(reclaim),
+				EvaluationTime: clock.NewEvaluationTime(now), AlgorithmVersion: e.cfg.AlgorithmVersion,
+			}
+		}
+	}
+
+	row, err := txStore.GetCurrentSweepByTrigger(ctx, instrumentID, timeframe, c.OpenTime, side)
+	var current *Sweep
+	switch {
+	case errors.Is(err, ErrSweepNotFound):
+		current = nil
+	case err != nil:
+		return err
+	default:
+		current = &row
+	}
+
+	switch decideSweepAction(current, candidate) {
+	case actionNone, actionSkip:
 		return nil
+	case actionInsert:
+		_, err := txStore.InsertSweep(ctx, *candidate)
+		return err
+	case actionReplace:
+		_, err := txStore.SupersedeSweep(ctx, current.ID, now, candidate)
+		return err
+	default: // actionRetract: a correction means this candle no longer sweeps
+		_, err := txStore.SupersedeSweep(ctx, current.ID, now, nil)
+		return err
+	}
+}
+
+// reconcileProtectedAnchor updates ONE of state's two independent
+// protected-anchor slots, for one swing position, immediately after
+// that position's own swing reconciliation (spec section 7, v0.4: "the
+// engine maintains at most one current protected low and at most one
+// current protected high, at the same time and fully independently").
+// This is the establishment/supersession half of the anchor's
+// lifecycle; invalidation is a separate, break-driven check in
+// applyBreakStep. Touching one side never reads or writes the other --
+// callers invoke this once for SwingLow (against slot *refID =
+// &state.ProtectedLowSwingID) and once for SwingHigh (against
+// &state.ProtectedHighSwingID), and each call only ever touches the
+// *int64 it was given.
+//
+// swingType is the position just reconciled; sweepSide is the matching
+// sweep side that must exist at pivotTime for it to qualify (SwingLow
+// needs a SweepLow/"sell-side" sweep; SwingHigh needs SweepHigh/"buy-
+// side"). priorID/currentID are reconcileSwing's own before/after ids
+// at this exact position. Establishing or superseding a NEW qualifying
+// position always overwrites this slot (the walk processes positions
+// in strictly increasing time order, so anything reached here is, by
+// construction, newer than whatever the slot already held), but
+// clearing the slot on a disqualification must only happen when the
+// slot is currently pointing AT THIS EXACT position, never at some
+// other swing of the same type.
+func (e *Engine) reconcileProtectedAnchor(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, swingType SwingType, pivotTime time.Time, priorID, currentID *int64, slot **int64) error {
+	sweepSide := SweepLow
+	if swingType == SwingHigh {
+		sweepSide = SweepHigh
+	}
+
+	qualifies := false
+	if currentID != nil {
+		_, err := txStore.GetCurrentSweepByTrigger(ctx, instrumentID, timeframe, pivotTime, sweepSide)
+		switch {
+		case errors.Is(err, ErrSweepNotFound):
+			qualifies = false
+		case err != nil:
+			return err
+		default:
+			qualifies = true
+		}
+	}
+
+	if qualifies {
+		id := *currentID
+		*slot = &id
+		return nil
+	}
+
+	if *slot != nil && priorID != nil && **slot == *priorID {
+		*slot = nil
+	}
+	return nil
+}
+
+// decideSweepValidation resolves spec section 7's validation sequence
+// for a break resulting in newDirection: sweep-validated iff the
+// protected anchor for THAT side alone currently exists -- a bullish
+// result reads ProtectedLowSwingID only, a bearish result reads
+// ProtectedHighSwingID only. Blind to the other slot and to which swing
+// was broken: this is Reading B's central correction over the discarded
+// reading, and v0.4's independence requirement -- the anchor checked
+// here is never the swing this break itself broke, and checking one
+// side never looks at the other. sweepEventID is found by the same
+// reversal-origin relationship establishment relies on (the anchor's
+// own pivot_time, the matching sweep side); this query is safe at this
+// point in the walk for the same reason LatestSwingBefore's retraction
+// fallback is: the anchor's pivot_time is strictly earlier than the
+// candle being processed, so the walk has already reconciled it.
+func (e *Engine) decideSweepValidation(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, state *StateSnapshot, newDirection Direction) (validated bool, sweepEventID, protectedSwingID *int64, err error) {
+	var anchorID *int64
+	sweepSide := SweepLow
+	switch newDirection {
+	case DirectionBullish:
+		anchorID = state.ProtectedLowSwingID
+	case DirectionBearish:
+		anchorID = state.ProtectedHighSwingID
+		sweepSide = SweepHigh
+	default: // DirectionUndetermined: establishment, never sweep-validated
+		return false, nil, nil, nil
+	}
+	if anchorID == nil {
+		return false, nil, nil, nil
+	}
+
+	anchor, err := txStore.GetSwingByID(ctx, *anchorID)
+	if err != nil {
+		return false, nil, nil, err
+	}
+	sweep, err := txStore.GetCurrentSweepByTrigger(ctx, instrumentID, timeframe, anchor.PivotTime.Time(), sweepSide)
+	switch {
+	case errors.Is(err, ErrSweepNotFound):
+		return false, nil, nil, nil
+	case err != nil:
+		return false, nil, nil, err
+	}
+	sweepID, swingID := sweep.ID, anchor.ID
+	return true, &sweepID, &swingID, nil
+}
+
+// invalidateProtectedAnchor clears exactly one of state's two
+// independent anchor slots -- whichever side supported the direction a
+// CHOCH just flipped away from (spec section 7, v0.4: a bullish-to-
+// bearish CHOCH clears the protected low, a bearish-to-bullish CHOCH
+// clears the protected high; never the side the break's own result
+// validates against). fromDirection is the CHOCH's DirectionBefore --
+// deliberately not DirectionAfter, which is the side decideSweepValidation
+// just checked for this same event: the two are different slots by
+// construction (a CHOCH always changes direction), so there is no
+// ordering conflict between validating and invalidating in the same step.
+func invalidateProtectedAnchor(state *StateSnapshot, fromDirection Direction) {
+	switch fromDirection {
+	case DirectionBullish:
+		state.ProtectedLowSwingID = nil
+	case DirectionBearish:
+		state.ProtectedHighSwingID = nil
 	}
 }
 
@@ -291,24 +504,44 @@ func (e *Engine) applyBreakStep(ctx context.Context, txStore *Store, instrumentI
 		}
 		newDirection, eventType, ok := decideBreak(state.Direction, int64(high.Price), int64(low.Price), c.Close)
 		if ok {
-			// Spec section 3: BOS references the swing in the trend's
-			// own direction; CHOCH references the swing against it.
-			var refs []int64
+			// Spec section 3 (batch 1, unchanged by Reading B): BOS
+			// references the swing in the trend's own direction; CHOCH
+			// references the swing against it. This is the break
+			// target, never the sweep-validation input -- section 7's
+			// whole point is that those are generally different levels.
+			var refID int64
 			switch {
 			case state.Direction == DirectionBullish && eventType == EventBOS:
-				refs = []int64{high.ID} // bullish continuation: references the high it broke above
+				refID = high.ID // bullish continuation: references the high it broke above
 			case state.Direction == DirectionBullish && eventType == EventCHOCH:
-				refs = []int64{low.ID} // bullish->bearish flip: references the low it broke below
+				refID = low.ID // bullish->bearish flip: references the low it broke below
 			case state.Direction == DirectionBearish && eventType == EventBOS:
-				refs = []int64{low.ID} // bearish continuation: references the low it broke below
+				refID = low.ID // bearish continuation: references the low it broke below
 			default: // DirectionBearish && EventCHOCH
-				refs = []int64{high.ID} // bearish->bullish flip: references the high it broke above
+				refID = high.ID // bearish->bullish flip: references the high it broke above
+			}
+
+			// Reading B (spec section 7): validated iff a valid anchor
+			// exists on the side OPPOSITE this break's own result --
+			// never derived from refID above.
+			validated, sweepEventID, protectedSwingID, err := e.decideSweepValidation(ctx, txStore, instrumentID, timeframe, state, newDirection)
+			if err != nil {
+				return err
 			}
 			candidate = &NewStructureEvent{
 				InstrumentID: instrumentID, Timeframe: timeframe, Type: eventType,
 				DirectionBefore: state.Direction, DirectionAfter: newDirection,
-				TriggerCandleID: c.ID, ReferenceSwingIDs: refs,
+				TriggerCandleID: c.ID, ReferenceSwingIDs: []int64{refID},
 				EvaluationTime: clock.NewEvaluationTime(now), AlgorithmVersion: e.cfg.AlgorithmVersion,
+				SweepValidated: validated, SweepEventID: sweepEventID, ProtectedSwingID: protectedSwingID,
+			}
+
+			// Invalidation: only a CHOCH ends an anchor's eligibility,
+			// clearing whichever side supported the regime just left
+			// (DirectionBefore, i.e. state.Direction here -- state has
+			// not been updated yet in this function).
+			if eventType == EventCHOCH {
+				invalidateProtectedAnchor(state, state.Direction)
 			}
 		}
 	}
@@ -481,5 +714,57 @@ func (e *Engine) reconstructStateAsOf(ctx context.Context, instrumentID int64, t
 		return StateSnapshot{}, err
 	}
 
+	protectedLowID, err := e.reconstructProtectedAnchorAsOf(ctx, instrumentID, timeframe, SwingLow, SweepLow, DirectionBullish, asOf)
+	if err != nil {
+		return StateSnapshot{}, err
+	}
+	snap.ProtectedLowSwingID = protectedLowID
+
+	protectedHighID, err := e.reconstructProtectedAnchorAsOf(ctx, instrumentID, timeframe, SwingHigh, SweepHigh, DirectionBearish, asOf)
+	if err != nil {
+		return StateSnapshot{}, err
+	}
+	snap.ProtectedHighSwingID = protectedHighID
+
 	return snap, nil
+}
+
+// reconstructProtectedAnchorAsOf rebuilds ONE of structure_state's two
+// independent protected-anchor slots as it stood immediately before
+// asOf (spec section 7, v0.4) -- the subtle part of the correction
+// path, since an anchor is not simply "the latest confirmed swing of
+// some type" the way a reference swing is. The two sides are
+// reconstructed by two independent calls (see reconstructStateAsOf);
+// this function never looks at the other side's data.
+//
+//  1. Find the latest qualifying candidate on this side: a confirmed
+//     swing, confirmed_at <= asOf (the same lag-aware bound as the
+//     reference-swing lookups, for the same reason), whose own
+//     pivot_time has a current sweep of the matching side.
+//  2. That candidate survived to asOf unless a CHOCH flipping away from
+//     supports (the direction this side's anchor validates) occurred
+//     strictly after its own confirmed_at and strictly before asOf. If
+//     one did, this slot was cleared there and nothing on THIS side has
+//     re-established since -- otherwise that later establishment would
+//     itself have been the latest candidate found in step 1, a
+//     contradiction.
+func (e *Engine) reconstructProtectedAnchorAsOf(ctx context.Context, instrumentID int64, timeframe string, swingType SwingType, sweepSide SweepSide, supports Direction, asOf time.Time) (*int64, error) {
+	candidate, err := e.store.LatestQualifyingProtectedAnchorBefore(ctx, instrumentID, timeframe, swingType, sweepSide, asOf)
+	if errors.Is(err, ErrSwingNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	invalidated, err := e.store.LatestInvalidatingChochBefore(ctx, instrumentID, timeframe, supports, candidate.ConfirmedAt.Time(), asOf)
+	if err != nil {
+		return nil, err
+	}
+	if invalidated {
+		return nil, nil
+	}
+
+	id := candidate.ID
+	return &id, nil
 }

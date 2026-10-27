@@ -583,9 +583,12 @@ func getEventByID(ctx context.Context, db *sql.DB, id int64) (StructureEvent, er
 		Timeframe, EventType, DirectionBefore, DirectionAfter, AlgorithmVersion string
 		SupersededAt                                                            sql.NullTime
 		SupersededBy                                                            sql.NullInt64
+		SweepValidated                                                          bool
+		SweepEventID                                                            sql.NullInt64
+		ProtectedSwingID                                                        sql.NullInt64
 	}
-	err := db.QueryRowContext(ctx, `SELECT id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, algorithm_version, superseded_at, superseded_by FROM structure_events WHERE id = $1`, id).
-		Scan(&row.ID, &row.InstrumentID, &row.Timeframe, &row.EventType, &row.DirectionBefore, &row.DirectionAfter, &row.TriggerCandleID, &row.AlgorithmVersion, &row.SupersededAt, &row.SupersededBy)
+	err := db.QueryRowContext(ctx, `SELECT id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, algorithm_version, superseded_at, superseded_by, sweep_validated, sweep_event_id, protected_swing_id FROM structure_events WHERE id = $1`, id).
+		Scan(&row.ID, &row.InstrumentID, &row.Timeframe, &row.EventType, &row.DirectionBefore, &row.DirectionAfter, &row.TriggerCandleID, &row.AlgorithmVersion, &row.SupersededAt, &row.SupersededBy, &row.SweepValidated, &row.SweepEventID, &row.ProtectedSwingID)
 	if err != nil {
 		return StructureEvent{}, err
 	}
@@ -605,6 +608,7 @@ func getEventByID(ctx context.Context, db *sql.DB, id int64) (StructureEvent, er
 		ID: row.ID, InstrumentID: row.InstrumentID, Timeframe: row.Timeframe,
 		Type: eventType, DirectionBefore: before, DirectionAfter: after,
 		TriggerCandleID: row.TriggerCandleID, AlgorithmVersion: row.AlgorithmVersion,
+		SweepValidated: row.SweepValidated,
 	}
 	if row.SupersededAt.Valid {
 		pt := clock.NewProcessingTime(row.SupersededAt.Time)
@@ -613,6 +617,14 @@ func getEventByID(ctx context.Context, db *sql.DB, id int64) (StructureEvent, er
 	if row.SupersededBy.Valid {
 		supID := row.SupersededBy.Int64
 		ev.SupersededBy = &supID
+	}
+	if row.SweepEventID.Valid {
+		sid := row.SweepEventID.Int64
+		ev.SweepEventID = &sid
+	}
+	if row.ProtectedSwingID.Valid {
+		pid := row.ProtectedSwingID.Int64
+		ev.ProtectedSwingID = &pid
 	}
 	return ev, nil
 }

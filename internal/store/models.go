@@ -94,6 +94,23 @@ type LatestQuote struct {
 	Provider     string    `json:"provider"`
 }
 
+type LiquiditySweep struct {
+	ID                 int64         `json:"id"`
+	InstrumentID       int64         `json:"instrument_id"`
+	Timeframe          string        `json:"timeframe"`
+	Side               string        `json:"side"`
+	SweptSwingID       int64         `json:"swept_swing_id"`
+	TriggerOpenTime    time.Time     `json:"trigger_open_time"`
+	TriggerCandleID    int64         `json:"trigger_candle_id"`
+	PenetrationExtreme int64         `json:"penetration_extreme"`
+	ReclaimClose       int64         `json:"reclaim_close"`
+	EvaluationTime     time.Time     `json:"evaluation_time"`
+	AlgorithmVersion   string        `json:"algorithm_version"`
+	SupersededAt       sql.NullTime  `json:"superseded_at"`
+	SupersededBy       sql.NullInt64 `json:"superseded_by"`
+	CreatedAt          time.Time     `json:"created_at"`
+}
+
 type StructureEvent struct {
 	ID                int64         `json:"id"`
 	InstrumentID      int64         `json:"instrument_id"`
@@ -108,6 +125,9 @@ type StructureEvent struct {
 	SupersededAt      sql.NullTime  `json:"superseded_at"`
 	SupersededBy      sql.NullInt64 `json:"superseded_by"`
 	CreatedAt         time.Time     `json:"created_at"`
+	SweepValidated    bool          `json:"sweep_validated"`
+	SweepEventID      sql.NullInt64 `json:"sweep_event_id"`
+	ProtectedSwingID  sql.NullInt64 `json:"protected_swing_id"`
 }
 
 type StructureState struct {
@@ -119,4 +139,6 @@ type StructureState struct {
 	LastEventID           sql.NullInt64 `json:"last_event_id"`
 	LastProcessedCandleID sql.NullInt64 `json:"last_processed_candle_id"`
 	UpdatedAt             time.Time     `json:"updated_at"`
+	ProtectedLowSwingID   sql.NullInt64 `json:"protected_low_swing_id"`
+	ProtectedHighSwingID  sql.NullInt64 `json:"protected_high_swing_id"`
 }

@@ -112,6 +112,45 @@ func parseEventType(s string) (EventType, error) {
 	}
 }
 
+// SweepSide names a liquidity sweep by the level it takes, not by the
+// trade direction it sets up (spec section 6 glossary -- fixed for the
+// whole spec specifically so the two namings never drift). SweepLow
+// takes a swing low (low < level, close > level reclaims) and stores
+// as "sell" side (sell-side liquidity rests below swing lows).
+// SweepHigh takes a swing high (high > level, close < level reclaims)
+// and stores as "buy" side (buy-side liquidity rests above swing
+// highs). This is the inverse of what the names might suggest at a
+// glance -- that inversion, in the other direction, is exactly the bug
+// this naming is designed to make impossible to repeat: naming the
+// constant after the level taken means call sites never need to
+// remember the buy/sell mapping at all.
+type SweepSide int
+
+const (
+	// SweepLow takes a swing low; stores as sell-side.
+	SweepLow SweepSide = iota
+	// SweepHigh takes a swing high; stores as buy-side.
+	SweepHigh
+)
+
+func (s SweepSide) String() string {
+	if s == SweepHigh {
+		return "buy"
+	}
+	return "sell"
+}
+
+func parseSweepSide(s string) (SweepSide, error) {
+	switch s {
+	case "sell":
+		return SweepLow, nil
+	case "buy":
+		return SweepHigh, nil
+	default:
+		return 0, fmt.Errorf("analysis: unknown sweep side %q", s)
+	}
+}
+
 // Config captures this algorithm version's configurable parameters
 // (ADR-009: "swing detection parameters... must be explicitly defined").
 // The spec fixes LeftBars = RightBars = 2 for v0.1; a later algorithm

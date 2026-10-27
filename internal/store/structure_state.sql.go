@@ -12,7 +12,7 @@ import (
 )
 
 const getStructureState = `-- name: GetStructureState :one
-SELECT instrument_id, timeframe, direction, reference_swing_high_id, reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at FROM structure_state WHERE instrument_id = $1 AND timeframe = $2
+SELECT instrument_id, timeframe, direction, reference_swing_high_id, reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at, protected_low_swing_id, protected_high_swing_id FROM structure_state WHERE instrument_id = $1 AND timeframe = $2
 `
 
 type GetStructureStateParams struct {
@@ -32,6 +32,8 @@ func (q *Queries) GetStructureState(ctx context.Context, arg GetStructureStatePa
 		&i.LastEventID,
 		&i.LastProcessedCandleID,
 		&i.UpdatedAt,
+		&i.ProtectedLowSwingID,
+		&i.ProtectedHighSwingID,
 	)
 	return i, err
 }
@@ -39,17 +41,20 @@ func (q *Queries) GetStructureState(ctx context.Context, arg GetStructureStatePa
 const setStructureState = `-- name: SetStructureState :one
 INSERT INTO structure_state (
     instrument_id, timeframe, direction, reference_swing_high_id,
-    reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at
+    reference_swing_low_id, last_event_id, last_processed_candle_id,
+    protected_low_swing_id, protected_high_swing_id, updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (instrument_id, timeframe) DO UPDATE SET
     direction = EXCLUDED.direction,
     reference_swing_high_id = EXCLUDED.reference_swing_high_id,
     reference_swing_low_id = EXCLUDED.reference_swing_low_id,
     last_event_id = EXCLUDED.last_event_id,
     last_processed_candle_id = EXCLUDED.last_processed_candle_id,
+    protected_low_swing_id = EXCLUDED.protected_low_swing_id,
+    protected_high_swing_id = EXCLUDED.protected_high_swing_id,
     updated_at = EXCLUDED.updated_at
-RETURNING instrument_id, timeframe, direction, reference_swing_high_id, reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at
+RETURNING instrument_id, timeframe, direction, reference_swing_high_id, reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at, protected_low_swing_id, protected_high_swing_id
 `
 
 type SetStructureStateParams struct {
@@ -60,6 +65,8 @@ type SetStructureStateParams struct {
 	ReferenceSwingLowID   sql.NullInt64 `json:"reference_swing_low_id"`
 	LastEventID           sql.NullInt64 `json:"last_event_id"`
 	LastProcessedCandleID sql.NullInt64 `json:"last_processed_candle_id"`
+	ProtectedLowSwingID   sql.NullInt64 `json:"protected_low_swing_id"`
+	ProtectedHighSwingID  sql.NullInt64 `json:"protected_high_swing_id"`
 	UpdatedAt             time.Time     `json:"updated_at"`
 }
 
@@ -76,6 +83,8 @@ func (q *Queries) SetStructureState(ctx context.Context, arg SetStructureStatePa
 		arg.ReferenceSwingLowID,
 		arg.LastEventID,
 		arg.LastProcessedCandleID,
+		arg.ProtectedLowSwingID,
+		arg.ProtectedHighSwingID,
 		arg.UpdatedAt,
 	)
 	var i StructureState
@@ -88,6 +97,8 @@ func (q *Queries) SetStructureState(ctx context.Context, arg SetStructureStatePa
 		&i.LastEventID,
 		&i.LastProcessedCandleID,
 		&i.UpdatedAt,
+		&i.ProtectedLowSwingID,
+		&i.ProtectedHighSwingID,
 	)
 	return i, err
 }
