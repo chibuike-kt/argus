@@ -9,7 +9,7 @@ SELECT * FROM structure_state WHERE instrument_id = $1 AND timeframe = $2;
 INSERT INTO structure_state (
     instrument_id, timeframe, direction, reference_swing_high_id,
     reference_swing_low_id, last_event_id, last_processed_candle_id,
-    protected_swing_id, protected_swing_side, updated_at
+    protected_low_swing_id, protected_high_swing_id, updated_at
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (instrument_id, timeframe) DO UPDATE SET
@@ -18,7 +18,7 @@ ON CONFLICT (instrument_id, timeframe) DO UPDATE SET
     reference_swing_low_id = EXCLUDED.reference_swing_low_id,
     last_event_id = EXCLUDED.last_event_id,
     last_processed_candle_id = EXCLUDED.last_processed_candle_id,
-    protected_swing_id = EXCLUDED.protected_swing_id,
-    protected_swing_side = EXCLUDED.protected_swing_side,
+    protected_low_swing_id = EXCLUDED.protected_low_swing_id,
+    protected_high_swing_id = EXCLUDED.protected_high_swing_id,
     updated_at = EXCLUDED.updated_at
 RETURNING *;

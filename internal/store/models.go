@@ -131,14 +131,14 @@ type StructureEvent struct {
 }
 
 type StructureState struct {
-	InstrumentID          int64          `json:"instrument_id"`
-	Timeframe             string         `json:"timeframe"`
-	Direction             string         `json:"direction"`
-	ReferenceSwingHighID  sql.NullInt64  `json:"reference_swing_high_id"`
-	ReferenceSwingLowID   sql.NullInt64  `json:"reference_swing_low_id"`
-	LastEventID           sql.NullInt64  `json:"last_event_id"`
-	LastProcessedCandleID sql.NullInt64  `json:"last_processed_candle_id"`
-	UpdatedAt             time.Time      `json:"updated_at"`
-	ProtectedSwingID      sql.NullInt64  `json:"protected_swing_id"`
-	ProtectedSwingSide    sql.NullString `json:"protected_swing_side"`
+	InstrumentID          int64         `json:"instrument_id"`
+	Timeframe             string        `json:"timeframe"`
+	Direction             string        `json:"direction"`
+	ReferenceSwingHighID  sql.NullInt64 `json:"reference_swing_high_id"`
+	ReferenceSwingLowID   sql.NullInt64 `json:"reference_swing_low_id"`
+	LastEventID           sql.NullInt64 `json:"last_event_id"`
+	LastProcessedCandleID sql.NullInt64 `json:"last_processed_candle_id"`
+	UpdatedAt             time.Time     `json:"updated_at"`
+	ProtectedLowSwingID   sql.NullInt64 `json:"protected_low_swing_id"`
+	ProtectedHighSwingID  sql.NullInt64 `json:"protected_high_swing_id"`
 }

@@ -71,18 +71,6 @@ func TestSweepSide_GlossaryMapping(t *testing.T) {
 	}
 }
 
-func TestProtectedSwingSide_StringParseRoundTrip(t *testing.T) {
-	for _, s := range []ProtectedSwingSide{ProtectedLow, ProtectedHigh} {
-		got, err := parseProtectedSwingSide(s.String())
-		if err != nil || got != s {
-			t.Fatalf("round trip %v -> %q -> %v, %v", s, s.String(), got, err)
-		}
-	}
-	if _, err := parseProtectedSwingSide("garbage"); err == nil {
-		t.Fatal("parseProtectedSwingSide(garbage) = nil error, want an error")
-	}
-}
-
 func TestConfig_Validate(t *testing.T) {
 	valid := Config{AlgorithmVersion: "v1", LeftBars: 2, RightBars: 2, Interval: time.Minute}
 	if err := valid.Validate(); err != nil {

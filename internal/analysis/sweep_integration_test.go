@@ -344,6 +344,86 @@ func TestIntegration_BOS_NotSweepValidated_DirectionStillUpdates(t *testing.T) {
 	}
 }
 
+// TestIntegration_ProtectedAnchors_Coexist is v0.4's defining fixture:
+// a buy-side sweep's reversal-origin high confirms WHILE the trend is
+// still bullish -- establishing a protected high -- and the EXISTING
+// protected low must survive completely untouched. A single shared
+// slot (v0.3's design) fails this: establishing the high would
+// overwrite the low, and the later bullish BOS below would come back
+// unvalidated. Two independent slots do not.
+func TestIntegration_ProtectedAnchors_Coexist(t *testing.T) {
+	db := testDB(t)
+	instrumentID := testInstrument(t, db)
+	e := newTestEngine(t, db)
+	store := NewStore(db)
+
+	seedBullishEstablished(t, store, instrumentID)
+
+	feedCloseCandles(t, db, instrumentID, []closeBar{
+		{18, 130, 92, 100},
+		{19, 128, 91, 101},
+		{20, 100, 70, 95}, // sell-side sweep + protected low (70)
+		{21, 128, 93, 102},
+		{22, 126, 94, 103},
+		// Still bullish (no break has happened yet). A buy-side sweep of
+		// H1 (125) whose reversal-origin (140) is ALSO an isolated
+		// fractal high: establishes a protected high mid-trend.
+		{26, 100, 92, 96},
+		{27, 100, 93, 97},
+		{28, 140, 118, 120}, // sweep: high 140 > 125, close 120 < 125
+		{29, 100, 94, 98},
+		{30, 100, 95, 99},
+		// A later bullish continuation BOS, above the new reference
+		// high (140, confirmed at minute 28).
+		{35, 148, 138, 145},
+	})
+
+	if err := e.EvaluateRange(context.Background(), instrumentID, "1m", et(18), et(36)); err != nil {
+		t.Fatalf("EvaluateRange: %v", err)
+	}
+
+	protectedLow, err := store.GetCurrentSwing(context.Background(), instrumentID, "1m", SwingLow, clock.NewEventTime(et(20)))
+	if err != nil {
+		t.Fatalf("GetCurrentSwing (protected low): %v", err)
+	}
+	protectedHigh, err := store.GetCurrentSwing(context.Background(), instrumentID, "1m", SwingHigh, clock.NewEventTime(et(28)))
+	if err != nil {
+		t.Fatalf("GetCurrentSwing (protected high): %v", err)
+	}
+	if protectedHigh.Price != 140 {
+		t.Fatalf("protected high price = %v, want 140", protectedHigh.Price)
+	}
+
+	// Both anchors must be live at once.
+	state, err := store.GetState(context.Background(), instrumentID, "1m")
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	if state.ProtectedLowSwingID == nil || *state.ProtectedLowSwingID != protectedLow.ID {
+		t.Fatalf("state.ProtectedLowSwingID = %v, want %d: establishing the protected high must not disturb the protected low", state.ProtectedLowSwingID, protectedLow.ID)
+	}
+	if state.ProtectedHighSwingID == nil || *state.ProtectedHighSwingID != protectedHigh.ID {
+		t.Fatalf("state.ProtectedHighSwingID = %v, want %d", state.ProtectedHighSwingID, protectedHigh.ID)
+	}
+
+	// The later bullish BOS still validates against the untouched
+	// protected low -- not the protected high that just formed on the
+	// opposite side.
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 35))
+	if err != nil {
+		t.Fatalf("GetCurrentEvent at minute 35: %v", err)
+	}
+	if event.Type != EventBOS || event.DirectionAfter != DirectionBullish {
+		t.Fatalf("event = %+v, want BOS, stays Bullish", event)
+	}
+	if !event.SweepValidated {
+		t.Fatal("event.SweepValidated = false, want true: the protected low must still be live and validate this bullish break")
+	}
+	if event.ProtectedSwingID == nil || *event.ProtectedSwingID != protectedLow.ID {
+		t.Fatalf("event.ProtectedSwingID = %v, want %d (the protected LOW, not the protected high that formed mid-trend)", event.ProtectedSwingID, protectedLow.ID)
+	}
+}
+
 // TestIntegration_ProtectedAnchor_PersistsAcrossTrend proves the anchor
 // is a designated anchor, not "the latest confirmed opposing swing":
 // a LATER same-direction BOS, built from a brand-new, higher swing high
@@ -463,11 +543,8 @@ func TestIntegration_ProtectedAnchor_SupersessionGuardrail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetState: %v", err)
 	}
-	if state.ProtectedSwingID == nil || *state.ProtectedSwingID != original.ID {
-		t.Fatalf("state.ProtectedSwingID = %v, want %d (the ORIGINAL anchor from minute 20, untouched by the incidental, non-confirming sweep at 25)", state.ProtectedSwingID, original.ID)
-	}
-	if state.ProtectedSwingSide == nil || *state.ProtectedSwingSide != ProtectedLow {
-		t.Fatalf("state.ProtectedSwingSide = %v, want ProtectedLow", state.ProtectedSwingSide)
+	if state.ProtectedLowSwingID == nil || *state.ProtectedLowSwingID != original.ID {
+		t.Fatalf("state.ProtectedLowSwingID = %v, want %d (the ORIGINAL anchor from minute 20, untouched by the incidental, non-confirming sweep at 25)", state.ProtectedLowSwingID, original.ID)
 	}
 }
 
@@ -508,8 +585,8 @@ func TestIntegration_ProtectedAnchor_InvalidatedByCloseThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetState: %v", err)
 	}
-	if state.ProtectedSwingID != nil || state.ProtectedSwingSide != nil {
-		t.Fatalf("state protected anchor = (id=%v, side=%v), want (nil, nil): invalidation must end the anchor's eligibility", state.ProtectedSwingID, state.ProtectedSwingSide)
+	if state.ProtectedLowSwingID != nil {
+		t.Fatalf("state.ProtectedLowSwingID = %v, want nil: invalidation must end the anchor's eligibility", state.ProtectedLowSwingID)
 	}
 }
 
@@ -548,8 +625,8 @@ func TestIntegration_ProtectedAnchor_RequiresFractalConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetState: %v", err)
 	}
-	if state.ProtectedSwingID != nil {
-		t.Fatalf("state.ProtectedSwingID = %v, want nil: a raw sweep extreme that never confirms must never become a protected anchor", state.ProtectedSwingID)
+	if state.ProtectedLowSwingID != nil {
+		t.Fatalf("state.ProtectedLowSwingID = %v, want nil: a raw sweep extreme that never confirms must never become a protected anchor", state.ProtectedLowSwingID)
 	}
 }
 

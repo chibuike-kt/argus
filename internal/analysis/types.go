@@ -151,43 +151,6 @@ func parseSweepSide(s string) (SweepSide, error) {
 	}
 }
 
-// ProtectedSwingSide distinguishes which side of structure_state's
-// single protected-anchor slot is occupied (spec section 7). Kept as
-// its own type, distinct from SwingType, even though the two are
-// isomorphic (a protected low is always a SwingLow) -- the anchor's
-// side is a different concept from a swing's own type, and conflating
-// them would make it easy to accidentally overload one field with
-// identity, side, and validation status, which the schema deliberately
-// keeps separate.
-type ProtectedSwingSide int
-
-const (
-	// ProtectedLow is the anchor a sell-side sweep's reversal-origin
-	// low establishes; it validates bullish breaks.
-	ProtectedLow ProtectedSwingSide = iota
-	// ProtectedHigh is the anchor a buy-side sweep's reversal-origin
-	// high establishes; it validates bearish breaks.
-	ProtectedHigh
-)
-
-func (s ProtectedSwingSide) String() string {
-	if s == ProtectedHigh {
-		return "high"
-	}
-	return "low"
-}
-
-func parseProtectedSwingSide(s string) (ProtectedSwingSide, error) {
-	switch s {
-	case "low":
-		return ProtectedLow, nil
-	case "high":
-		return ProtectedHigh, nil
-	default:
-		return 0, fmt.Errorf("analysis: unknown protected swing side %q", s)
-	}
-}
-
 // Config captures this algorithm version's configurable parameters
 // (ADR-009: "swing detection parameters... must be explicitly defined").
 // The spec fixes LeftBars = RightBars = 2 for v0.1; a later algorithm

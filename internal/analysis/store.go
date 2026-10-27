@@ -457,8 +457,8 @@ func (s *Store) SetState(ctx context.Context, snap StateSnapshot, now time.Time)
 		ReferenceSwingLowID:   ptrToNullInt64(snap.ReferenceSwingLowID),
 		LastEventID:           ptrToNullInt64(snap.LastEventID),
 		LastProcessedCandleID: ptrToNullInt64(snap.LastProcessedCandleID),
-		ProtectedSwingID:      ptrToNullInt64(snap.ProtectedSwingID),
-		ProtectedSwingSide:    protectedSideToNullString(snap.ProtectedSwingSide),
+		ProtectedLowSwingID:   ptrToNullInt64(snap.ProtectedLowSwingID),
+		ProtectedHighSwingID:  ptrToNullInt64(snap.ProtectedHighSwingID),
 		UpdatedAt:             now,
 	})
 	if err != nil {

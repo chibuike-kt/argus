@@ -110,23 +110,23 @@ CREATE TRIGGER trg_liquidity_sweeps_enforce_lifecycle
     FOR EACH ROW
     EXECUTE FUNCTION liquidity_sweeps_enforce_lifecycle();
 
--- structure_state: add the protected anchor. Kept as two distinct
--- columns (identity + side), deliberately not folded into the batch-1
--- reference-swing fields: a protected anchor is a different concept
--- from "the latest confirmed swing of this type" (reference_swing_high_
--- id/reference_swing_low_id) -- it persists across newer swings until
--- explicitly invalidated or superseded (spec section 7), and conflating
--- identity, side, and validity into one field would make that lifecycle
--- unreadable. NULL/NULL means no anchor currently protected.
+-- structure_state: add the two protected anchors (spec section 7, v0.4:
+-- "the engine maintains at most one current protected low and at most
+-- one current protected high, at the same time and fully
+-- independently"). Two separate nullable columns, not one slot with a
+-- side discriminator -- both sides' liquidity can be live
+-- simultaneously (a buy-side sweep's reversal-origin high can confirm
+-- mid-bullish-trend without disturbing an already-live protected low),
+-- so a single shared slot cannot represent the real state. The column
+-- name itself carries the side, so no separate side column is needed.
+-- Deliberately not folded into the batch-1 reference-swing fields: a
+-- protected anchor is a different concept from "the latest confirmed
+-- swing of this type" -- it persists across newer swings until
+-- explicitly invalidated or superseded. NULL means no anchor currently
+-- protected on that side.
 ALTER TABLE structure_state
-    ADD COLUMN protected_swing_id   BIGINT REFERENCES confirmed_swings(id),
-    ADD COLUMN protected_swing_side TEXT   CHECK (protected_swing_side IN ('low', 'high'));
-
-ALTER TABLE structure_state
-    ADD CONSTRAINT structure_state_protected_anchor_consistency CHECK (
-        (protected_swing_id IS NULL AND protected_swing_side IS NULL)
-        OR (protected_swing_id IS NOT NULL AND protected_swing_side IS NOT NULL)
-    );
+    ADD COLUMN protected_low_swing_id  BIGINT REFERENCES confirmed_swings(id),
+    ADD COLUMN protected_high_swing_id BIGINT REFERENCES confirmed_swings(id);
 
 -- structure_events: the sweep-validation tag (spec section 7). It is
 -- evidence like every other column here, not a derived/computed value
