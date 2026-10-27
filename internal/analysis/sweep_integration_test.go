@@ -169,7 +169,7 @@ func TestIntegration_SweepValidatedBOS_Bullish_OppositeSideDifferentLevel(t *tes
 		t.Fatalf("protected low price = %v, want 70", protected.Price)
 	}
 
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 25))
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 25: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestIntegration_SweepValidatedBOS_Bearish_OppositeSideDifferentLevel(t *tes
 		t.Fatalf("protected high price = %v, want 150", protected.Price)
 	}
 
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 25))
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 25: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestIntegration_SweepValidation_ExplicitNegative_SameSwingIsNotEnough(t *te
 		t.Fatalf("EvaluateRange (stage 2): %v", err)
 	}
 
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 25))
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 25: %v", err)
 	}
@@ -325,13 +325,14 @@ func TestIntegration_BOS_NotSweepValidated_DirectionStillUpdates(t *testing.T) {
 	store := NewStore(db)
 
 	seedBullishEstablished(t, store, instrumentID)
+	// A clean breakout with no sweep anywhere near either reference level.
 	feedCloseCandles(t, db, instrumentID, []closeBar{{30, 135, 120, 130}})
 
 	if err := e.EvaluateRange(context.Background(), instrumentID, "1m", et(30), et(31)); err != nil {
 		t.Fatalf("EvaluateRange: %v", err)
 	}
 
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 30))
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(30))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent: %v", err)
 	}
@@ -409,7 +410,7 @@ func TestIntegration_ProtectedAnchors_Coexist(t *testing.T) {
 	// The later bullish BOS still validates against the untouched
 	// protected low -- not the protected high that just formed on the
 	// opposite side.
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 35))
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(35))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 35: %v", err)
 	}
@@ -469,11 +470,11 @@ func TestIntegration_ProtectedAnchor_PersistsAcrossTrend(t *testing.T) {
 		t.Fatalf("new high price = %v, want 140", newHigh.Price)
 	}
 
-	bos1, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 25))
+	bos1, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent (BOS #1): %v", err)
 	}
-	bos2, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 35))
+	bos2, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(35))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent (BOS #2): %v", err)
 	}
@@ -573,7 +574,7 @@ func TestIntegration_ProtectedAnchor_InvalidatedByCloseThrough(t *testing.T) {
 		t.Fatalf("EvaluateRange: %v", err)
 	}
 
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 25))
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 25: %v", err)
 	}
@@ -643,7 +644,7 @@ func TestIntegration_CorrectionRecompute_SweepAnchorAndDependentTag_PreservesPri
 	establishEvent, err := store.InsertEvent(context.Background(), NewStructureEvent{
 		InstrumentID: instrumentID, Timeframe: "1m", Type: EventDirectionEstablished,
 		DirectionBefore: DirectionUndetermined, DirectionAfter: DirectionBullish,
-		TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{h1.ID, h1.ID, l1.ID, l1.ID},
+		TriggerOpenTime: et(1), TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{h1.ID, h1.ID, l1.ID, l1.ID},
 		EvaluationTime: clockEvalTime(1), AlgorithmVersion: testAlgorithmVersion,
 	})
 	if err != nil {
@@ -669,7 +670,7 @@ func TestIntegration_CorrectionRecompute_SweepAnchorAndDependentTag_PreservesPri
 		t.Fatalf("initial EvaluateRange: %v", err)
 	}
 
-	oldEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 25))
+	oldEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("precondition GetCurrentEvent: %v", err)
 	}
@@ -707,7 +708,7 @@ func TestIntegration_CorrectionRecompute_SweepAnchorAndDependentTag_PreservesPri
 		t.Fatalf("preserved old event = %+v, want SweepValidated=true (unchanged) and superseded with a replacement", preserved)
 	}
 
-	newEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 25))
+	newEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent after correction: %v", err)
 	}
@@ -745,7 +746,7 @@ func TestIntegration_CorrectionReplay_ReconstructsProtectedAnchorAsOf(t *testing
 	establishEvent, err := store.InsertEvent(context.Background(), NewStructureEvent{
 		InstrumentID: instrumentID, Timeframe: "1m", Type: EventDirectionEstablished,
 		DirectionBefore: DirectionUndetermined, DirectionAfter: DirectionBullish,
-		TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{h1.ID, h1.ID, l1.ID, l1.ID},
+		TriggerOpenTime: et(1), TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{h1.ID, h1.ID, l1.ID, l1.ID},
 		EvaluationTime: clockEvalTime(1), AlgorithmVersion: testAlgorithmVersion,
 	})
 	if err != nil {
@@ -788,7 +789,7 @@ func TestIntegration_CorrectionReplay_ReconstructsProtectedAnchorAsOf(t *testing
 	if err != nil {
 		t.Fatalf("GetCurrentSwing (protected low): %v", err)
 	}
-	beforeEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 35))
+	beforeEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(35))
 	if err != nil {
 		t.Fatalf("precondition GetCurrentEvent: %v", err)
 	}
@@ -808,7 +809,7 @@ func TestIntegration_CorrectionReplay_ReconstructsProtectedAnchorAsOf(t *testing
 		t.Fatalf("HandleCandleCorrection: %v", err)
 	}
 
-	afterEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 35))
+	afterEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(35))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent after correction: %v", err)
 	}
