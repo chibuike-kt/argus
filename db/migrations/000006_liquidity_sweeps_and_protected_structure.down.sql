@@ -39,6 +39,10 @@ ALTER TABLE structure_events DROP COLUMN sweep_validated;
 ALTER TABLE structure_events DROP COLUMN sweep_event_id;
 ALTER TABLE structure_events DROP COLUMN protected_swing_id;
 
+ALTER TABLE structure_state DROP CONSTRAINT structure_state_protected_anchor_consistency;
+ALTER TABLE structure_state DROP COLUMN protected_swing_id;
+ALTER TABLE structure_state DROP COLUMN protected_swing_side;
+
 DROP TRIGGER IF EXISTS trg_liquidity_sweeps_enforce_lifecycle ON liquidity_sweeps;
 DROP FUNCTION IF EXISTS liquidity_sweeps_enforce_lifecycle();
 DROP TABLE IF EXISTS liquidity_sweeps;

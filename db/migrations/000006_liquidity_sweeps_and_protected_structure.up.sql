@@ -1,7 +1,17 @@
--- 000006_liquidity_sweeps_and_protected_structure: liquidity sweeps and
--- the sweep-validation tag on structure_events, per
--- docs/strategy/strategy-spec.md v0.2 sections 6-7 (ADR-009, ADR-011,
--- ADR-019).
+-- 000006_liquidity_sweeps_and_protected_structure: liquidity sweeps,
+-- the protected anchor (persistent state), and the sweep-validation
+-- tag on structure_events, per docs/strategy/strategy-spec.md v0.3
+-- "Reading B" sections 6-7 (ADR-009, ADR-011, ADR-019).
+--
+-- Reading B's key distinction from the discarded reading: a break is
+-- sweep-validated by a valid OPPOSING-side protected anchor that
+-- exists as of the break -- not by the broken swing itself having been
+-- swept. The sweep and the break it validates are generally different
+-- candles and different levels (section 7). The protected anchor is
+-- therefore its own piece of STATE (established at a sweep's reversal-
+-- origin swing confirmation, superseded only by a newer qualifying
+-- opposing-side sweep, invalidated only by a close through it), not
+-- something re-derived per break from position-matching.
 --
 -- liquidity_sweeps is append-only evidence with the exact same
 -- supersede-handshake discipline as 000005's confirmed_swings and
@@ -30,15 +40,19 @@ CREATE TABLE liquidity_sweeps (
     instrument_id        BIGINT      NOT NULL REFERENCES instruments(id),
     timeframe            TEXT        NOT NULL,
     side                 TEXT        NOT NULL CHECK (side IN ('buy', 'sell')),
-    -- buy-side sweeps a swing low; sell-side sweeps a swing high. Which
-    -- swing_type swept_swing_id must point at is an application-level
-    -- invariant (Engine never constructs the other combination), not a
-    -- single-table CHECK: validating it here would require a cross-table
-    -- lookup, which a CHECK constraint cannot express.
+    -- Glossary (spec section 6): the sweep is named for the liquidity
+    -- it takes, not the trade direction it sets up. Sell-side liquidity
+    -- rests below swing lows, so a sweep of a LOW is sell-side; buy-
+    -- side liquidity rests above swing highs, so a sweep of a HIGH is
+    -- buy-side. Which swing_type swept_swing_id must point at is an
+    -- application-level invariant (Engine never constructs the other
+    -- combination), not a single-table CHECK: validating it here would
+    -- require a cross-table lookup, which a CHECK constraint cannot
+    -- express.
     swept_swing_id       BIGINT      NOT NULL REFERENCES confirmed_swings(id),
     trigger_open_time    TIMESTAMPTZ NOT NULL,
     trigger_candle_id    BIGINT      NOT NULL REFERENCES candles(id),
-    penetration_extreme  BIGINT      NOT NULL, -- quant.Price: the low (buy) or high (sell) that penetrated
+    penetration_extreme  BIGINT      NOT NULL, -- quant.Price: the low (sell-side) or high (buy-side) that penetrated
     reclaim_close        BIGINT      NOT NULL, -- quant.Price: the same candle's close that reclaimed
     evaluation_time      TIMESTAMPTZ NOT NULL,
     algorithm_version    TEXT        NOT NULL,
@@ -96,11 +110,33 @@ CREATE TRIGGER trg_liquidity_sweeps_enforce_lifecycle
     FOR EACH ROW
     EXECUTE FUNCTION liquidity_sweeps_enforce_lifecycle();
 
+-- structure_state: add the protected anchor. Kept as two distinct
+-- columns (identity + side), deliberately not folded into the batch-1
+-- reference-swing fields: a protected anchor is a different concept
+-- from "the latest confirmed swing of this type" (reference_swing_high_
+-- id/reference_swing_low_id) -- it persists across newer swings until
+-- explicitly invalidated or superseded (spec section 7), and conflating
+-- identity, side, and validity into one field would make that lifecycle
+-- unreadable. NULL/NULL means no anchor currently protected.
+ALTER TABLE structure_state
+    ADD COLUMN protected_swing_id   BIGINT REFERENCES confirmed_swings(id),
+    ADD COLUMN protected_swing_side TEXT   CHECK (protected_swing_side IN ('low', 'high'));
+
+ALTER TABLE structure_state
+    ADD CONSTRAINT structure_state_protected_anchor_consistency CHECK (
+        (protected_swing_id IS NULL AND protected_swing_side IS NULL)
+        OR (protected_swing_id IS NOT NULL AND protected_swing_side IS NOT NULL)
+    );
+
 -- structure_events: the sweep-validation tag (spec section 7). It is
 -- evidence like every other column here, not a derived/computed value
 -- read lazily -- so it is immutable from insert and participates in the
 -- same correction recompute as the rest of the row, which is why it
 -- lives on structure_events itself rather than a side table.
+-- sweep_event_id is the SWEEP THAT ESTABLISHED the referenced protected
+-- anchor (not necessarily a sweep of the swing this break itself broke
+-- -- Reading B's whole point is that these are generally different
+-- levels); protected_swing_id is that anchor.
 ALTER TABLE structure_events
     ADD COLUMN sweep_validated    BOOLEAN NOT NULL DEFAULT false,
     ADD COLUMN sweep_event_id     BIGINT  REFERENCES liquidity_sweeps(id),

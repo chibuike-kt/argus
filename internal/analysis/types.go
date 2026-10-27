@@ -112,33 +112,79 @@ func parseEventType(s string) (EventType, error) {
 	}
 }
 
-// SweepSide distinguishes a buy-side liquidity sweep (takes a swing
-// low, then reclaims above it -- a bullish reversal signature) from a
-// sell-side sweep (the mirror, against a swing high; spec section 6).
+// SweepSide names a liquidity sweep by the level it takes, not by the
+// trade direction it sets up (spec section 6 glossary -- fixed for the
+// whole spec specifically so the two namings never drift). SweepLow
+// takes a swing low (low < level, close > level reclaims) and stores
+// as "sell" side (sell-side liquidity rests below swing lows).
+// SweepHigh takes a swing high (high > level, close < level reclaims)
+// and stores as "buy" side (buy-side liquidity rests above swing
+// highs). This is the inverse of what the names might suggest at a
+// glance -- that inversion, in the other direction, is exactly the bug
+// this naming is designed to make impossible to repeat: naming the
+// constant after the level taken means call sites never need to
+// remember the buy/sell mapping at all.
 type SweepSide int
 
 const (
-	// SweepBuy sweeps a swing low: low < level, close > level.
-	SweepBuy SweepSide = iota
-	// SweepSell sweeps a swing high: high > level, close < level.
-	SweepSell
+	// SweepLow takes a swing low; stores as sell-side.
+	SweepLow SweepSide = iota
+	// SweepHigh takes a swing high; stores as buy-side.
+	SweepHigh
 )
 
 func (s SweepSide) String() string {
-	if s == SweepSell {
-		return "sell"
+	if s == SweepHigh {
+		return "buy"
 	}
-	return "buy"
+	return "sell"
 }
 
 func parseSweepSide(s string) (SweepSide, error) {
 	switch s {
-	case "buy":
-		return SweepBuy, nil
 	case "sell":
-		return SweepSell, nil
+		return SweepLow, nil
+	case "buy":
+		return SweepHigh, nil
 	default:
 		return 0, fmt.Errorf("analysis: unknown sweep side %q", s)
+	}
+}
+
+// ProtectedSwingSide distinguishes which side of structure_state's
+// single protected-anchor slot is occupied (spec section 7). Kept as
+// its own type, distinct from SwingType, even though the two are
+// isomorphic (a protected low is always a SwingLow) -- the anchor's
+// side is a different concept from a swing's own type, and conflating
+// them would make it easy to accidentally overload one field with
+// identity, side, and validation status, which the schema deliberately
+// keeps separate.
+type ProtectedSwingSide int
+
+const (
+	// ProtectedLow is the anchor a sell-side sweep's reversal-origin
+	// low establishes; it validates bullish breaks.
+	ProtectedLow ProtectedSwingSide = iota
+	// ProtectedHigh is the anchor a buy-side sweep's reversal-origin
+	// high establishes; it validates bearish breaks.
+	ProtectedHigh
+)
+
+func (s ProtectedSwingSide) String() string {
+	if s == ProtectedHigh {
+		return "high"
+	}
+	return "low"
+}
+
+func parseProtectedSwingSide(s string) (ProtectedSwingSide, error) {
+	switch s {
+	case "low":
+		return ProtectedLow, nil
+	case "high":
+		return ProtectedHigh, nil
+	default:
+		return 0, fmt.Errorf("analysis: unknown protected swing side %q", s)
 	}
 }
 

@@ -95,6 +95,26 @@ type Querier interface {
 	// yet, and that can emit a wrong BOS or CHOCH on the very first
 	// replayed candles.
 	LatestCurrentSwingConfirmedBefore(ctx context.Context, arg LatestCurrentSwingConfirmedBeforeParams) (ConfirmedSwing, error)
+	// LatestInvalidatingChochAfter finds whether a CHOCH flipping away
+	// from direction_before has occurred strictly after a protected
+	// anchor's establishment and strictly before the correction's resume
+	// point (spec section 7: "invalidated... that close is the CHOCH that
+	// flips direction"). Existence alone is enough -- reconstructStateAsOf
+	// only needs to know whether the candidate anchor survived to asOf,
+	// not which exact CHOCH ended it.
+	LatestInvalidatingChochAfter(ctx context.Context, arg LatestInvalidatingChochAfterParams) (StructureEvent, error)
+	// LatestQualifyingProtectedAnchorBefore finds the latest confirmed
+	// swing of swing_type that is ALSO a protected-anchor-qualifying
+	// position: a current sweep of side exists with trigger_open_time
+	// equal to this swing's own pivot_time (the reversal-origin
+	// relationship, spec section 7). Bounded by confirmed_at <= $5, the
+	// same reason as LatestCurrentSwingConfirmedBefore -- a swing is only
+	// usable once confirmed, not merely once it occurs. Used only to
+	// reconstruct the protected anchor as of a correction's resume point;
+	// the live sweep table is a safe source for "as of" here because
+	// nothing strictly before the resume point has been touched by the
+	// correction yet when this runs.
+	LatestQualifyingProtectedAnchorBefore(ctx context.Context, arg LatestQualifyingProtectedAnchorBeforeParams) (ConfirmedSwing, error)
 	// ListCurrentCandlesInRange is the read path aggregation uses: the current
 	// (non-superseded) row for every open_time in [start, end), ordered so the
 	// caller can scan once for first/last open/close and reduce for high/low/

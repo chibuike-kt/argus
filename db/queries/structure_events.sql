@@ -36,3 +36,19 @@ WHERE se.instrument_id = $1 AND se.timeframe = $2 AND se.superseded_at IS NULL
   AND c.open_time < $3
 ORDER BY c.open_time DESC
 LIMIT 1;
+
+-- LatestInvalidatingChochAfter finds whether a CHOCH flipping away
+-- from direction_before has occurred strictly after a protected
+-- anchor's establishment and strictly before the correction's resume
+-- point (spec section 7: "invalidated... that close is the CHOCH that
+-- flips direction"). Existence alone is enough -- reconstructStateAsOf
+-- only needs to know whether the candidate anchor survived to asOf,
+-- not which exact CHOCH ended it.
+-- name: LatestInvalidatingChochAfter :one
+SELECT se.* FROM structure_events se
+JOIN candles c ON c.id = se.trigger_candle_id
+WHERE se.instrument_id = $1 AND se.timeframe = $2 AND se.superseded_at IS NULL
+  AND se.event_type = 'choch' AND se.direction_before = $3
+  AND c.open_time > $4 AND c.open_time < $5
+ORDER BY c.open_time DESC
+LIMIT 1;

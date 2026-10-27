@@ -176,6 +176,61 @@ func (q *Queries) LatestCurrentEventBefore(ctx context.Context, arg LatestCurren
 	return i, err
 }
 
+const latestInvalidatingChochAfter = `-- name: LatestInvalidatingChochAfter :one
+SELECT se.id, se.instrument_id, se.timeframe, se.event_type, se.direction_before, se.direction_after, se.trigger_candle_id, se.reference_swing_ids, se.evaluation_time, se.algorithm_version, se.superseded_at, se.superseded_by, se.created_at, se.sweep_validated, se.sweep_event_id, se.protected_swing_id FROM structure_events se
+JOIN candles c ON c.id = se.trigger_candle_id
+WHERE se.instrument_id = $1 AND se.timeframe = $2 AND se.superseded_at IS NULL
+  AND se.event_type = 'choch' AND se.direction_before = $3
+  AND c.open_time > $4 AND c.open_time < $5
+ORDER BY c.open_time DESC
+LIMIT 1
+`
+
+type LatestInvalidatingChochAfterParams struct {
+	InstrumentID    int64     `json:"instrument_id"`
+	Timeframe       string    `json:"timeframe"`
+	DirectionBefore string    `json:"direction_before"`
+	OpenTime        time.Time `json:"open_time"`
+	OpenTime_2      time.Time `json:"open_time_2"`
+}
+
+// LatestInvalidatingChochAfter finds whether a CHOCH flipping away
+// from direction_before has occurred strictly after a protected
+// anchor's establishment and strictly before the correction's resume
+// point (spec section 7: "invalidated... that close is the CHOCH that
+// flips direction"). Existence alone is enough -- reconstructStateAsOf
+// only needs to know whether the candidate anchor survived to asOf,
+// not which exact CHOCH ended it.
+func (q *Queries) LatestInvalidatingChochAfter(ctx context.Context, arg LatestInvalidatingChochAfterParams) (StructureEvent, error) {
+	row := q.db.QueryRowContext(ctx, latestInvalidatingChochAfter,
+		arg.InstrumentID,
+		arg.Timeframe,
+		arg.DirectionBefore,
+		arg.OpenTime,
+		arg.OpenTime_2,
+	)
+	var i StructureEvent
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.Timeframe,
+		&i.EventType,
+		&i.DirectionBefore,
+		&i.DirectionAfter,
+		&i.TriggerCandleID,
+		pq.Array(&i.ReferenceSwingIds),
+		&i.EvaluationTime,
+		&i.AlgorithmVersion,
+		&i.SupersededAt,
+		&i.SupersededBy,
+		&i.CreatedAt,
+		&i.SweepValidated,
+		&i.SweepEventID,
+		&i.ProtectedSwingID,
+	)
+	return i, err
+}
+
 const resolveSupersedeEvent = `-- name: ResolveSupersedeEvent :execrows
 UPDATE structure_events
 SET superseded_by = $2

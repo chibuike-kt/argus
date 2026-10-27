@@ -12,7 +12,7 @@ import (
 )
 
 const getStructureState = `-- name: GetStructureState :one
-SELECT instrument_id, timeframe, direction, reference_swing_high_id, reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at FROM structure_state WHERE instrument_id = $1 AND timeframe = $2
+SELECT instrument_id, timeframe, direction, reference_swing_high_id, reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at, protected_swing_id, protected_swing_side FROM structure_state WHERE instrument_id = $1 AND timeframe = $2
 `
 
 type GetStructureStateParams struct {
@@ -32,6 +32,8 @@ func (q *Queries) GetStructureState(ctx context.Context, arg GetStructureStatePa
 		&i.LastEventID,
 		&i.LastProcessedCandleID,
 		&i.UpdatedAt,
+		&i.ProtectedSwingID,
+		&i.ProtectedSwingSide,
 	)
 	return i, err
 }
@@ -39,28 +41,33 @@ func (q *Queries) GetStructureState(ctx context.Context, arg GetStructureStatePa
 const setStructureState = `-- name: SetStructureState :one
 INSERT INTO structure_state (
     instrument_id, timeframe, direction, reference_swing_high_id,
-    reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at
+    reference_swing_low_id, last_event_id, last_processed_candle_id,
+    protected_swing_id, protected_swing_side, updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (instrument_id, timeframe) DO UPDATE SET
     direction = EXCLUDED.direction,
     reference_swing_high_id = EXCLUDED.reference_swing_high_id,
     reference_swing_low_id = EXCLUDED.reference_swing_low_id,
     last_event_id = EXCLUDED.last_event_id,
     last_processed_candle_id = EXCLUDED.last_processed_candle_id,
+    protected_swing_id = EXCLUDED.protected_swing_id,
+    protected_swing_side = EXCLUDED.protected_swing_side,
     updated_at = EXCLUDED.updated_at
-RETURNING instrument_id, timeframe, direction, reference_swing_high_id, reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at
+RETURNING instrument_id, timeframe, direction, reference_swing_high_id, reference_swing_low_id, last_event_id, last_processed_candle_id, updated_at, protected_swing_id, protected_swing_side
 `
 
 type SetStructureStateParams struct {
-	InstrumentID          int64         `json:"instrument_id"`
-	Timeframe             string        `json:"timeframe"`
-	Direction             string        `json:"direction"`
-	ReferenceSwingHighID  sql.NullInt64 `json:"reference_swing_high_id"`
-	ReferenceSwingLowID   sql.NullInt64 `json:"reference_swing_low_id"`
-	LastEventID           sql.NullInt64 `json:"last_event_id"`
-	LastProcessedCandleID sql.NullInt64 `json:"last_processed_candle_id"`
-	UpdatedAt             time.Time     `json:"updated_at"`
+	InstrumentID          int64          `json:"instrument_id"`
+	Timeframe             string         `json:"timeframe"`
+	Direction             string         `json:"direction"`
+	ReferenceSwingHighID  sql.NullInt64  `json:"reference_swing_high_id"`
+	ReferenceSwingLowID   sql.NullInt64  `json:"reference_swing_low_id"`
+	LastEventID           sql.NullInt64  `json:"last_event_id"`
+	LastProcessedCandleID sql.NullInt64  `json:"last_processed_candle_id"`
+	ProtectedSwingID      sql.NullInt64  `json:"protected_swing_id"`
+	ProtectedSwingSide    sql.NullString `json:"protected_swing_side"`
+	UpdatedAt             time.Time      `json:"updated_at"`
 }
 
 // SetStructureState is a plain upsert: structure_state is a mutable
@@ -76,6 +83,8 @@ func (q *Queries) SetStructureState(ctx context.Context, arg SetStructureStatePa
 		arg.ReferenceSwingLowID,
 		arg.LastEventID,
 		arg.LastProcessedCandleID,
+		arg.ProtectedSwingID,
+		arg.ProtectedSwingSide,
 		arg.UpdatedAt,
 	)
 	var i StructureState
@@ -88,6 +97,8 @@ func (q *Queries) SetStructureState(ctx context.Context, arg SetStructureStatePa
 		&i.LastEventID,
 		&i.LastProcessedCandleID,
 		&i.UpdatedAt,
+		&i.ProtectedSwingID,
+		&i.ProtectedSwingSide,
 	)
 	return i, err
 }

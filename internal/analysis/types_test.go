@@ -47,7 +47,7 @@ func TestEventType_StringParseRoundTrip(t *testing.T) {
 }
 
 func TestSweepSide_StringParseRoundTrip(t *testing.T) {
-	for _, s := range []SweepSide{SweepBuy, SweepSell} {
+	for _, s := range []SweepSide{SweepLow, SweepHigh} {
 		got, err := parseSweepSide(s.String())
 		if err != nil || got != s {
 			t.Fatalf("round trip %v -> %q -> %v, %v", s, s.String(), got, err)
@@ -55,6 +55,31 @@ func TestSweepSide_StringParseRoundTrip(t *testing.T) {
 	}
 	if _, err := parseSweepSide("garbage"); err == nil {
 		t.Fatal("parseSweepSide(garbage) = nil error, want an error")
+	}
+}
+
+func TestSweepSide_GlossaryMapping(t *testing.T) {
+	// Spec section 6 glossary, fixed: a sweep of a low is sell-side; a
+	// sweep of a high is buy-side. Naming the constants by the level
+	// taken (not the trade direction) means this is the one place that
+	// ever needs to state the mapping explicitly.
+	if SweepLow.String() != "sell" {
+		t.Fatalf(`SweepLow.String() = %q, want "sell"`, SweepLow.String())
+	}
+	if SweepHigh.String() != "buy" {
+		t.Fatalf(`SweepHigh.String() = %q, want "buy"`, SweepHigh.String())
+	}
+}
+
+func TestProtectedSwingSide_StringParseRoundTrip(t *testing.T) {
+	for _, s := range []ProtectedSwingSide{ProtectedLow, ProtectedHigh} {
+		got, err := parseProtectedSwingSide(s.String())
+		if err != nil || got != s {
+			t.Fatalf("round trip %v -> %q -> %v, %v", s, s.String(), got, err)
+		}
+	}
+	if _, err := parseProtectedSwingSide("garbage"); err == nil {
+		t.Fatal("parseProtectedSwingSide(garbage) = nil error, want an error")
 	}
 }
 

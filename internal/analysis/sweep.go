@@ -87,10 +87,10 @@ func (n NewSweep) equalEvidence(s Sweep) bool {
 // detectSweep is the pure decision for spec section 6. side determines
 // which opposing level and which strict comparisons apply:
 //
-//   - SweepBuy sweeps a swing low at targetLevel: candleLow < targetLevel
+//   - SweepLow takes a swing low at targetLevel: candleLow < targetLevel
 //     (strict penetration, wick or body) and candleClose > targetLevel
 //     (strict reclaim, close only).
-//   - SweepSell sweeps a swing high at targetLevel: candleHigh > targetLevel
+//   - SweepHigh takes a swing high at targetLevel: candleHigh > targetLevel
 //     and candleClose < targetLevel.
 //
 // Both comparisons are strict: a touch (low == targetLevel) is not a
@@ -101,11 +101,11 @@ func (n NewSweep) equalEvidence(s Sweep) bool {
 // than by an explicit check.
 func detectSweep(side SweepSide, targetLevel, candleHigh, candleLow, candleClose int64) (penetrationExtreme, reclaimClose int64, ok bool) {
 	switch side {
-	case SweepBuy:
+	case SweepLow:
 		if candleLow < targetLevel && candleClose > targetLevel {
 			return candleLow, candleClose, true
 		}
-	case SweepSell:
+	case SweepHigh:
 		if candleHigh > targetLevel && candleClose < targetLevel {
 			return candleHigh, candleClose, true
 		}

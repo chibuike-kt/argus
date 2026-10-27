@@ -202,6 +202,30 @@ func (s *Store) LatestSwingConfirmedBefore(ctx context.Context, instrumentID int
 	return fromSwingRow(row)
 }
 
+// LatestQualifyingProtectedAnchorBefore returns the latest confirmed
+// swing of swingType, confirmed_at <= before, that is also a protected-
+// anchor-qualifying position: a current sweep of sweepSide exists at
+// its exact pivot_time (the reversal-origin relationship, spec section
+// 7). Used only to reconstruct a correction replay's resume state --
+// ErrSwingNotFound when neither side has ever qualified before that
+// point.
+func (s *Store) LatestQualifyingProtectedAnchorBefore(ctx context.Context, instrumentID int64, timeframe string, swingType SwingType, sweepSide SweepSide, before time.Time) (Swing, error) {
+	row, err := s.q.LatestQualifyingProtectedAnchorBefore(ctx, store.LatestQualifyingProtectedAnchorBeforeParams{
+		InstrumentID: instrumentID,
+		Timeframe:    timeframe,
+		SwingType:    swingType.String(),
+		ConfirmedAt:  before,
+		Side:         sweepSide.String(),
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Swing{}, ErrSwingNotFound
+		}
+		return Swing{}, fmt.Errorf("analysis: latest qualifying protected anchor before %s: %w", before, err)
+	}
+	return fromSwingRow(row)
+}
+
 // --- structure_events ---
 
 // GetCurrentEvent returns the current event for triggerCandleID, or
@@ -298,6 +322,29 @@ func (s *Store) LatestEventBefore(ctx context.Context, instrumentID int64, timef
 		return StructureEvent{}, fmt.Errorf("analysis: latest event before %s: %w", before, err)
 	}
 	return fromEventRow(row)
+}
+
+// LatestInvalidatingChochBefore reports whether a current CHOCH with
+// direction_before == fromDirection exists strictly after the anchor's
+// own establishment (after) and strictly before the correction's
+// resume point (before) -- spec section 7's invalidation rule. ok is
+// false, not an error, when none exists: that is the normal "anchor
+// survived to the resume point" case, not a failure.
+func (s *Store) LatestInvalidatingChochBefore(ctx context.Context, instrumentID int64, timeframe string, fromDirection Direction, after, before time.Time) (ok bool, err error) {
+	_, err = s.q.LatestInvalidatingChochAfter(ctx, store.LatestInvalidatingChochAfterParams{
+		InstrumentID:    instrumentID,
+		Timeframe:       timeframe,
+		DirectionBefore: fromDirection.String(),
+		OpenTime:        after,
+		OpenTime_2:      before,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("analysis: latest invalidating choch before %s: %w", before, err)
+	}
+	return true, nil
 }
 
 // --- liquidity_sweeps ---
@@ -410,6 +457,8 @@ func (s *Store) SetState(ctx context.Context, snap StateSnapshot, now time.Time)
 		ReferenceSwingLowID:   ptrToNullInt64(snap.ReferenceSwingLowID),
 		LastEventID:           ptrToNullInt64(snap.LastEventID),
 		LastProcessedCandleID: ptrToNullInt64(snap.LastProcessedCandleID),
+		ProtectedSwingID:      ptrToNullInt64(snap.ProtectedSwingID),
+		ProtectedSwingSide:    protectedSideToNullString(snap.ProtectedSwingSide),
 		UpdatedAt:             now,
 	})
 	if err != nil {

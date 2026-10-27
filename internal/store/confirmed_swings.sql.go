@@ -255,6 +255,65 @@ func (q *Queries) LatestCurrentSwingConfirmedBefore(ctx context.Context, arg Lat
 	return i, err
 }
 
+const latestQualifyingProtectedAnchorBefore = `-- name: LatestQualifyingProtectedAnchorBefore :one
+SELECT cs.id, cs.instrument_id, cs.timeframe, cs.swing_type, cs.pivot_time, cs.price, cs.confirmed_at, cs.evaluation_time, cs.algorithm_version, cs.source_candle_ids, cs.superseded_at, cs.superseded_by, cs.created_at FROM confirmed_swings cs
+JOIN liquidity_sweeps ls
+    ON ls.instrument_id = cs.instrument_id
+   AND ls.timeframe = cs.timeframe
+   AND ls.trigger_open_time = cs.pivot_time
+WHERE cs.instrument_id = $1 AND cs.timeframe = $2 AND cs.swing_type = $3
+  AND cs.superseded_at IS NULL AND cs.confirmed_at <= $4
+  AND ls.side = $5 AND ls.superseded_at IS NULL
+ORDER BY cs.pivot_time DESC
+LIMIT 1
+`
+
+type LatestQualifyingProtectedAnchorBeforeParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	Timeframe    string    `json:"timeframe"`
+	SwingType    string    `json:"swing_type"`
+	ConfirmedAt  time.Time `json:"confirmed_at"`
+	Side         string    `json:"side"`
+}
+
+// LatestQualifyingProtectedAnchorBefore finds the latest confirmed
+// swing of swing_type that is ALSO a protected-anchor-qualifying
+// position: a current sweep of side exists with trigger_open_time
+// equal to this swing's own pivot_time (the reversal-origin
+// relationship, spec section 7). Bounded by confirmed_at <= $5, the
+// same reason as LatestCurrentSwingConfirmedBefore -- a swing is only
+// usable once confirmed, not merely once it occurs. Used only to
+// reconstruct the protected anchor as of a correction's resume point;
+// the live sweep table is a safe source for "as of" here because
+// nothing strictly before the resume point has been touched by the
+// correction yet when this runs.
+func (q *Queries) LatestQualifyingProtectedAnchorBefore(ctx context.Context, arg LatestQualifyingProtectedAnchorBeforeParams) (ConfirmedSwing, error) {
+	row := q.db.QueryRowContext(ctx, latestQualifyingProtectedAnchorBefore,
+		arg.InstrumentID,
+		arg.Timeframe,
+		arg.SwingType,
+		arg.ConfirmedAt,
+		arg.Side,
+	)
+	var i ConfirmedSwing
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.Timeframe,
+		&i.SwingType,
+		&i.PivotTime,
+		&i.Price,
+		&i.ConfirmedAt,
+		&i.EvaluationTime,
+		&i.AlgorithmVersion,
+		pq.Array(&i.SourceCandleIds),
+		&i.SupersededAt,
+		&i.SupersededBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listLatestCurrentSwings = `-- name: ListLatestCurrentSwings :many
 SELECT id, instrument_id, timeframe, swing_type, pivot_time, price, confirmed_at, evaluation_time, algorithm_version, source_candle_ids, superseded_at, superseded_by, created_at FROM confirmed_swings
 WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL

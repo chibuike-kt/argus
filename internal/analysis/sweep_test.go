@@ -2,7 +2,7 @@ package analysis
 
 import "testing"
 
-func TestDetectSweep_Buy(t *testing.T) {
+func TestDetectSweep_SellSideTakesALow(t *testing.T) {
 	tests := []struct {
 		name                     string
 		high, low, close         int64
@@ -17,7 +17,7 @@ func TestDetectSweep_Buy(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			extreme, reclaim, ok := detectSweep(SweepBuy, 100, tt.high, tt.low, tt.close)
+			extreme, reclaim, ok := detectSweep(SweepLow, 100, tt.high, tt.low, tt.close)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -31,7 +31,7 @@ func TestDetectSweep_Buy(t *testing.T) {
 	}
 }
 
-func TestDetectSweep_Sell(t *testing.T) {
+func TestDetectSweep_BuySideTakesAHigh(t *testing.T) {
 	tests := []struct {
 		name             string
 		high, low, close int64
@@ -46,7 +46,7 @@ func TestDetectSweep_Sell(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			extreme, reclaim, ok := detectSweep(SweepSell, 100, tt.high, tt.low, tt.close)
+			extreme, reclaim, ok := detectSweep(SweepHigh, 100, tt.high, tt.low, tt.close)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
