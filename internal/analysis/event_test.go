@@ -94,6 +94,41 @@ func TestDecideEstablishment(t *testing.T) {
 	}
 }
 
+func TestNewStructureEvent_EqualEvidence_SweepTag(t *testing.T) {
+	sweepID, swingID := int64(5), int64(6)
+	otherSweepID := int64(7)
+
+	stored := StructureEvent{
+		Type: EventBOS, DirectionBefore: DirectionBullish, DirectionAfter: DirectionBullish,
+		ReferenceSwingIDs: []int64{1}, SweepValidated: true, SweepEventID: &sweepID, ProtectedSwingID: &swingID,
+	}
+	same := &NewStructureEvent{
+		Type: EventBOS, DirectionBefore: DirectionBullish, DirectionAfter: DirectionBullish,
+		ReferenceSwingIDs: []int64{1}, SweepValidated: true, SweepEventID: &sweepID, ProtectedSwingID: &swingID,
+	}
+	// Same direction/type/reference, but the sweep tag itself changed --
+	// spec section 7 requires this to recompute under correction, so it
+	// must count as different evidence, not be skipped.
+	validationFlipped := &NewStructureEvent{
+		Type: EventBOS, DirectionBefore: DirectionBullish, DirectionAfter: DirectionBullish,
+		ReferenceSwingIDs: []int64{1}, SweepValidated: false,
+	}
+	differentSweep := &NewStructureEvent{
+		Type: EventBOS, DirectionBefore: DirectionBullish, DirectionAfter: DirectionBullish,
+		ReferenceSwingIDs: []int64{1}, SweepValidated: true, SweepEventID: &otherSweepID, ProtectedSwingID: &swingID,
+	}
+
+	if !same.equalEvidence(stored) {
+		t.Error("identical evidence including sweep tag reported as different")
+	}
+	if validationFlipped.equalEvidence(stored) {
+		t.Error("sweep_validated flipping true->false reported as identical")
+	}
+	if differentSweep.equalEvidence(stored) {
+		t.Error("a different referenced sweep event reported as identical")
+	}
+}
+
 func TestDecideSwingAction(t *testing.T) {
 	existing := Swing{ID: 1, Price: 100}
 	candidateSame := NewSwing{Price: 100}

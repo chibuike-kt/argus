@@ -12,6 +12,10 @@ var (
 	// exists for the requested trigger candle.
 	ErrEventNotFound = errors.New("analysis: structure event not found")
 
+	// ErrSweepNotFound is returned when no current liquidity sweep
+	// exists for the requested trigger candle and side.
+	ErrSweepNotFound = errors.New("analysis: liquidity sweep not found")
+
 	// ErrNoClosedCandles is returned by a CandleSource when an
 	// instrument has no closed candles at all yet -- a genuinely empty
 	// series, not a market-data failure.

@@ -118,6 +118,16 @@ func (e *Engine) step(ctx context.Context, instrumentID int64, timeframe string,
 		return fmt.Errorf("pivot step: %w", err)
 	}
 
+	// Step 1.5: liquidity sweeps (spec section 6), using candle c's own
+	// high/low/close -- same-candle, no RightBars lag, unlike pivot
+	// confirmation. Runs after step 1 so a swing step 1 just confirmed
+	// at this exact candle (confirmed_at == c.CloseTime) is a legal
+	// sweep target, consistent with decideEstablishmentCandidate's own
+	// "<=, not <" bound for the same reason.
+	if err := e.applySweepStep(ctx, txStore, instrumentID, timeframe, c, now); err != nil {
+		return fmt.Errorf("sweep step: %w", err)
+	}
+
 	// Step 2: break/establishment using candle c's own close, reading
 	// state AFTER step 1's updates. Deliberate (approved review point):
 	// a close can break a swing that step 1 just confirmed two bars
@@ -257,6 +267,102 @@ func (e *Engine) reconcileSwing(ctx context.Context, txStore *Store, instrumentI
 	}
 }
 
+// applySweepStep decides the deterministic verdict for each side's
+// liquidity sweep against candle c (spec section 6) and reconciles each
+// against whatever is currently stored for (c, side), with the same
+// five-outcome symmetry as applyPivotStep and applyBreakStep.
+func (e *Engine) applySweepStep(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, c CandleInput, now time.Time) error {
+	if err := e.reconcileSweep(ctx, txStore, instrumentID, timeframe, SweepBuy, SwingLow, c, now); err != nil {
+		return err
+	}
+	if err := e.reconcileSweep(ctx, txStore, instrumentID, timeframe, SweepSell, SwingHigh, c, now); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reconcileSweep is applySweepStep's per-side worker. targetType is the
+// swing type side sweeps (buy-side sweeps a low, sell-side a high). The
+// target level is the latest confirmed swing of that type with
+// confirmed_at <= c.CloseTime -- "known" by the time c's own close is
+// evaluated, the same bound and the same reason as
+// decideEstablishmentCandidate's maxPivotTime: an unbounded or
+// occurrence-bounded lookup could read a swing a correction replay has
+// not reconciled yet in this pass.
+func (e *Engine) reconcileSweep(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, side SweepSide, targetType SwingType, c CandleInput, now time.Time) error {
+	target, err := txStore.LatestSwingConfirmedBefore(ctx, instrumentID, timeframe, targetType, c.CloseTime)
+	var candidate *NewSweep
+	switch {
+	case errors.Is(err, ErrSwingNotFound):
+		candidate = nil // nothing confirmed to sweep against yet
+	case err != nil:
+		return err
+	default:
+		if extreme, reclaim, ok := detectSweep(side, int64(target.Price), c.High, c.Low, c.Close); ok {
+			candidate = &NewSweep{
+				InstrumentID: instrumentID, Timeframe: timeframe, Side: side,
+				SweptSwingID: target.ID, TriggerOpenTime: c.OpenTime, TriggerCandleID: c.ID,
+				PenetrationExtreme: quant.Price(extreme), ReclaimClose: quant.Price(reclaim),
+				EvaluationTime: clock.NewEvaluationTime(now), AlgorithmVersion: e.cfg.AlgorithmVersion,
+			}
+		}
+	}
+
+	row, err := txStore.GetCurrentSweepByTrigger(ctx, instrumentID, timeframe, c.OpenTime, side)
+	var current *Sweep
+	switch {
+	case errors.Is(err, ErrSweepNotFound):
+		current = nil
+	case err != nil:
+		return err
+	default:
+		current = &row
+	}
+
+	switch decideSweepAction(current, candidate) {
+	case actionNone, actionSkip:
+		return nil
+	case actionInsert:
+		_, err := txStore.InsertSweep(ctx, *candidate)
+		return err
+	case actionReplace:
+		_, err := txStore.SupersedeSweep(ctx, current.ID, now, candidate)
+		return err
+	default: // actionRetract: a correction means this candle no longer sweeps
+		_, err := txStore.SupersedeSweep(ctx, current.ID, now, nil)
+		return err
+	}
+}
+
+// decideSweepTag resolves spec section 7's validation: whether refSwing
+// -- the swing a BOS or CHOCH is built from -- was itself created by a
+// liquidity sweep. refSwing's own pivot_time (not a candle id, which
+// would change across a correction to that candle -- see 000006's
+// comment on liquidity_sweeps) is checked against the current sweep of
+// the matching side: a buy-side sweep creates a swing low, a sell-side
+// sweep creates a swing high. A refSwing of the wrong type for any
+// current sweep at that position simply finds none and returns
+// validated=false, which is correct, not an error.
+func (e *Engine) decideSweepTag(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, refSwing Swing) (validated bool, sweepEventID, protectedSwingID *int64, err error) {
+	var side SweepSide
+	switch refSwing.Type {
+	case SwingLow:
+		side = SweepBuy
+	case SwingHigh:
+		side = SweepSell
+	}
+
+	sweep, err := txStore.GetCurrentSweepByTrigger(ctx, instrumentID, timeframe, refSwing.PivotTime.Time(), side)
+	switch {
+	case errors.Is(err, ErrSweepNotFound):
+		return false, nil, nil, nil
+	case err != nil:
+		return false, nil, nil, err
+	}
+	sweepID, swingID := sweep.ID, refSwing.ID
+	return true, &sweepID, &swingID, nil
+}
+
 // applyBreakStep decides the deterministic verdict for candle c's close
 // (direction establishment, BOS, or CHOCH) and reconciles it against
 // whatever is currently stored for c as a trigger candle, with the same
@@ -292,23 +398,31 @@ func (e *Engine) applyBreakStep(ctx context.Context, txStore *Store, instrumentI
 		newDirection, eventType, ok := decideBreak(state.Direction, int64(high.Price), int64(low.Price), c.Close)
 		if ok {
 			// Spec section 3: BOS references the swing in the trend's
-			// own direction; CHOCH references the swing against it.
-			var refs []int64
+			// own direction; CHOCH references the swing against it. The
+			// full Swing (not just its id) is kept because decideSweepTag
+			// (section 7) needs its type and pivot candle, not only the
+			// id that goes into ReferenceSwingIDs.
+			var refSwing Swing
 			switch {
 			case state.Direction == DirectionBullish && eventType == EventBOS:
-				refs = []int64{high.ID} // bullish continuation: references the high it broke above
+				refSwing = high // bullish continuation: references the high it broke above
 			case state.Direction == DirectionBullish && eventType == EventCHOCH:
-				refs = []int64{low.ID} // bullish->bearish flip: references the low it broke below
+				refSwing = low // bullish->bearish flip: references the low it broke below
 			case state.Direction == DirectionBearish && eventType == EventBOS:
-				refs = []int64{low.ID} // bearish continuation: references the low it broke below
+				refSwing = low // bearish continuation: references the low it broke below
 			default: // DirectionBearish && EventCHOCH
-				refs = []int64{high.ID} // bearish->bullish flip: references the high it broke above
+				refSwing = high // bearish->bullish flip: references the high it broke above
+			}
+			validated, sweepEventID, protectedSwingID, err := e.decideSweepTag(ctx, txStore, instrumentID, timeframe, refSwing)
+			if err != nil {
+				return err
 			}
 			candidate = &NewStructureEvent{
 				InstrumentID: instrumentID, Timeframe: timeframe, Type: eventType,
 				DirectionBefore: state.Direction, DirectionAfter: newDirection,
-				TriggerCandleID: c.ID, ReferenceSwingIDs: refs,
+				TriggerCandleID: c.ID, ReferenceSwingIDs: []int64{refSwing.ID},
 				EvaluationTime: clock.NewEvaluationTime(now), AlgorithmVersion: e.cfg.AlgorithmVersion,
+				SweepValidated: validated, SweepEventID: sweepEventID, ProtectedSwingID: protectedSwingID,
 			}
 		}
 	}

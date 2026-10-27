@@ -1,7 +1,7 @@
 # ARGUS Strategy Specification
 
-- Version: 0.1.0
-- Status: Approved for implementation (batch 1: swings and market structure)
+- Version: 0.2.0
+- Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
 
@@ -84,20 +84,76 @@ the affected structural events. The prior event history is preserved, not overwr
 events (ADR-019). No look-ahead: an event may use only candle data and pivot confirmations
 available at its evaluation time.
 
+## 6. Liquidity sweeps
+
+A liquidity sweep is a single finalized candle that takes a confirmed swing level and then
+closes back inside it. It is the precondition the strategy requires before a structural
+break is treated as a tradeable swing structure (used from batch 2 onward).
+
+- Target level. A sweep is evaluated against the latest confirmed swing of the opposing
+  side relative to the candle: the most recent confirmed swing low (for a buy-side sweep)
+  or swing high (for a sell-side sweep) whose confirmation time is at or before the candle.
+  Only confirmed swings (section 1) are sweep targets.
+- Buy-side sweep of a swing low at price L: `candle.low < L` and `candle.close > L`. Both strict.
+- Sell-side sweep of a swing high at price H: `candle.high > H` and `candle.close < H`. Both strict.
+- Penetration may be by wick or body; the reclaim is decided only by the close. The open and
+  the body are not consulted. A candle that merely touches the level (`low == L` or
+  `high == H`) is not a sweep, and a close exactly on the level is not a reclaim.
+- Reclaim window is the same candle only. The penetration and the close back inside must
+  both occur on the one finalized candle. No multi-candle or delayed reclaim in this version.
+- A sweep records: the swept swing reference, the sweep candle and its revision, the side
+  (buy-side or sell-side), the penetration extreme and the reclaiming close, the algorithm
+  version, and the evaluation time.
+
+## 7. Protected structure
+
+A protected level is the low (bullish) or high (bearish) that a sweep creates and that a
+subsequent break makes structurally significant. It is the anchor the rest of the strategy
+measures from in later batches (premium / discount, stop placement, structural liquidity).
+
+- The protected low is the reversal-origin low: the confirmed swing low formed by the
+  sweep, that is, the new swing low printed when price took out the prior swing low and
+  reversed up. It sits below the swing low that was swept. The protected high is the mirror
+  for bearish.
+- The protected level must be a confirmed 2/2 fractal swing (section 1), not the raw
+  sweep-candle extreme. A sweep extreme that never confirms as a fractal swing does not
+  become a protected level.
+- A structural break (section 3) is sweep-validated when its protected level is a sweep low
+  (bullish) or a sweep high (bearish): the swing the break is built from was itself created
+  by a sweep. Because validation is defined through the protected level and not through a
+  time gap, there is no separate "candles between sweep and break" window.
+- Direction logic (section 2) is unchanged by this batch. A CHOCH still flips direction and
+  a BOS still extends it whether or not the break is sweep-validated. Every CHOCH and BOS is
+  additionally tagged with whether it is sweep-validated and, when it is, with the sweep
+  event and protected-level swing it references. The sweep tag is evidence, not a new gate on
+  direction. Whether an unvalidated break is tradeable is decided in a later batch (POI and
+  entry).
+- Determinism. Sweeps and protected levels are a pure function of finalized candles and
+  confirmed swings, so a candle correction recomputes them exactly as it recomputes swings
+  and events (section 5), with prior history preserved.
+
 ## Scope of this version
 
-In scope: single instrument, single timeframe swing detection, structural direction state,
-and BOS / CHOCH classification with the threshold and determinism rules above.
+In scope: single instrument, single timeframe. Batch 1: swing detection, structural
+direction state, and BOS / CHOCH classification with the threshold and determinism rules
+above. Batch 2: single-candle liquidity sweeps (strict, same-candle reclaim), protected
+levels (reversal-origin confirmed swing), and sweep-tagging of BOS / CHOCH. Direction
+behaviour from batch 1 is unchanged by batch 2.
 
-Not yet decided, do not implement: higher-timeframe context and multi-timeframe alignment,
-supply/demand and support/resistance zones, equal highs and lows, liquidity sweeps, order
-blocks, fair value gaps, displacement and ATR, POI retests, mandatory condition grouping,
-setup lifecycle, entry / stop / target construction, and event precedence on collision.
-These are later batches of this spec.
+Not yet decided, do not implement: premium / discount / equilibrium; liquidity
+classification (transactional, structural, inducement) and structural-liquidity validity
+rules; supply/demand and support/resistance zones; equal highs and lows; order blocks;
+fair value gaps; displacement and ATR; POI (order block and QMR) and retests; higher-
+timeframe context and multi-timeframe alignment; mandatory condition grouping; setup
+lifecycle; entry / stop / target construction; and event precedence on collision. These are
+later batches of this spec, in roughly that order.
 
 ## Golden fixtures required
 
-The engine is validated against labelled fixtures (ADR-009, ADR-019) covering at least:
+The engine is validated against labelled fixtures (ADR-009, ADR-019). Each fixture asserts
+the event and its evidence, not just the decision.
+
+Batch 1:
 
 - a valid confirmed swing high and swing low, and a candidate disqualified by an equal neighbor,
 - pivot confirmation timing (a pivot is not known before its right-hand bars close),
@@ -107,4 +163,13 @@ The engine is validated against labelled fixtures (ADR-009, ADR-019) covering at
 - a lower high that does not change direction,
 - a correction to a source candle that recomputes a structural event, with the prior event preserved.
 
-Each fixture asserts the event and its evidence, not just the decision.
+Batch 2:
+
+- a buy-side sweep (penetration below a confirmed swing low, close back above) and the sell-side mirror,
+- a candle that only touches the level (no strict penetration) is not a sweep,
+- a candle that penetrates and closes beyond the level (no reclaim) is not a sweep,
+- a two-candle penetrate-then-reclaim sequence is not a sweep in this version (same-candle only),
+- a sweep-validated CHOCH and a sweep-validated BOS, each tagging its sweep event and protected-level swing,
+- a BOS or CHOCH with no qualifying prior sweep, tagged as not sweep-validated, with direction still updated,
+- a protected level that requires fractal confirmation (a raw sweep extreme that never confirms does not become protected),
+- a correction to a sweep candle that recomputes the sweep and any dependent protected-level tag, with prior history preserved.

@@ -36,7 +36,7 @@ func (q *Queries) BeginSupersedeEvent(ctx context.Context, arg BeginSupersedeEve
 }
 
 const getCurrentEventByTrigger = `-- name: GetCurrentEventByTrigger :one
-SELECT id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at FROM structure_events
+SELECT id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at, sweep_validated, sweep_event_id, protected_swing_id FROM structure_events
 WHERE instrument_id = $1 AND timeframe = $2 AND trigger_candle_id = $3 AND superseded_at IS NULL
 `
 
@@ -63,6 +63,9 @@ func (q *Queries) GetCurrentEventByTrigger(ctx context.Context, arg GetCurrentEv
 		&i.SupersededAt,
 		&i.SupersededBy,
 		&i.CreatedAt,
+		&i.SweepValidated,
+		&i.SweepEventID,
+		&i.ProtectedSwingID,
 	)
 	return i, err
 }
@@ -70,22 +73,26 @@ func (q *Queries) GetCurrentEventByTrigger(ctx context.Context, arg GetCurrentEv
 const insertStructureEvent = `-- name: InsertStructureEvent :one
 INSERT INTO structure_events (
     instrument_id, timeframe, event_type, direction_before, direction_after,
-    trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version
+    trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version,
+    sweep_validated, sweep_event_id, protected_swing_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+RETURNING id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at, sweep_validated, sweep_event_id, protected_swing_id
 `
 
 type InsertStructureEventParams struct {
-	InstrumentID      int64     `json:"instrument_id"`
-	Timeframe         string    `json:"timeframe"`
-	EventType         string    `json:"event_type"`
-	DirectionBefore   string    `json:"direction_before"`
-	DirectionAfter    string    `json:"direction_after"`
-	TriggerCandleID   int64     `json:"trigger_candle_id"`
-	ReferenceSwingIds []int64   `json:"reference_swing_ids"`
-	EvaluationTime    time.Time `json:"evaluation_time"`
-	AlgorithmVersion  string    `json:"algorithm_version"`
+	InstrumentID      int64         `json:"instrument_id"`
+	Timeframe         string        `json:"timeframe"`
+	EventType         string        `json:"event_type"`
+	DirectionBefore   string        `json:"direction_before"`
+	DirectionAfter    string        `json:"direction_after"`
+	TriggerCandleID   int64         `json:"trigger_candle_id"`
+	ReferenceSwingIds []int64       `json:"reference_swing_ids"`
+	EvaluationTime    time.Time     `json:"evaluation_time"`
+	AlgorithmVersion  string        `json:"algorithm_version"`
+	SweepValidated    bool          `json:"sweep_validated"`
+	SweepEventID      sql.NullInt64 `json:"sweep_event_id"`
+	ProtectedSwingID  sql.NullInt64 `json:"protected_swing_id"`
 }
 
 func (q *Queries) InsertStructureEvent(ctx context.Context, arg InsertStructureEventParams) (StructureEvent, error) {
@@ -99,6 +106,9 @@ func (q *Queries) InsertStructureEvent(ctx context.Context, arg InsertStructureE
 		pq.Array(arg.ReferenceSwingIds),
 		arg.EvaluationTime,
 		arg.AlgorithmVersion,
+		arg.SweepValidated,
+		arg.SweepEventID,
+		arg.ProtectedSwingID,
 	)
 	var i StructureEvent
 	err := row.Scan(
@@ -115,12 +125,15 @@ func (q *Queries) InsertStructureEvent(ctx context.Context, arg InsertStructureE
 		&i.SupersededAt,
 		&i.SupersededBy,
 		&i.CreatedAt,
+		&i.SweepValidated,
+		&i.SweepEventID,
+		&i.ProtectedSwingID,
 	)
 	return i, err
 }
 
 const latestCurrentEventBefore = `-- name: LatestCurrentEventBefore :one
-SELECT se.id, se.instrument_id, se.timeframe, se.event_type, se.direction_before, se.direction_after, se.trigger_candle_id, se.reference_swing_ids, se.evaluation_time, se.algorithm_version, se.superseded_at, se.superseded_by, se.created_at FROM structure_events se
+SELECT se.id, se.instrument_id, se.timeframe, se.event_type, se.direction_before, se.direction_after, se.trigger_candle_id, se.reference_swing_ids, se.evaluation_time, se.algorithm_version, se.superseded_at, se.superseded_by, se.created_at, se.sweep_validated, se.sweep_event_id, se.protected_swing_id FROM structure_events se
 JOIN candles c ON c.id = se.trigger_candle_id
 WHERE se.instrument_id = $1 AND se.timeframe = $2 AND se.superseded_at IS NULL
   AND c.open_time < $3
@@ -156,6 +169,9 @@ func (q *Queries) LatestCurrentEventBefore(ctx context.Context, arg LatestCurren
 		&i.SupersededAt,
 		&i.SupersededBy,
 		&i.CreatedAt,
+		&i.SweepValidated,
+		&i.SweepEventID,
+		&i.ProtectedSwingID,
 	)
 	return i, err
 }

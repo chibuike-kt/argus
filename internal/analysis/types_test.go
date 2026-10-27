@@ -46,6 +46,18 @@ func TestEventType_StringParseRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSweepSide_StringParseRoundTrip(t *testing.T) {
+	for _, s := range []SweepSide{SweepBuy, SweepSell} {
+		got, err := parseSweepSide(s.String())
+		if err != nil || got != s {
+			t.Fatalf("round trip %v -> %q -> %v, %v", s, s.String(), got, err)
+		}
+	}
+	if _, err := parseSweepSide("garbage"); err == nil {
+		t.Fatal("parseSweepSide(garbage) = nil error, want an error")
+	}
+}
+
 func TestConfig_Validate(t *testing.T) {
 	valid := Config{AlgorithmVersion: "v1", LeftBars: 2, RightBars: 2, Interval: time.Minute}
 	if err := valid.Validate(); err != nil {

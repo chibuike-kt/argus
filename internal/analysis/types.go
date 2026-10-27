@@ -112,6 +112,36 @@ func parseEventType(s string) (EventType, error) {
 	}
 }
 
+// SweepSide distinguishes a buy-side liquidity sweep (takes a swing
+// low, then reclaims above it -- a bullish reversal signature) from a
+// sell-side sweep (the mirror, against a swing high; spec section 6).
+type SweepSide int
+
+const (
+	// SweepBuy sweeps a swing low: low < level, close > level.
+	SweepBuy SweepSide = iota
+	// SweepSell sweeps a swing high: high > level, close < level.
+	SweepSell
+)
+
+func (s SweepSide) String() string {
+	if s == SweepSell {
+		return "sell"
+	}
+	return "buy"
+}
+
+func parseSweepSide(s string) (SweepSide, error) {
+	switch s {
+	case "buy":
+		return SweepBuy, nil
+	case "sell":
+		return SweepSell, nil
+	default:
+		return 0, fmt.Errorf("analysis: unknown sweep side %q", s)
+	}
+}
+
 // Config captures this algorithm version's configurable parameters
 // (ADR-009: "swing detection parameters... must be explicitly defined").
 // The spec fixes LeftBars = RightBars = 2 for v0.1; a later algorithm

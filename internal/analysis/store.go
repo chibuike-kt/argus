@@ -234,6 +234,9 @@ func (s *Store) InsertEvent(ctx context.Context, n NewStructureEvent) (Structure
 		ReferenceSwingIds: n.ReferenceSwingIDs,
 		EvaluationTime:    n.EvaluationTime.Time(),
 		AlgorithmVersion:  n.AlgorithmVersion,
+		SweepValidated:    n.SweepValidated,
+		SweepEventID:      ptrToNullInt64(n.SweepEventID),
+		ProtectedSwingID:  ptrToNullInt64(n.ProtectedSwingID),
 	})
 	if err != nil {
 		return StructureEvent{}, fmt.Errorf("analysis: insert event: %w", err)
@@ -295,6 +298,87 @@ func (s *Store) LatestEventBefore(ctx context.Context, instrumentID int64, timef
 		return StructureEvent{}, fmt.Errorf("analysis: latest event before %s: %w", before, err)
 	}
 	return fromEventRow(row)
+}
+
+// --- liquidity_sweeps ---
+
+// GetCurrentSweepByTrigger returns the current liquidity sweep of side
+// at triggerOpenTime, or ErrSweepNotFound. triggerOpenTime, not a
+// candle id, is the position key -- stable across a correction to that
+// exact candle (see 000006's comment on liquidity_sweeps).
+func (s *Store) GetCurrentSweepByTrigger(ctx context.Context, instrumentID int64, timeframe string, triggerOpenTime time.Time, side SweepSide) (Sweep, error) {
+	row, err := s.q.GetCurrentSweepByTrigger(ctx, store.GetCurrentSweepByTriggerParams{
+		InstrumentID:    instrumentID,
+		Timeframe:       timeframe,
+		TriggerOpenTime: triggerOpenTime,
+		Side:            side.String(),
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Sweep{}, ErrSweepNotFound
+		}
+		return Sweep{}, fmt.Errorf("analysis: get current sweep: %w", err)
+	}
+	return fromSweepRow(row)
+}
+
+// InsertSweep inserts a new liquidity sweep where none currently exists
+// for its (trigger open time, side).
+func (s *Store) InsertSweep(ctx context.Context, n NewSweep) (Sweep, error) {
+	row, err := s.q.InsertSweep(ctx, store.InsertSweepParams{
+		InstrumentID:       n.InstrumentID,
+		Timeframe:          n.Timeframe,
+		Side:               n.Side.String(),
+		SweptSwingID:       n.SweptSwingID,
+		TriggerOpenTime:    n.TriggerOpenTime,
+		TriggerCandleID:    n.TriggerCandleID,
+		PenetrationExtreme: int64(n.PenetrationExtreme),
+		ReclaimClose:       int64(n.ReclaimClose),
+		EvaluationTime:     n.EvaluationTime.Time(),
+		AlgorithmVersion:   n.AlgorithmVersion,
+	})
+	if err != nil {
+		return Sweep{}, fmt.Errorf("analysis: insert sweep: %w", err)
+	}
+	return fromSweepRow(row)
+}
+
+// SupersedeSweep is SupersedeSwing/SupersedeEvent's counterpart for
+// liquidity_sweeps: replace, or (replacement == nil) retract with no
+// replacement -- the case a correction needs when a candle no longer
+// sweeps under corrected data.
+func (s *Store) SupersedeSweep(ctx context.Context, oldID int64, now time.Time, replacement *NewSweep) (*Sweep, error) {
+	affected, err := s.q.BeginSupersedeSweep(ctx, store.BeginSupersedeSweepParams{
+		ID:           oldID,
+		SupersededAt: nullTimeFrom(now),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 1 (begin): %w", oldID, err)
+	}
+	if affected != 1 {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 1 (begin): expected to affect 1 row, affected %d (concurrent modification)", oldID, affected)
+	}
+
+	if replacement == nil {
+		return nil, nil
+	}
+
+	newRow, err := s.InsertSweep(ctx, *replacement)
+	if err != nil {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 2 (insert): %w", oldID, err)
+	}
+
+	affected, err = s.q.ResolveSupersedeSweep(ctx, store.ResolveSupersedeSweepParams{
+		ID:           oldID,
+		SupersededBy: sql.NullInt64{Int64: newRow.ID, Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 3 (resolve): %w", oldID, err)
+	}
+	if affected != 1 {
+		return nil, fmt.Errorf("analysis: supersede sweep %d step 3 (resolve): expected to affect 1 row, affected %d", oldID, affected)
+	}
+	return &newRow, nil
 }
 
 // --- structure_state ---

@@ -57,3 +57,22 @@ func decideEventAction(current *StructureEvent, candidate *NewStructureEvent) ac
 		return actionRetract
 	}
 }
+
+// decideSweepAction is decideEventAction's counterpart for a liquidity
+// sweep at one (trigger candle, side) key. candidate is nil when this
+// candle no longer sweeps that side's target level under the current
+// data (spec section 6).
+func decideSweepAction(current *Sweep, candidate *NewSweep) action {
+	switch {
+	case current == nil && candidate == nil:
+		return actionNone
+	case current == nil && candidate != nil:
+		return actionInsert
+	case current != nil && candidate != nil && candidate.equalEvidence(*current):
+		return actionSkip
+	case current != nil && candidate != nil:
+		return actionReplace
+	default: // current != nil && candidate == nil
+		return actionRetract
+	}
+}

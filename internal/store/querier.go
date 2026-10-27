@@ -17,6 +17,10 @@ type Querier interface {
 	// The two statements below are the supersede handshake's two steps,
 	// same pattern and same reason as confirmed_swings'.
 	BeginSupersedeEvent(ctx context.Context, arg BeginSupersedeEventParams) (int64, error)
+	// The two statements below are the supersede handshake's two steps,
+	// same pattern and same reason as confirmed_swings' and
+	// structure_events'.
+	BeginSupersedeSweep(ctx context.Context, arg BeginSupersedeSweepParams) (int64, error)
 	// The two statements below are the supersede handshake's two steps (see
 	// 000005's trg_confirmed_swings_enforce_lifecycle comment). Step 1
 	// (begin) removes the old row from idx_confirmed_swings_current, making
@@ -36,6 +40,10 @@ type Querier interface {
 	GetCandleGap(ctx context.Context, arg GetCandleGapParams) (CandleGap, error)
 	GetCurrentCandle(ctx context.Context, arg GetCurrentCandleParams) (Candle, error)
 	GetCurrentEventByTrigger(ctx context.Context, arg GetCurrentEventByTriggerParams) (StructureEvent, error)
+	// GetCurrentSweepByTrigger keys on trigger_open_time, not
+	// trigger_candle_id: see 000006's comment on liquidity_sweeps for why
+	// a row id is not a safe position key across a candle correction.
+	GetCurrentSweepByTrigger(ctx context.Context, arg GetCurrentSweepByTriggerParams) (LiquiditySweep, error)
 	GetCurrentSwing(ctx context.Context, arg GetCurrentSwingParams) (ConfirmedSwing, error)
 	GetInstrumentByID(ctx context.Context, id int64) (Instrument, error)
 	GetInstrumentByProviderAndSymbol(ctx context.Context, arg GetInstrumentByProviderAndSymbolParams) (Instrument, error)
@@ -62,6 +70,7 @@ type Querier interface {
 	// database rejects the insert if any is left out.
 	InsertInstrument(ctx context.Context, arg InsertInstrumentParams) (Instrument, error)
 	InsertStructureEvent(ctx context.Context, arg InsertStructureEventParams) (StructureEvent, error)
+	InsertSweep(ctx context.Context, arg InsertSweepParams) (LiquiditySweep, error)
 	InsertSwing(ctx context.Context, arg InsertSwingParams) (ConfirmedSwing, error)
 	// LatestCurrentEventBefore joins through to the trigger candle's
 	// open_time because ordering "before a point in time" is meaningful in
@@ -119,6 +128,7 @@ type Querier interface {
 	ResolveCandleGap(ctx context.Context, arg ResolveCandleGapParams) (CandleGap, error)
 	ResolveSupersedeCandle(ctx context.Context, arg ResolveSupersedeCandleParams) (int64, error)
 	ResolveSupersedeEvent(ctx context.Context, arg ResolveSupersedeEventParams) (int64, error)
+	ResolveSupersedeSweep(ctx context.Context, arg ResolveSupersedeSweepParams) (int64, error)
 	ResolveSupersedeSwing(ctx context.Context, arg ResolveSupersedeSwingParams) (int64, error)
 	// SetStructureState is a plain upsert: structure_state is a mutable
 	// projection, not an evidence record, so it is the one table in this
