@@ -14,6 +14,15 @@ type Querier interface {
 	// marketdata.Store.SupersedeCandle, which runs all three in one
 	// transaction). None of them is meaningful on its own.
 	BeginSupersedeCandle(ctx context.Context, arg BeginSupersedeCandleParams) (int64, error)
+	// The two statements below are the supersede handshake's two steps,
+	// same pattern and same reason as confirmed_swings'.
+	BeginSupersedeEvent(ctx context.Context, arg BeginSupersedeEventParams) (int64, error)
+	// The two statements below are the supersede handshake's two steps (see
+	// 000005's trg_confirmed_swings_enforce_lifecycle comment). Step 1
+	// (begin) removes the old row from idx_confirmed_swings_current, making
+	// room for a replacement row if one is being inserted; a pure
+	// retraction (no replacement) stops after step 1 and never calls step 2.
+	BeginSupersedeSwing(ctx context.Context, arg BeginSupersedeSwingParams) (int64, error)
 	// CloseCandle freezes a forming candle. The is_closed = false guard makes a
 	// repeat close of an already-closed candle affect zero rows instead of
 	// hitting trg_candles_enforce_lifecycle's handshake-step rejection, so the
@@ -26,9 +35,22 @@ type Querier interface {
 	// from "already resolved" instead of guessing.
 	GetCandleGap(ctx context.Context, arg GetCandleGapParams) (CandleGap, error)
 	GetCurrentCandle(ctx context.Context, arg GetCurrentCandleParams) (Candle, error)
+	GetCurrentEventByTrigger(ctx context.Context, arg GetCurrentEventByTriggerParams) (StructureEvent, error)
+	GetCurrentSwing(ctx context.Context, arg GetCurrentSwingParams) (ConfirmedSwing, error)
 	GetInstrumentByID(ctx context.Context, id int64) (Instrument, error)
 	GetInstrumentByProviderAndSymbol(ctx context.Context, arg GetInstrumentByProviderAndSymbolParams) (Instrument, error)
+	// GetLatestClosedCandle returns the most recent current, closed candle
+	// for an instrument -- used to bound a replay (e.g. a candle
+	// correction's recompute) at "now" in candle terms, without the caller
+	// needing to know what "now" means for this instrument's series.
+	GetLatestClosedCandle(ctx context.Context, instrumentID int64) (Candle, error)
 	GetLatestQuote(ctx context.Context, instrumentID int64) (LatestQuote, error)
+	GetStructureState(ctx context.Context, arg GetStructureStateParams) (StructureState, error)
+	// GetSwingByID looks up a swing directly by id, regardless of whether it
+	// is current or superseded -- used to resolve a structure_state
+	// reference pointer (which names a specific row, not a position) back
+	// to its price.
+	GetSwingByID(ctx context.Context, id int64) (ConfirmedSwing, error)
 	InsertCorrectingCandle(ctx context.Context, arg InsertCorrectingCandleParams) (Candle, error)
 	// InsertInstrument always writes enabled = FALSE. There is no parameter for
 	// it: enablement cannot be set through this query, and no other query in
@@ -39,6 +61,31 @@ type Querier interface {
 	// default (000002): every value must come from the caller, and the
 	// database rejects the insert if any is left out.
 	InsertInstrument(ctx context.Context, arg InsertInstrumentParams) (Instrument, error)
+	InsertStructureEvent(ctx context.Context, arg InsertStructureEventParams) (StructureEvent, error)
+	InsertSwing(ctx context.Context, arg InsertSwingParams) (ConfirmedSwing, error)
+	// LatestCurrentEventBefore joins through to the trigger candle's
+	// open_time because ordering "before a point in time" is meaningful in
+	// candle time, not database insertion order. Used, like
+	// LatestCurrentSwingBefore, to reconstruct as-of state for a
+	// correction's recompute.
+	LatestCurrentEventBefore(ctx context.Context, arg LatestCurrentEventBeforeParams) (StructureEvent, error)
+	// LatestCurrentSwingBefore bounds by pivot_time, which is only a safe
+	// "already reconciled by the walk" bound relative to the POSITION
+	// currently being reconciled (see reconcileSwing's retraction
+	// fallback) -- it is NOT safe as a bound relative to a resume instant
+	// like affectedFrom, because confirmation lags occurrence by
+	// RightBars+1 intervals. Use LatestCurrentSwingConfirmedBefore for that.
+	LatestCurrentSwingBefore(ctx context.Context, arg LatestCurrentSwingBeforeParams) (ConfirmedSwing, error)
+	// LatestCurrentSwingConfirmedBefore bounds by confirmed_at, not
+	// pivot_time: a swing only becomes a usable reference once it is
+	// CONFIRMED, and confirmation lags its own pivot_time by
+	// (RightBars+1)*interval. Used specifically to reconstruct the as-of
+	// state a correction's recompute must resume from -- seeding by
+	// occurrence instead of confirmation can hand the resumed walk a
+	// reference swing that, at the resume instant, was not actually known
+	// yet, and that can emit a wrong BOS or CHOCH on the very first
+	// replayed candles.
+	LatestCurrentSwingConfirmedBefore(ctx context.Context, arg LatestCurrentSwingConfirmedBeforeParams) (ConfirmedSwing, error)
 	// ListCurrentCandlesInRange is the read path aggregation uses: the current
 	// (non-superseded) row for every open_time in [start, end), ordered so the
 	// caller can scan once for first/last open/close and reduce for high/low/
@@ -46,6 +93,16 @@ type Querier interface {
 	// is responsible for detecting; this query does not fill gaps.
 	ListCurrentCandlesInRange(ctx context.Context, arg ListCurrentCandlesInRangeParams) ([]Candle, error)
 	ListEnabledInstruments(ctx context.Context) ([]Instrument, error)
+	// ListLatestCurrentSwings is bounded by max_pivot_time, not merely "the
+	// latest current rows overall": during a correction replay, an
+	// unbounded query can pick up a swing the walk has not reconciled yet
+	// in this pass (a stale row from before the correction that still
+	// happens to be "current" only because the replay has not reached its
+	// position to supersede or retract it). max_pivot_time must be the
+	// latest position this candle's own processing step is entitled to
+	// see -- see decideEstablishmentCandidate's call site for the exact
+	// bound and why it is <=, not <.
+	ListLatestCurrentSwings(ctx context.Context, arg ListLatestCurrentSwingsParams) ([]ConfirmedSwing, error)
 	ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([]CandleGap, error)
 	// RecordCandleGap is idempotent: detecting the same gap twice (a retried
 	// or duplicate-delivered detection event) must not create a second row or
@@ -61,6 +118,13 @@ type Querier interface {
 	// (already resolved, or never existed) rather than assume success.
 	ResolveCandleGap(ctx context.Context, arg ResolveCandleGapParams) (CandleGap, error)
 	ResolveSupersedeCandle(ctx context.Context, arg ResolveSupersedeCandleParams) (int64, error)
+	ResolveSupersedeEvent(ctx context.Context, arg ResolveSupersedeEventParams) (int64, error)
+	ResolveSupersedeSwing(ctx context.Context, arg ResolveSupersedeSwingParams) (int64, error)
+	// SetStructureState is a plain upsert: structure_state is a mutable
+	// projection, not an evidence record, so it is the one table in this
+	// migration that is written in place rather than through a supersede
+	// handshake (000005's comment on the table explains why).
+	SetStructureState(ctx context.Context, arg SetStructureStateParams) (StructureState, error)
 	// UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 	// a still-forming row in place for a later tick of the same minute.
 	// idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE

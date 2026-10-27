@@ -111,6 +111,41 @@ func (q *Queries) GetCurrentCandle(ctx context.Context, arg GetCurrentCandlePara
 	return i, err
 }
 
+const getLatestClosedCandle = `-- name: GetLatestClosedCandle :one
+SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
+WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+ORDER BY open_time DESC
+LIMIT 1
+`
+
+// GetLatestClosedCandle returns the most recent current, closed candle
+// for an instrument -- used to bound a replay (e.g. a candle
+// correction's recompute) at "now" in candle terms, without the caller
+// needing to know what "now" means for this instrument's series.
+func (q *Queries) GetLatestClosedCandle(ctx context.Context, instrumentID int64) (Candle, error) {
+	row := q.db.QueryRowContext(ctx, getLatestClosedCandle, instrumentID)
+	var i Candle
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.OpenTime,
+		&i.CloseTime,
+		&i.Open,
+		&i.High,
+		&i.Low,
+		&i.Close,
+		&i.Volume,
+		&i.Revision,
+		&i.IsClosed,
+		&i.TickAligned,
+		&i.Provider,
+		&i.IngestedAt,
+		&i.SupersededAt,
+		&i.SupersededBy,
+	)
+	return i, err
+}
+
 const insertCorrectingCandle = `-- name: InsertCorrectingCandle :one
 INSERT INTO candles (
     instrument_id, open_time, close_time, open, high, low, close, volume,
