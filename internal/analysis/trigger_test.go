@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
 )
@@ -165,11 +166,12 @@ func TestIntegration_StructureEventsCurrentIndex_ExactlyOnePerTrigger(t *testing
 // about the candle's own values.
 func seedBareCandle(t *testing.T, db *sql.DB, instrumentID int64, minute int) int64 {
 	t.Helper()
+	open := et(minute)
 	var id int64
 	err := db.QueryRowContext(context.Background(),
 		`INSERT INTO candles (instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at)
-		 VALUES ($1, $2, $2 + interval '1 minute', 100, 100, 100, 100, 0, 1, true, true, 'test', now())
-		 RETURNING id`, instrumentID, et(minute)).Scan(&id)
+		 VALUES ($1, $2, $3, 100, 100, 100, 100, 0, 1, true, true, 'test', now())
+		 RETURNING id`, instrumentID, open, open.Add(time.Minute)).Scan(&id)
 	if err != nil {
 		t.Fatalf("seedBareCandle: %v", err)
 	}
