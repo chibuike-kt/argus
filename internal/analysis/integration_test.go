@@ -177,7 +177,7 @@ func TestIntegration_ColdStartEstablishment_Bullish(t *testing.T) {
 	// Establishment fires on the candle that confirms H2 (minute 17's
 	// pivot, confirmed when minute 19 closes) -- the last of the four
 	// swings needed, not an arbitrary later candle.
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 19))
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(19))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 19: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestIntegration_ColdStartEstablishment_Bearish(t *testing.T) {
 		t.Fatalf("Direction = %v, want Bearish", state.Direction)
 	}
 
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", mustCandleIDAt(t, db, instrumentID, 19))
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(19))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 19: %v", err)
 	}
@@ -275,8 +275,7 @@ func TestIntegration_BOS_ContinuesDirection(t *testing.T) {
 		t.Fatalf("EvaluateRange: %v", err)
 	}
 
-	triggerID := mustCandleIDAt(t, db, instrumentID, 20)
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", triggerID)
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(20))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent: %v", err)
 	}
@@ -309,8 +308,7 @@ func TestIntegration_CHOCH_FlipsDirection(t *testing.T) {
 		t.Fatalf("EvaluateRange: %v", err)
 	}
 
-	triggerID := mustCandleIDAt(t, db, instrumentID, 20)
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", triggerID)
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(20))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent: %v", err)
 	}
@@ -357,8 +355,7 @@ func TestIntegration_LowerHighChangesNothing(t *testing.T) {
 
 	// No structure event at the confirming candle (minute 24): a
 	// confirmed-but-lower swing is not itself a break.
-	triggerID := mustCandleIDAt(t, db, instrumentID, 24)
-	_, err = store.GetCurrentEvent(context.Background(), instrumentID, "1m", triggerID)
+	_, err = store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(24))
 	if !errors.Is(err, ErrEventNotFound) {
 		t.Fatalf("GetCurrentEvent at the confirming candle = %v, want ErrEventNotFound: a lower high must not itself produce an event", err)
 	}
@@ -427,8 +424,7 @@ func TestIntegration_SameCandleConfirmsPivotAndUsesItForBreak(t *testing.T) {
 		t.Fatalf("ReferenceSwingHighID = %v, want %d (the swing just confirmed on this same candle)", state.ReferenceSwingHighID, newHigh.ID)
 	}
 
-	triggerID := mustCandleIDAt(t, db, instrumentID, 24)
-	_, err = store.GetCurrentEvent(context.Background(), instrumentID, "1m", triggerID)
+	_, err = store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(24))
 	if !errors.Is(err, ErrEventNotFound) {
 		t.Fatalf("GetCurrentEvent at minute 24 = %v, want ErrEventNotFound: close=120 must be checked against the NEW reference (150), not the stale one (100) -- a stale-pointer bug would wrongly produce a BOS here", err)
 	}
@@ -473,13 +469,11 @@ func TestIntegration_CorrectionRecompute_RetractsDownstreamEvents_PreservesPrior
 	if stateBefore.Direction != DirectionBullish {
 		t.Fatalf("precondition failed: Direction = %v, want Bullish before the correction", stateBefore.Direction)
 	}
-	establishTriggerID := mustCandleIDAt(t, db, instrumentID, 19)
-	oldEstablish, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", establishTriggerID)
+	oldEstablish, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(19))
 	if err != nil {
 		t.Fatalf("precondition failed: GetCurrentEvent (establishment): %v", err)
 	}
-	bosTriggerID := mustCandleIDAt(t, db, instrumentID, 20)
-	oldBOS, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", bosTriggerID)
+	oldBOS, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(20))
 	if err != nil {
 		t.Fatalf("precondition failed: GetCurrentEvent (BOS): %v", err)
 	}
@@ -543,7 +537,7 @@ func TestIntegration_CorrectionRecompute_RetractsDownstreamEvents_PreservesPrior
 	if oldEstablishReloaded.SupersededBy != nil {
 		t.Fatalf("old establishment event has a replacement (%d), want a pure retraction (no replacement): the corrected sequence no longer establishes a direction at all", *oldEstablishReloaded.SupersededBy)
 	}
-	if _, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", establishTriggerID); !errors.Is(err, ErrEventNotFound) {
+	if _, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(19)); !errors.Is(err, ErrEventNotFound) {
 		t.Fatalf("a current establishment event still exists at minute 19 = %v, want ErrEventNotFound (retracted)", err)
 	}
 
@@ -558,7 +552,7 @@ func TestIntegration_CorrectionRecompute_RetractsDownstreamEvents_PreservesPrior
 	if oldBOSReloaded.SupersededAt == nil || oldBOSReloaded.SupersededBy != nil {
 		t.Fatalf("old BOS superseded state = %+v, want retracted (superseded_at set, no replacement)", oldBOSReloaded)
 	}
-	if _, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", bosTriggerID); !errors.Is(err, ErrEventNotFound) {
+	if _, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(20)); !errors.Is(err, ErrEventNotFound) {
 		t.Fatalf("a current BOS event still exists at minute 20 = %v, want ErrEventNotFound (retracted): a BOS cannot stand once the direction it continued was never actually established", err)
 	}
 

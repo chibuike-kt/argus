@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/store"
@@ -14,6 +15,12 @@ import (
 // sweep. direction_established is never tagged -- SweepValidated stays
 // false, the two reference fields stay nil -- because establishment
 // does not break a single reference level the way BOS/CHOCH do.
+//
+// TriggerOpenTime is the position key (see 000007's comment on
+// structure_events: a candle correction mints a new row id for the
+// same position, so a row id is not safe to key "current" on);
+// TriggerCandleID is evidence only, the specific candle revision this
+// event was computed from, never used for lookup.
 type StructureEvent struct {
 	ID                int64
 	InstrumentID      int64
@@ -21,6 +28,7 @@ type StructureEvent struct {
 	Type              EventType
 	DirectionBefore   Direction
 	DirectionAfter    Direction
+	TriggerOpenTime   time.Time
 	TriggerCandleID   int64
 	ReferenceSwingIDs []int64
 	EvaluationTime    clock.EvaluationTime
@@ -52,6 +60,7 @@ func fromEventRow(row store.StructureEvent) (StructureEvent, error) {
 		Type:              eventType,
 		DirectionBefore:   before,
 		DirectionAfter:    after,
+		TriggerOpenTime:   row.TriggerOpenTime,
 		TriggerCandleID:   row.TriggerCandleID,
 		ReferenceSwingIDs: row.ReferenceSwingIds,
 		EvaluationTime:    clock.NewEvaluationTime(row.EvaluationTime),
@@ -87,6 +96,7 @@ type NewStructureEvent struct {
 	Type              EventType
 	DirectionBefore   Direction
 	DirectionAfter    Direction
+	TriggerOpenTime   time.Time
 	TriggerCandleID   int64
 	ReferenceSwingIDs []int64
 	EvaluationTime    clock.EvaluationTime

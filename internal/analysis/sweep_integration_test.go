@@ -133,7 +133,7 @@ func TestIntegration_SweepValidatedCHOCH(t *testing.T) {
 	// 20 is a buy-side sweep of L1 (seeded, price 90) that is ALSO an
 	// isolated fractal low (70, strictly below all four neighbors) --
 	// the reversal-origin protected low. 25 closes below it: a CHOCH.
-	ids := feedCloseCandles(t, db, instrumentID, []closeBar{
+	feedCloseCandles(t, db, instrumentID, []closeBar{
 		{18, 130, 92, 100},
 		{19, 128, 91, 101},
 		{20, 100, 70, 95}, // sweep: low 70 < 90, close 95 > 90
@@ -158,7 +158,7 @@ func TestIntegration_SweepValidatedCHOCH(t *testing.T) {
 		t.Fatalf("protected low price = %v, want 70", protected.Price)
 	}
 
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", ids[25])
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 25: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestIntegration_SweepValidatedBOS(t *testing.T) {
 	// 20 is a sell-side sweep of H1 (seeded, price 125) that is ALSO an
 	// isolated fractal high (140) -- the protected high. 25 closes
 	// above it while direction is still bullish: a continuation BOS.
-	ids := feedCloseCandles(t, db, instrumentID, []closeBar{
+	feedCloseCandles(t, db, instrumentID, []closeBar{
 		{18, 105, 95, 100},
 		{19, 108, 96, 102},
 		{20, 140, 100, 115}, // sweep: high 140 > 125, close 115 < 125
@@ -211,7 +211,7 @@ func TestIntegration_SweepValidatedBOS(t *testing.T) {
 		t.Fatalf("protected high price = %v, want 140", protected.Price)
 	}
 
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", ids[25])
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 25: %v", err)
 	}
@@ -237,13 +237,13 @@ func TestIntegration_BOS_NotSweepValidated_DirectionStillUpdates(t *testing.T) {
 
 	seedBullishEstablished(t, store, instrumentID)
 	// A clean breakout with no sweep anywhere near either reference level.
-	ids := feedCloseCandles(t, db, instrumentID, []closeBar{{30, 135, 120, 130}})
+	feedCloseCandles(t, db, instrumentID, []closeBar{{30, 135, 120, 130}})
 
 	if err := e.EvaluateRange(context.Background(), instrumentID, "1m", et(30), et(31)); err != nil {
 		t.Fatalf("EvaluateRange: %v", err)
 	}
 
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", ids[30])
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(30))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestIntegration_CorrectionRecompute_SweepAndProtectedTag_PreservesPriorEvid
 	establishEvent, err := store.InsertEvent(context.Background(), NewStructureEvent{
 		InstrumentID: instrumentID, Timeframe: "1m", Type: EventDirectionEstablished,
 		DirectionBefore: DirectionUndetermined, DirectionAfter: DirectionBullish,
-		TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{h1.ID, h1.ID, l1.ID, l1.ID},
+		TriggerOpenTime: et(1), TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{h1.ID, h1.ID, l1.ID, l1.ID},
 		EvaluationTime: clockEvalTime(1), AlgorithmVersion: testAlgorithmVersion,
 	})
 	if err != nil {
@@ -322,7 +322,7 @@ func TestIntegration_CorrectionRecompute_SweepAndProtectedTag_PreservesPriorEvid
 		t.Fatalf("seed live state: %v", err)
 	}
 
-	ids := feedCloseCandles(t, db, instrumentID, []closeBar{
+	feedCloseCandles(t, db, instrumentID, []closeBar{
 		{18, 130, 92, 100},
 		{19, 128, 91, 101},
 		{20, 100, 70, 95}, // sweep + protected low, before correction
@@ -344,7 +344,7 @@ func TestIntegration_CorrectionRecompute_SweepAndProtectedTag_PreservesPriorEvid
 	if err != nil {
 		t.Fatalf("precondition GetCurrentSwing: %v", err)
 	}
-	oldEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", ids[25])
+	oldEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("precondition GetCurrentEvent: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestIntegration_CorrectionRecompute_SweepAndProtectedTag_PreservesPriorEvid
 	// The CURRENT CHOCH at minute 25 now references L1 again and has
 	// lost sweep validation -- L1 was seeded directly, so its own
 	// pivot candle (a fake id) can never match a current sweep.
-	newEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", ids[25])
+	newEvent, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(25))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent after correction: %v", err)
 	}

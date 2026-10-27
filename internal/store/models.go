@@ -128,6 +128,7 @@ type StructureEvent struct {
 	SweepValidated    bool          `json:"sweep_validated"`
 	SweepEventID      sql.NullInt64 `json:"sweep_event_id"`
 	ProtectedSwingID  sql.NullInt64 `json:"protected_swing_id"`
+	TriggerOpenTime   time.Time     `json:"trigger_open_time"`
 }
 
 type StructureState struct {

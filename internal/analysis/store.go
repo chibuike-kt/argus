@@ -204,13 +204,15 @@ func (s *Store) LatestSwingConfirmedBefore(ctx context.Context, instrumentID int
 
 // --- structure_events ---
 
-// GetCurrentEvent returns the current event for triggerCandleID, or
-// ErrEventNotFound.
-func (s *Store) GetCurrentEvent(ctx context.Context, instrumentID int64, timeframe string, triggerCandleID int64) (StructureEvent, error) {
+// GetCurrentEvent returns the current event at triggerOpenTime, or
+// ErrEventNotFound. triggerOpenTime, not a candle id, is the position
+// key -- stable across a correction to that exact candle (see 000007's
+// comment on structure_events).
+func (s *Store) GetCurrentEvent(ctx context.Context, instrumentID int64, timeframe string, triggerOpenTime time.Time) (StructureEvent, error) {
 	row, err := s.q.GetCurrentEventByTrigger(ctx, store.GetCurrentEventByTriggerParams{
 		InstrumentID:    instrumentID,
 		Timeframe:       timeframe,
-		TriggerCandleID: triggerCandleID,
+		TriggerOpenTime: triggerOpenTime,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -222,7 +224,7 @@ func (s *Store) GetCurrentEvent(ctx context.Context, instrumentID int64, timefra
 }
 
 // InsertEvent inserts a new structure event where none currently exists
-// for its trigger candle.
+// for its (trigger open time).
 func (s *Store) InsertEvent(ctx context.Context, n NewStructureEvent) (StructureEvent, error) {
 	row, err := s.q.InsertStructureEvent(ctx, store.InsertStructureEventParams{
 		InstrumentID:      n.InstrumentID,
@@ -230,6 +232,7 @@ func (s *Store) InsertEvent(ctx context.Context, n NewStructureEvent) (Structure
 		EventType:         n.Type.String(),
 		DirectionBefore:   n.DirectionBefore.String(),
 		DirectionAfter:    n.DirectionAfter.String(),
+		TriggerOpenTime:   n.TriggerOpenTime,
 		TriggerCandleID:   n.TriggerCandleID,
 		ReferenceSwingIds: n.ReferenceSwingIDs,
 		EvaluationTime:    n.EvaluationTime.Time(),
@@ -282,14 +285,14 @@ func (s *Store) SupersedeEvent(ctx context.Context, oldID int64, now time.Time, 
 	return &newRow, nil
 }
 
-// LatestEventBefore returns the latest current event whose trigger
-// candle's open_time is strictly before 'before', or ErrEventNotFound.
+// LatestEventBefore returns the latest current event whose
+// trigger_open_time is strictly before 'before', or ErrEventNotFound.
 // Used only for as-of reconstruction.
 func (s *Store) LatestEventBefore(ctx context.Context, instrumentID int64, timeframe string, before time.Time) (StructureEvent, error) {
 	row, err := s.q.LatestCurrentEventBefore(ctx, store.LatestCurrentEventBeforeParams{
-		InstrumentID: instrumentID,
-		Timeframe:    timeframe,
-		OpenTime:     before,
+		InstrumentID:    instrumentID,
+		Timeframe:       timeframe,
+		TriggerOpenTime: before,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

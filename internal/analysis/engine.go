@@ -420,14 +420,14 @@ func (e *Engine) applyBreakStep(ctx context.Context, txStore *Store, instrumentI
 			candidate = &NewStructureEvent{
 				InstrumentID: instrumentID, Timeframe: timeframe, Type: eventType,
 				DirectionBefore: state.Direction, DirectionAfter: newDirection,
-				TriggerCandleID: c.ID, ReferenceSwingIDs: []int64{refSwing.ID},
+				TriggerOpenTime: c.OpenTime, TriggerCandleID: c.ID, ReferenceSwingIDs: []int64{refSwing.ID},
 				EvaluationTime: clock.NewEvaluationTime(now), AlgorithmVersion: e.cfg.AlgorithmVersion,
 				SweepValidated: validated, SweepEventID: sweepEventID, ProtectedSwingID: protectedSwingID,
 			}
 		}
 	}
 
-	row, err := txStore.GetCurrentEvent(ctx, instrumentID, timeframe, c.ID)
+	row, err := txStore.GetCurrentEvent(ctx, instrumentID, timeframe, c.OpenTime)
 	var current *StructureEvent
 	switch {
 	case errors.Is(err, ErrEventNotFound):
@@ -519,7 +519,7 @@ func (e *Engine) decideEstablishmentCandidate(ctx context.Context, txStore *Stor
 	return &NewStructureEvent{
 		InstrumentID: instrumentID, Timeframe: timeframe, Type: EventDirectionEstablished,
 		DirectionBefore: DirectionUndetermined, DirectionAfter: direction,
-		TriggerCandleID:   c.ID,
+		TriggerOpenTime: c.OpenTime, TriggerCandleID: c.ID,
 		ReferenceSwingIDs: []int64{highs[1].ID, highs[0].ID, lows[1].ID, lows[0].ID},
 		EvaluationTime:    clock.NewEvaluationTime(now), AlgorithmVersion: e.cfg.AlgorithmVersion,
 	}, nil
