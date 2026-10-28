@@ -587,3 +587,109 @@ func TestIntegration_StructuralLiquidity_RecomputesUnderCorrection(t *testing.T)
 		t.Fatalf("after = %+v, want StructuralPresent with swing id %d (70): the corrected candle breaches the newer candidate but not the protected low", after, protectedLow.ID)
 	}
 }
+
+// TestIntegration_StructuralLiquidity_PointInTimeSafe_NoLookAhead pins
+// the look-ahead fix: ResolveStructuralLiquidity takes an explicit asOf
+// and must behave as if evaluated at that instant, never using a swing
+// that pivots or confirms later, even though every row already exists
+// in the database by the time this test runs its three checks.
+//
+// Candidate (80) pivots at minute 40, confirms at 43 (window [38..42]'s
+// last close). Its up-leg, the following swing high (110), pivots at
+// 48 and confirms at 51 (window [46..50]'s last close). Three asOf
+// values walk across both boundaries:
+//   - asOf=41: the candidate's own pivot (40) is at or before asOf, but
+//     its confirmed_at (43) is after it -- not yet known. This is the
+//     candidate-walk bound (and the one that would otherwise reach
+//     isIntact with an empty, vacuously-passing ListCandles(43, 41)
+//     range): result must be StructuralAbsent, not a wrong Present.
+//   - asOf=49: the candidate is now confirmed (43 <= 49), but its up-leg
+//     (confirmed at 51) is not -- the shape test's up-leg endpoint must
+//     not be usable yet: still StructuralAbsent.
+//   - asOf=55: both are confirmed -- now correctly StructuralPresent.
+func TestIntegration_StructuralLiquidity_PointInTimeSafe_NoLookAhead(t *testing.T) {
+	db := testDB(t)
+	instrumentID := testInstrument(t, db)
+	e := newTestEngine(t, db)
+	store := NewStore(db)
+	candles := newTestCandleSource(db)
+
+	seedBullishEstablished(t, store, instrumentID)
+	feedCloseCandles(t, db, instrumentID, []closeBar{
+		{18, 130, 92, 100},
+		{19, 128, 91, 101},
+		{20, 100, 70, 95}, // sweep + protected low (70)
+		{21, 128, 93, 102},
+		{22, 126, 94, 103},
+		{25, 135, 120, 130}, // sweep-validated BOS above H1 (125)
+	})
+	if err := e.EvaluateRange(context.Background(), instrumentID, "1m", et(18), et(26)); err != nil {
+		t.Fatalf("EvaluateRange (base): %v", err)
+	}
+
+	// Second fib [70, 125], eq=97. Candidate low (80, discount half),
+	// pivot 40, confirms at 43. Its up-leg, a following swing high
+	// (110), pivots at 48 and confirms at 51.
+	feedCloseCandles(t, db, instrumentID, []closeBar{
+		{38, 105, 95, 100},
+		{39, 105, 95, 100},
+		{40, 105, 80, 100}, // candidate swing low (80), confirms at minute 43
+		{41, 105, 95, 100},
+		{42, 105, 95, 100},
+		{46, 100, 95, 98},
+		{47, 100, 95, 98},
+		{48, 110, 95, 100}, // following swing high (110), confirms at minute 51
+		{49, 100, 95, 98},
+		{50, 100, 95, 98},
+	})
+	if err := e.EvaluateRange(context.Background(), instrumentID, "1m", et(38), et(51)); err != nil {
+		t.Fatalf("EvaluateRange: %v", err)
+	}
+
+	candidate, err := store.GetCurrentSwing(context.Background(), instrumentID, "1m", SwingLow, clock.NewEventTime(et(40)))
+	if err != nil {
+		t.Fatalf("GetCurrentSwing (candidate): %v", err)
+	}
+	if candidate.Price != 80 {
+		t.Fatalf("candidate price = %v, want 80", candidate.Price)
+	}
+	if got := candidate.ConfirmedAt.Time(); !got.Equal(et(43)) {
+		t.Fatalf("candidate.ConfirmedAt = %v, want %v (precondition the test's asOf values depend on)", got, et(43))
+	}
+	followingHigh, err := store.GetCurrentSwing(context.Background(), instrumentID, "1m", SwingHigh, clock.NewEventTime(et(48)))
+	if err != nil {
+		t.Fatalf("GetCurrentSwing (following high): %v", err)
+	}
+	if got := followingHigh.ConfirmedAt.Time(); !got.Equal(et(51)) {
+		t.Fatalf("followingHigh.ConfirmedAt = %v, want %v (precondition the test's asOf values depend on)", got, et(51))
+	}
+
+	state, err := store.GetState(context.Background(), instrumentID, "1m")
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+
+	notYetConfirmed, ok, err := ResolveStructuralLiquidity(context.Background(), store, candles, state, et(41), time.Minute, DefaultMinLegSpan)
+	if err != nil || !ok {
+		t.Fatalf("ResolveStructuralLiquidity (asOf=41): ok=%v err=%v", ok, err)
+	}
+	if notYetConfirmed.Status != StructuralAbsent {
+		t.Fatalf("asOf=41: result = %+v, want StructuralAbsent: the candidate's own confirmed_at (43) is after asOf (41) -- it is not yet known, and must not be vacuously treated as intact", notYetConfirmed)
+	}
+
+	upLegNotYetConfirmed, ok, err := ResolveStructuralLiquidity(context.Background(), store, candles, state, et(49), time.Minute, DefaultMinLegSpan)
+	if err != nil || !ok {
+		t.Fatalf("ResolveStructuralLiquidity (asOf=49): ok=%v err=%v", ok, err)
+	}
+	if upLegNotYetConfirmed.Status != StructuralAbsent {
+		t.Fatalf("asOf=49: result = %+v, want StructuralAbsent: the candidate is confirmed (43 <= 49) but its up-leg (confirmed at 51) is not -- the shape test's up-leg endpoint must not be usable yet", upLegNotYetConfirmed)
+	}
+
+	bothConfirmed, ok, err := ResolveStructuralLiquidity(context.Background(), store, candles, state, et(55), time.Minute, DefaultMinLegSpan)
+	if err != nil || !ok {
+		t.Fatalf("ResolveStructuralLiquidity (asOf=55): ok=%v err=%v", ok, err)
+	}
+	if bothConfirmed.Status != StructuralPresent || bothConfirmed.Swing.ID != candidate.ID {
+		t.Fatalf("asOf=55: result = %+v, want StructuralPresent with swing id %d (80): both the candidate and its up-leg are now confirmed", bothConfirmed, candidate.ID)
+	}
+}

@@ -184,7 +184,14 @@ const structuralLiquidityScanBatch = 50
 func evaluateStructuralCandidates(ctx context.Context, s *Store, candles CandleSource, instrumentID int64, timeframe string, swingType, oppositeType SwingType, asOf time.Time, interval time.Duration, minLegSpan int, inQualifyingHalf func(price int64) bool) (Swing, bool, error) {
 	cursor := asOf
 	for {
-		batch, err := s.ListLatestSwings(ctx, instrumentID, timeframe, swingType, cursor, structuralLiquidityScanBatch)
+		// Point-in-time safe: confirmed_at <= asOf, not merely
+		// pivot_time <= cursor. A swing can pivot before asOf but
+		// confirm after it (confirmation lags the pivot by
+		// RightBars+1 intervals); without this bound such a candidate
+		// would reach isIntact with an empty [ConfirmedAt, asOf) scan
+		// range and pass vacuously, wrongly appearing both confirmed
+		// and intact as of an instant before it was actually known.
+		batch, err := s.ListLatestSwingsConfirmedBefore(ctx, instrumentID, timeframe, swingType, cursor, asOf, structuralLiquidityScanBatch)
 		if err != nil {
 			return Swing{}, false, err
 		}
@@ -197,14 +204,25 @@ func evaluateStructuralCandidates(ctx context.Context, s *Store, candles CandleS
 				continue
 			}
 
-			preceding, err := s.LatestSwingBefore(ctx, instrumentID, timeframe, oppositeType, candidate.PivotTime.Time())
+			// asOf here is not load-bearing (the candidate above is
+			// already confirmed by asOf, and confirmation never
+			// precedes pivot, so the preceding swing is necessarily
+			// known by asOf too) -- added for symmetry with the
+			// following-swing bound below, so the invariant is
+			// explicit rather than accidental.
+			preceding, err := s.LatestSwingBeforeKnownAsOf(ctx, instrumentID, timeframe, oppositeType, candidate.PivotTime.Time(), asOf)
 			if errors.Is(err, ErrSwingNotFound) {
 				continue // no down-leg yet: cannot satisfy the shape test
 			}
 			if err != nil {
 				return Swing{}, false, err
 			}
-			following, err := s.SwingAfter(ctx, instrumentID, timeframe, oppositeType, candidate.PivotTime.Time())
+			// Point-in-time safe: the up-leg endpoint must itself be
+			// known as of asOf, not merely pivoting after the
+			// candidate -- otherwise the shape test could complete
+			// using a swing that, at a historical asOf, has not yet
+			// confirmed (no look-ahead, guide 16).
+			following, err := s.SwingAfter(ctx, instrumentID, timeframe, oppositeType, candidate.PivotTime.Time(), asOf)
 			if errors.Is(err, ErrSwingNotFound) {
 				continue // no up-leg yet: cannot satisfy the shape test
 			}

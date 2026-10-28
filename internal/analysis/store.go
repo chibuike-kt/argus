@@ -231,20 +231,73 @@ func (s *Store) LatestQualifyingProtectedAnchorBefore(ctx context.Context, instr
 // structural-liquidity shape test (spec section 9) to find a
 // candidate's up-leg (or down-leg, by calling with the opposite type)
 // endpoint: the confirmed swing immediately following it.
-func (s *Store) SwingAfter(ctx context.Context, instrumentID int64, timeframe string, swingType SwingType, after time.Time) (Swing, error) {
+// SwingAfter is point-in-time safe: asOf bounds confirmed_at, not just
+// pivot_time, so a swing that pivots after 'after' but has not yet
+// confirmed as of asOf is never returned (no look-ahead, guide 16).
+func (s *Store) SwingAfter(ctx context.Context, instrumentID int64, timeframe string, swingType SwingType, after, asOf time.Time) (Swing, error) {
 	row, err := s.q.EarliestCurrentSwingAfter(ctx, store.EarliestCurrentSwingAfterParams{
 		InstrumentID: instrumentID,
 		Timeframe:    timeframe,
 		SwingType:    swingType.String(),
 		PivotTime:    after,
+		ConfirmedAt:  asOf,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Swing{}, ErrSwingNotFound
 		}
-		return Swing{}, fmt.Errorf("analysis: swing after %s: %w", after, err)
+		return Swing{}, fmt.Errorf("analysis: swing after %s known as of %s: %w", after, asOf, err)
 	}
 	return fromSwingRow(row)
+}
+
+// LatestSwingBeforeKnownAsOf is LatestSwingBefore's point-in-time-safe
+// sibling: before bounds pivot_time (the candidate's own pivot, for the
+// shape test's down-leg) and asOf independently bounds confirmed_at.
+func (s *Store) LatestSwingBeforeKnownAsOf(ctx context.Context, instrumentID int64, timeframe string, swingType SwingType, before, asOf time.Time) (Swing, error) {
+	row, err := s.q.LatestCurrentSwingBeforeKnownAsOf(ctx, store.LatestCurrentSwingBeforeKnownAsOfParams{
+		InstrumentID: instrumentID,
+		Timeframe:    timeframe,
+		SwingType:    swingType.String(),
+		PivotTime:    before,
+		ConfirmedAt:  asOf,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Swing{}, ErrSwingNotFound
+		}
+		return Swing{}, fmt.Errorf("analysis: latest swing before %s known as of %s: %w", before, asOf, err)
+	}
+	return fromSwingRow(row)
+}
+
+// ListLatestSwingsConfirmedBefore is ListLatestSwings' point-in-time-
+// safe sibling, for structural liquidity's candidate walk only --
+// ListLatestSwings itself must stay as-is for decideEstablishmentCandidate's
+// live, same-pass walk. maxPivotTime remains the pagination cursor;
+// asOf independently bounds confirmed_at, excluding a swing that pivots
+// at or before maxPivotTime but has not yet confirmed as of asOf.
+func (s *Store) ListLatestSwingsConfirmedBefore(ctx context.Context, instrumentID int64, timeframe string, swingType SwingType, maxPivotTime, asOf time.Time, limit int32) ([]Swing, error) {
+	rows, err := s.q.ListLatestCurrentSwingsConfirmedBefore(ctx, store.ListLatestCurrentSwingsConfirmedBeforeParams{
+		InstrumentID: instrumentID,
+		Timeframe:    timeframe,
+		SwingType:    swingType.String(),
+		PivotTime:    maxPivotTime,
+		ConfirmedAt:  asOf,
+		Limit:        limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("analysis: list latest swings confirmed before %s: %w", asOf, err)
+	}
+	out := make([]Swing, 0, len(rows))
+	for _, row := range rows {
+		sw, err := fromSwingRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sw)
+	}
+	return out, nil
 }
 
 // --- structure_events ---

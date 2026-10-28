@@ -38,6 +38,14 @@ type Querier interface {
 	// given pivot_time -- the shape test's up-leg endpoint (spec section 9:
 	// "this low out to the following confirmed swing high"). Strictly
 	// after, mirroring LatestCurrentSwingBefore's strictly-before sibling.
+	// Bounded by confirmed_at <= $5: this is the up-leg's point-in-time
+	// eligibility bound (not merely "exists"), since a pivot can occur
+	// before an evaluation point (asOf) but not confirm until after it --
+	// without this bound, a point-in-time caller (a replay or backtest at
+	// a historical asOf) could complete a shape test with a swing that, at
+	// that instant, was not yet known (no look-ahead, guide 16). This
+	// query is new and used only by structural liquidity's shape test, so
+	// the bound is added here directly rather than as a separate variant.
 	EarliestCurrentSwingAfter(ctx context.Context, arg EarliestCurrentSwingAfterParams) (ConfirmedSwing, error)
 	// EarliestSweepValidatedEventByProtectedSwing finds the establishing
 	// break tied to a protected anchor (spec section 9's second fib): of
@@ -104,6 +112,16 @@ type Querier interface {
 	// like affectedFrom, because confirmation lags occurrence by
 	// RightBars+1 intervals. Use LatestCurrentSwingConfirmedBefore for that.
 	LatestCurrentSwingBefore(ctx context.Context, arg LatestCurrentSwingBeforeParams) (ConfirmedSwing, error)
+	// LatestCurrentSwingBeforeKnownAsOf is LatestCurrentSwingBefore's
+	// point-in-time-safe sibling: pivot_time < $4 (the candidate's own
+	// pivot, for the shape test's down-leg) AND confirmed_at <= $5 (known
+	// as of asOf). Once the candidate itself is bounded by confirmed_at <=
+	// asOf, the preceding swing is already confirmed by asOf by
+	// implication (it pivots strictly earlier still, and confirmation
+	// never precedes pivot), so this bound is not load-bearing today -- it
+	// is added for symmetry with EarliestCurrentSwingAfter's bound and so
+	// the invariant is explicit here rather than accidental.
+	LatestCurrentSwingBeforeKnownAsOf(ctx context.Context, arg LatestCurrentSwingBeforeKnownAsOfParams) (ConfirmedSwing, error)
 	// LatestCurrentSwingConfirmedBefore bounds by confirmed_at, not
 	// pivot_time: a swing only becomes a usable reference once it is
 	// CONFIRMED, and confirmation lags its own pivot_time by
@@ -151,6 +169,17 @@ type Querier interface {
 	// see -- see decideEstablishmentCandidate's call site for the exact
 	// bound and why it is <=, not <.
 	ListLatestCurrentSwings(ctx context.Context, arg ListLatestCurrentSwingsParams) ([]ConfirmedSwing, error)
+	// ListLatestCurrentSwingsConfirmedBefore is ListLatestCurrentSwings'
+	// point-in-time-safe sibling for structural liquidity's candidate walk
+	// specifically -- do not use this for ListLatestCurrentSwings' own
+	// caller (decideEstablishmentCandidate), whose max_pivot_time bound is
+	// already correct for a live, same-pass walk and must not change.
+	// Bounded by BOTH pivot_time <= $4 (the pagination cursor) AND
+	// confirmed_at <= $5 (point-in-time eligibility): a swing can pivot
+	// before asOf but confirm after it (confirmation lags the pivot by
+	// RightBars+1 intervals), and such a swing must never be treated as
+	// "the most recent confirmed swing" as of a historical asOf.
+	ListLatestCurrentSwingsConfirmedBefore(ctx context.Context, arg ListLatestCurrentSwingsConfirmedBeforeParams) ([]ConfirmedSwing, error)
 	ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([]CandleGap, error)
 	// RecordCandleGap is idempotent: detecting the same gap twice (a retried
 	// or duplicate-delivered detection event) must not create a second row or
