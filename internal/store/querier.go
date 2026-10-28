@@ -34,6 +34,20 @@ type Querier interface {
 	// than a confusing trigger error (guide 14: queue/worker retries must not
 	// turn a repeat delivery into a spurious failure).
 	CloseCandle(ctx context.Context, arg CloseCandleParams) (Candle, error)
+	// EarliestCurrentSwingAfter finds the swing immediately following a
+	// given pivot_time -- the shape test's up-leg endpoint (spec section 9:
+	// "this low out to the following confirmed swing high"). Strictly
+	// after, mirroring LatestCurrentSwingBefore's strictly-before sibling.
+	EarliestCurrentSwingAfter(ctx context.Context, arg EarliestCurrentSwingAfterParams) (ConfirmedSwing, error)
+	// EarliestSweepValidatedEventByProtectedSwing finds the establishing
+	// break tied to a protected anchor (spec section 9's second fib): of
+	// every current, sweep-validated break referencing protectedSwingID
+	// (an establishing CHOCH plus any later continuation BOSs all validate
+	// against the same anchor as it survives), the earliest by trigger
+	// time is the one that first broke the opposing swing this fib anchors
+	// to. trigger_open_time is unique per current row at a given position,
+	// so "earliest" is never ambiguous.
+	EarliestSweepValidatedEventByProtectedSwing(ctx context.Context, arg EarliestSweepValidatedEventByProtectedSwingParams) (StructureEvent, error)
 	// GetCandleGap returns a gap regardless of resolved state, so a caller
 	// that got zero rows from ResolveCandleGap can tell "never existed" apart
 	// from "already resolved" instead of guessing.

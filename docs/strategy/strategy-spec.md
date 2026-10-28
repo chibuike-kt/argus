@@ -1,6 +1,6 @@
 # ARGUS Strategy Specification
 
-- Version: 0.5.0
+- Version: 0.6.0
 - Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
@@ -229,6 +229,60 @@ Scope:
   equilibrium value preserved as evidence on a POI or event, that batch defines the snapshot and
   provenance; this version stores nothing.
 
+## 9. Structural liquidity
+
+Batch 4, the first of its three liquidity groups. Transactional liquidity and inducement are
+later sections; this one covers structural liquidity only. Structural liquidity is the low
+(bullish) or high (bearish) the trend is expected to sweep before it continues. This section
+identifies it. The sweep-and-continuation mechanic and the "no structural liquidity, no trade"
+rule are applied in the setup and entry batch.
+
+The second fib (the structural-liquidity range), a different fib from section 8's
+premium/discount range:
+
+- Bullish: drawn from the protected low to the broken swing high, the swing high the
+  sweep-validated bullish break closed above (section 7). Bearish: from the protected high to
+  the broken swing low.
+- [Provisional] The low anchor (bullish) is the protected low, the reversal-origin extreme, not
+  the swept swing. This is the one open item still to verify against a marked chart; the
+  equilibrium and therefore the qualifying zone depend on it.
+- Equilibrium is the 50% level, computed exactly as in section 8 (`low + (high - low) / 2`,
+  truncating toward the low). The qualifying half is at or below equilibrium for bullish, at or
+  above for bearish.
+
+Identity:
+
+- Bullish structural liquidity is the most recent confirmed swing low, by pivot time, that is
+  all of: (a) in the qualifying half of the second fib (price at or below equilibrium),
+  (b) intact, and (c) passing the shape test below. Bearish is the mirror: the most recent
+  intact confirmed swing high in the premium half passing the shape test.
+- Intact means not yet taken: no finalized candle since the swing's confirmation has traded
+  below the structural-liquidity low (bullish) or above the structural-liquidity high
+  (bearish). Once a finalized candle trades through it, it is no longer intact.
+
+Shape test (the "obvious A or V" proxy):
+
+- A single-candle extreme never qualifies. The swing's two legs, the move from the preceding
+  confirmed swing into it and the move out to the following confirmed swing, must each span at
+  least N candles, so the low or high is a multi-candle V or A rather than a lone wick.
+- [Provisional] N = 3. The rule's shape is locked; the exact N is a backtesting tuning knob.
+
+Classification and the gate:
+
+- A structure has structural liquidity when at least one confirmed swing in the qualifying half
+  is intact and passes the shape test; the most recent such swing is the structural liquidity.
+  When none exists, the structure is structural-absent, which is the inducement case (a later
+  section). This section records structural-present with the identified swing, or
+  structural-absent. The tradeability rule "no structural liquidity, no trade" is applied in the
+  setup and entry batch, not here.
+
+Determinism and persistence:
+
+- Structural liquidity is derived from stored swings, the active structure, and the candle
+  series (for the intact check), so it recomputes deterministically and needs no new table in
+  this section. If a later batch records the identified structural liquidity as evidence on a
+  setup or POI, that batch defines the snapshot; this section persists nothing.
+
 ## Scope of this version
 
 In scope: single instrument, single timeframe. Batch 1: swing detection, structural
@@ -237,11 +291,12 @@ above. Batch 2: single-candle liquidity sweeps (strict, same-candle reclaim), tw
 protected anchors (one per side, each designated until invalidated), and sweep-validation of
 BOS / CHOCH as the opposing-side-sweep-then-break sequence. Direction behaviour from batch 1
 is unchanged by batch 2. Batch 3: premium, discount, and equilibrium over the active
-structure's range, as a pure derived classification with no persistence.
+structure's range, as a pure derived classification with no persistence. Batch 4 (in
+progress): structural liquidity (section 9) as a derived classification; transactional and
+inducement liquidity follow as later sections.
 
-Not yet decided, do not implement: liquidity
-classification (transactional, structural, inducement) and structural-liquidity validity
-rules; supply/demand and support/resistance zones; equal highs and lows; order blocks;
+Not yet decided, do not implement: transactional and inducement liquidity (structural
+liquidity is section 9); supply/demand and support/resistance zones; equal highs and lows; order blocks;
 fair value gaps; displacement and ATR; POI (order block and QMR) and retests; higher-
 timeframe context and multi-timeframe alignment; mandatory condition grouping; setup
 lifecycle; entry / stop / target construction; and event precedence on collision. These are
@@ -284,3 +339,13 @@ Batch 3:
 - equilibrium value correctness, including an odd `high - low` where truncation toward the low applies,
 - undefined when direction is UNDETERMINED, when the protected anchor is absent (with no fallback to the latest opposing swing), and when the endpoints do not form a positive range,
 - the range top tracking a newly confirmed higher swing high while the protected low stays fixed, shifting equilibrium accordingly.
+
+Batch 4 (structural liquidity):
+
+- a qualifying bullish structural-liquidity low (most recent intact confirmed swing low in the discount half of the second fib, passing the leg-span shape test) and the bearish mirror,
+- a candidate disqualified because it sits above equilibrium (premium half) in a bullish structure,
+- a candidate disqualified because it is no longer intact (a finalized candle has traded through it),
+- a single-candle or short-leg extreme disqualified by the shape test (each leg must span at least N candles),
+- a more recent qualifying swing superseding an earlier one as the structural liquidity,
+- structural-absent: no qualifying swing in the zone, classified as the inducement case,
+- the classification recomputing deterministically under a candle correction.

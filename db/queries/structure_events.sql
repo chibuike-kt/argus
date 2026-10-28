@@ -41,6 +41,21 @@ WHERE instrument_id = $1 AND timeframe = $2 AND superseded_at IS NULL
 ORDER BY trigger_open_time DESC
 LIMIT 1;
 
+-- EarliestSweepValidatedEventByProtectedSwing finds the establishing
+-- break tied to a protected anchor (spec section 9's second fib): of
+-- every current, sweep-validated break referencing protectedSwingID
+-- (an establishing CHOCH plus any later continuation BOSs all validate
+-- against the same anchor as it survives), the earliest by trigger
+-- time is the one that first broke the opposing swing this fib anchors
+-- to. trigger_open_time is unique per current row at a given position,
+-- so "earliest" is never ambiguous.
+-- name: EarliestSweepValidatedEventByProtectedSwing :one
+SELECT * FROM structure_events
+WHERE instrument_id = $1 AND timeframe = $2 AND superseded_at IS NULL
+  AND sweep_validated = true AND protected_swing_id = $3
+ORDER BY trigger_open_time ASC
+LIMIT 1;
+
 -- LatestInvalidatingChochAfter finds whether a CHOCH flipping away
 -- from direction_before has occurred strictly after a protected
 -- anchor's establishment and strictly before the correction's resume

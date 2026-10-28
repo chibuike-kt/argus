@@ -38,6 +38,51 @@ func (q *Queries) BeginSupersedeSwing(ctx context.Context, arg BeginSupersedeSwi
 	return result.RowsAffected()
 }
 
+const earliestCurrentSwingAfter = `-- name: EarliestCurrentSwingAfter :one
+SELECT id, instrument_id, timeframe, swing_type, pivot_time, price, confirmed_at, evaluation_time, algorithm_version, source_candle_ids, superseded_at, superseded_by, created_at FROM confirmed_swings
+WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL
+  AND pivot_time > $4
+ORDER BY pivot_time ASC
+LIMIT 1
+`
+
+type EarliestCurrentSwingAfterParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	Timeframe    string    `json:"timeframe"`
+	SwingType    string    `json:"swing_type"`
+	PivotTime    time.Time `json:"pivot_time"`
+}
+
+// EarliestCurrentSwingAfter finds the swing immediately following a
+// given pivot_time -- the shape test's up-leg endpoint (spec section 9:
+// "this low out to the following confirmed swing high"). Strictly
+// after, mirroring LatestCurrentSwingBefore's strictly-before sibling.
+func (q *Queries) EarliestCurrentSwingAfter(ctx context.Context, arg EarliestCurrentSwingAfterParams) (ConfirmedSwing, error) {
+	row := q.db.QueryRowContext(ctx, earliestCurrentSwingAfter,
+		arg.InstrumentID,
+		arg.Timeframe,
+		arg.SwingType,
+		arg.PivotTime,
+	)
+	var i ConfirmedSwing
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.Timeframe,
+		&i.SwingType,
+		&i.PivotTime,
+		&i.Price,
+		&i.ConfirmedAt,
+		&i.EvaluationTime,
+		&i.AlgorithmVersion,
+		pq.Array(&i.SourceCandleIds),
+		&i.SupersededAt,
+		&i.SupersededBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getCurrentSwing = `-- name: GetCurrentSwing :one
 SELECT id, instrument_id, timeframe, swing_type, pivot_time, price, confirmed_at, evaluation_time, algorithm_version, source_candle_ids, superseded_at, superseded_by, created_at FROM confirmed_swings
 WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND pivot_time = $4

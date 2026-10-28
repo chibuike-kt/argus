@@ -226,6 +226,27 @@ func (s *Store) LatestQualifyingProtectedAnchorBefore(ctx context.Context, instr
 	return fromSwingRow(row)
 }
 
+// SwingAfter returns the earliest current swing of swingType with
+// pivot_time strictly after 'after', or ErrSwingNotFound. Used by the
+// structural-liquidity shape test (spec section 9) to find a
+// candidate's up-leg (or down-leg, by calling with the opposite type)
+// endpoint: the confirmed swing immediately following it.
+func (s *Store) SwingAfter(ctx context.Context, instrumentID int64, timeframe string, swingType SwingType, after time.Time) (Swing, error) {
+	row, err := s.q.EarliestCurrentSwingAfter(ctx, store.EarliestCurrentSwingAfterParams{
+		InstrumentID: instrumentID,
+		Timeframe:    timeframe,
+		SwingType:    swingType.String(),
+		PivotTime:    after,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Swing{}, ErrSwingNotFound
+		}
+		return Swing{}, fmt.Errorf("analysis: swing after %s: %w", after, err)
+	}
+	return fromSwingRow(row)
+}
+
 // --- structure_events ---
 
 // GetCurrentEvent returns the current event at triggerOpenTime, or
@@ -323,6 +344,30 @@ func (s *Store) LatestEventBefore(ctx context.Context, instrumentID int64, timef
 			return StructureEvent{}, ErrEventNotFound
 		}
 		return StructureEvent{}, fmt.Errorf("analysis: latest event before %s: %w", before, err)
+	}
+	return fromEventRow(row)
+}
+
+// EarliestSweepValidatedEventByProtectedSwing returns the earliest
+// current, sweep-validated event whose protected_swing_id is
+// protectedSwingID, or ErrEventNotFound. protectedSwingID has
+// generally validated more than one break over its lifetime (an
+// establishing CHOCH plus later continuation BOSs, spec section 9); the
+// earliest by trigger time is the one whose reference swing is the
+// second fib's broken high (bullish) or broken low (bearish) -- the
+// break that first used this anchor, not whatever break most recently
+// extended the same trend.
+func (s *Store) EarliestSweepValidatedEventByProtectedSwing(ctx context.Context, instrumentID int64, timeframe string, protectedSwingID int64) (StructureEvent, error) {
+	row, err := s.q.EarliestSweepValidatedEventByProtectedSwing(ctx, store.EarliestSweepValidatedEventByProtectedSwingParams{
+		InstrumentID:     instrumentID,
+		Timeframe:        timeframe,
+		ProtectedSwingID: sql.NullInt64{Int64: protectedSwingID, Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return StructureEvent{}, ErrEventNotFound
+		}
+		return StructureEvent{}, fmt.Errorf("analysis: earliest sweep-validated event for protected swing %d: %w", protectedSwingID, err)
 	}
 	return fromEventRow(row)
 }

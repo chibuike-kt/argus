@@ -79,6 +79,17 @@ WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_a
 ORDER BY pivot_time DESC
 LIMIT 1;
 
+-- EarliestCurrentSwingAfter finds the swing immediately following a
+-- given pivot_time -- the shape test's up-leg endpoint (spec section 9:
+-- "this low out to the following confirmed swing high"). Strictly
+-- after, mirroring LatestCurrentSwingBefore's strictly-before sibling.
+-- name: EarliestCurrentSwingAfter :one
+SELECT * FROM confirmed_swings
+WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL
+  AND pivot_time > $4
+ORDER BY pivot_time ASC
+LIMIT 1;
+
 -- LatestQualifyingProtectedAnchorBefore finds the latest confirmed
 -- swing of swing_type that is ALSO a protected-anchor-qualifying
 -- position: a current sweep of side exists with trigger_open_time
