@@ -79,6 +79,58 @@ WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_a
 ORDER BY pivot_time DESC
 LIMIT 1;
 
+-- EarliestCurrentSwingAfter finds the swing immediately following a
+-- given pivot_time -- the shape test's up-leg endpoint (spec section 9:
+-- "this low out to the following confirmed swing high"). Strictly
+-- after, mirroring LatestCurrentSwingBefore's strictly-before sibling.
+-- Bounded by confirmed_at <= $5: this is the up-leg's point-in-time
+-- eligibility bound (not merely "exists"), since a pivot can occur
+-- before an evaluation point (asOf) but not confirm until after it --
+-- without this bound, a point-in-time caller (a replay or backtest at
+-- a historical asOf) could complete a shape test with a swing that, at
+-- that instant, was not yet known (no look-ahead, guide 16). This
+-- query is new and used only by structural liquidity's shape test, so
+-- the bound is added here directly rather than as a separate variant.
+-- name: EarliestCurrentSwingAfter :one
+SELECT * FROM confirmed_swings
+WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL
+  AND pivot_time > $4 AND confirmed_at <= $5
+ORDER BY pivot_time ASC
+LIMIT 1;
+
+-- LatestCurrentSwingBeforeKnownAsOf is LatestCurrentSwingBefore's
+-- point-in-time-safe sibling: pivot_time < $4 (the candidate's own
+-- pivot, for the shape test's down-leg) AND confirmed_at <= $5 (known
+-- as of asOf). Once the candidate itself is bounded by confirmed_at <=
+-- asOf, the preceding swing is already confirmed by asOf by
+-- implication (it pivots strictly earlier still, and confirmation
+-- never precedes pivot), so this bound is not load-bearing today -- it
+-- is added for symmetry with EarliestCurrentSwingAfter's bound and so
+-- the invariant is explicit here rather than accidental.
+-- name: LatestCurrentSwingBeforeKnownAsOf :one
+SELECT * FROM confirmed_swings
+WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL
+  AND pivot_time < $4 AND confirmed_at <= $5
+ORDER BY pivot_time DESC
+LIMIT 1;
+
+-- ListLatestCurrentSwingsConfirmedBefore is ListLatestCurrentSwings'
+-- point-in-time-safe sibling for structural liquidity's candidate walk
+-- specifically -- do not use this for ListLatestCurrentSwings' own
+-- caller (decideEstablishmentCandidate), whose max_pivot_time bound is
+-- already correct for a live, same-pass walk and must not change.
+-- Bounded by BOTH pivot_time <= $4 (the pagination cursor) AND
+-- confirmed_at <= $5 (point-in-time eligibility): a swing can pivot
+-- before asOf but confirm after it (confirmation lags the pivot by
+-- RightBars+1 intervals), and such a swing must never be treated as
+-- "the most recent confirmed swing" as of a historical asOf.
+-- name: ListLatestCurrentSwingsConfirmedBefore :many
+SELECT * FROM confirmed_swings
+WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL
+  AND pivot_time <= $4 AND confirmed_at <= $5
+ORDER BY pivot_time DESC
+LIMIT $6;
+
 -- LatestQualifyingProtectedAnchorBefore finds the latest confirmed
 -- swing of swing_type that is ALSO a protected-anchor-qualifying
 -- position: a current sweep of side exists with trigger_open_time

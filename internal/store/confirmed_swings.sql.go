@@ -38,6 +38,61 @@ func (q *Queries) BeginSupersedeSwing(ctx context.Context, arg BeginSupersedeSwi
 	return result.RowsAffected()
 }
 
+const earliestCurrentSwingAfter = `-- name: EarliestCurrentSwingAfter :one
+SELECT id, instrument_id, timeframe, swing_type, pivot_time, price, confirmed_at, evaluation_time, algorithm_version, source_candle_ids, superseded_at, superseded_by, created_at FROM confirmed_swings
+WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL
+  AND pivot_time > $4 AND confirmed_at <= $5
+ORDER BY pivot_time ASC
+LIMIT 1
+`
+
+type EarliestCurrentSwingAfterParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	Timeframe    string    `json:"timeframe"`
+	SwingType    string    `json:"swing_type"`
+	PivotTime    time.Time `json:"pivot_time"`
+	ConfirmedAt  time.Time `json:"confirmed_at"`
+}
+
+// EarliestCurrentSwingAfter finds the swing immediately following a
+// given pivot_time -- the shape test's up-leg endpoint (spec section 9:
+// "this low out to the following confirmed swing high"). Strictly
+// after, mirroring LatestCurrentSwingBefore's strictly-before sibling.
+// Bounded by confirmed_at <= $5: this is the up-leg's point-in-time
+// eligibility bound (not merely "exists"), since a pivot can occur
+// before an evaluation point (asOf) but not confirm until after it --
+// without this bound, a point-in-time caller (a replay or backtest at
+// a historical asOf) could complete a shape test with a swing that, at
+// that instant, was not yet known (no look-ahead, guide 16). This
+// query is new and used only by structural liquidity's shape test, so
+// the bound is added here directly rather than as a separate variant.
+func (q *Queries) EarliestCurrentSwingAfter(ctx context.Context, arg EarliestCurrentSwingAfterParams) (ConfirmedSwing, error) {
+	row := q.db.QueryRowContext(ctx, earliestCurrentSwingAfter,
+		arg.InstrumentID,
+		arg.Timeframe,
+		arg.SwingType,
+		arg.PivotTime,
+		arg.ConfirmedAt,
+	)
+	var i ConfirmedSwing
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.Timeframe,
+		&i.SwingType,
+		&i.PivotTime,
+		&i.Price,
+		&i.ConfirmedAt,
+		&i.EvaluationTime,
+		&i.AlgorithmVersion,
+		pq.Array(&i.SourceCandleIds),
+		&i.SupersededAt,
+		&i.SupersededBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getCurrentSwing = `-- name: GetCurrentSwing :one
 SELECT id, instrument_id, timeframe, swing_type, pivot_time, price, confirmed_at, evaluation_time, algorithm_version, source_candle_ids, superseded_at, superseded_by, created_at FROM confirmed_swings
 WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND pivot_time = $4
@@ -205,6 +260,58 @@ func (q *Queries) LatestCurrentSwingBefore(ctx context.Context, arg LatestCurren
 	return i, err
 }
 
+const latestCurrentSwingBeforeKnownAsOf = `-- name: LatestCurrentSwingBeforeKnownAsOf :one
+SELECT id, instrument_id, timeframe, swing_type, pivot_time, price, confirmed_at, evaluation_time, algorithm_version, source_candle_ids, superseded_at, superseded_by, created_at FROM confirmed_swings
+WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL
+  AND pivot_time < $4 AND confirmed_at <= $5
+ORDER BY pivot_time DESC
+LIMIT 1
+`
+
+type LatestCurrentSwingBeforeKnownAsOfParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	Timeframe    string    `json:"timeframe"`
+	SwingType    string    `json:"swing_type"`
+	PivotTime    time.Time `json:"pivot_time"`
+	ConfirmedAt  time.Time `json:"confirmed_at"`
+}
+
+// LatestCurrentSwingBeforeKnownAsOf is LatestCurrentSwingBefore's
+// point-in-time-safe sibling: pivot_time < $4 (the candidate's own
+// pivot, for the shape test's down-leg) AND confirmed_at <= $5 (known
+// as of asOf). Once the candidate itself is bounded by confirmed_at <=
+// asOf, the preceding swing is already confirmed by asOf by
+// implication (it pivots strictly earlier still, and confirmation
+// never precedes pivot), so this bound is not load-bearing today -- it
+// is added for symmetry with EarliestCurrentSwingAfter's bound and so
+// the invariant is explicit here rather than accidental.
+func (q *Queries) LatestCurrentSwingBeforeKnownAsOf(ctx context.Context, arg LatestCurrentSwingBeforeKnownAsOfParams) (ConfirmedSwing, error) {
+	row := q.db.QueryRowContext(ctx, latestCurrentSwingBeforeKnownAsOf,
+		arg.InstrumentID,
+		arg.Timeframe,
+		arg.SwingType,
+		arg.PivotTime,
+		arg.ConfirmedAt,
+	)
+	var i ConfirmedSwing
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.Timeframe,
+		&i.SwingType,
+		&i.PivotTime,
+		&i.Price,
+		&i.ConfirmedAt,
+		&i.EvaluationTime,
+		&i.AlgorithmVersion,
+		pq.Array(&i.SourceCandleIds),
+		&i.SupersededAt,
+		&i.SupersededBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const latestCurrentSwingConfirmedBefore = `-- name: LatestCurrentSwingConfirmedBefore :one
 SELECT id, instrument_id, timeframe, swing_type, pivot_time, price, confirmed_at, evaluation_time, algorithm_version, source_candle_ids, superseded_at, superseded_by, created_at FROM confirmed_swings
 WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL
@@ -345,6 +452,77 @@ func (q *Queries) ListLatestCurrentSwings(ctx context.Context, arg ListLatestCur
 		arg.Timeframe,
 		arg.SwingType,
 		arg.PivotTime,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ConfirmedSwing{}
+	for rows.Next() {
+		var i ConfirmedSwing
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstrumentID,
+			&i.Timeframe,
+			&i.SwingType,
+			&i.PivotTime,
+			&i.Price,
+			&i.ConfirmedAt,
+			&i.EvaluationTime,
+			&i.AlgorithmVersion,
+			pq.Array(&i.SourceCandleIds),
+			&i.SupersededAt,
+			&i.SupersededBy,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLatestCurrentSwingsConfirmedBefore = `-- name: ListLatestCurrentSwingsConfirmedBefore :many
+SELECT id, instrument_id, timeframe, swing_type, pivot_time, price, confirmed_at, evaluation_time, algorithm_version, source_candle_ids, superseded_at, superseded_by, created_at FROM confirmed_swings
+WHERE instrument_id = $1 AND timeframe = $2 AND swing_type = $3 AND superseded_at IS NULL
+  AND pivot_time <= $4 AND confirmed_at <= $5
+ORDER BY pivot_time DESC
+LIMIT $6
+`
+
+type ListLatestCurrentSwingsConfirmedBeforeParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	Timeframe    string    `json:"timeframe"`
+	SwingType    string    `json:"swing_type"`
+	PivotTime    time.Time `json:"pivot_time"`
+	ConfirmedAt  time.Time `json:"confirmed_at"`
+	Limit        int32     `json:"limit"`
+}
+
+// ListLatestCurrentSwingsConfirmedBefore is ListLatestCurrentSwings'
+// point-in-time-safe sibling for structural liquidity's candidate walk
+// specifically -- do not use this for ListLatestCurrentSwings' own
+// caller (decideEstablishmentCandidate), whose max_pivot_time bound is
+// already correct for a live, same-pass walk and must not change.
+// Bounded by BOTH pivot_time <= $4 (the pagination cursor) AND
+// confirmed_at <= $5 (point-in-time eligibility): a swing can pivot
+// before asOf but confirm after it (confirmation lags the pivot by
+// RightBars+1 intervals), and such a swing must never be treated as
+// "the most recent confirmed swing" as of a historical asOf.
+func (q *Queries) ListLatestCurrentSwingsConfirmedBefore(ctx context.Context, arg ListLatestCurrentSwingsConfirmedBeforeParams) ([]ConfirmedSwing, error) {
+	rows, err := q.db.QueryContext(ctx, listLatestCurrentSwingsConfirmedBefore,
+		arg.InstrumentID,
+		arg.Timeframe,
+		arg.SwingType,
+		arg.PivotTime,
+		arg.ConfirmedAt,
 		arg.Limit,
 	)
 	if err != nil {

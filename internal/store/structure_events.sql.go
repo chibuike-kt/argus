@@ -35,6 +35,53 @@ func (q *Queries) BeginSupersedeEvent(ctx context.Context, arg BeginSupersedeEve
 	return result.RowsAffected()
 }
 
+const earliestSweepValidatedEventByProtectedSwing = `-- name: EarliestSweepValidatedEventByProtectedSwing :one
+SELECT id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at, sweep_validated, sweep_event_id, protected_swing_id, trigger_open_time FROM structure_events
+WHERE instrument_id = $1 AND timeframe = $2 AND superseded_at IS NULL
+  AND sweep_validated = true AND protected_swing_id = $3
+ORDER BY trigger_open_time ASC
+LIMIT 1
+`
+
+type EarliestSweepValidatedEventByProtectedSwingParams struct {
+	InstrumentID     int64         `json:"instrument_id"`
+	Timeframe        string        `json:"timeframe"`
+	ProtectedSwingID sql.NullInt64 `json:"protected_swing_id"`
+}
+
+// EarliestSweepValidatedEventByProtectedSwing finds the establishing
+// break tied to a protected anchor (spec section 9's second fib): of
+// every current, sweep-validated break referencing protectedSwingID
+// (an establishing CHOCH plus any later continuation BOSs all validate
+// against the same anchor as it survives), the earliest by trigger
+// time is the one that first broke the opposing swing this fib anchors
+// to. trigger_open_time is unique per current row at a given position,
+// so "earliest" is never ambiguous.
+func (q *Queries) EarliestSweepValidatedEventByProtectedSwing(ctx context.Context, arg EarliestSweepValidatedEventByProtectedSwingParams) (StructureEvent, error) {
+	row := q.db.QueryRowContext(ctx, earliestSweepValidatedEventByProtectedSwing, arg.InstrumentID, arg.Timeframe, arg.ProtectedSwingID)
+	var i StructureEvent
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.Timeframe,
+		&i.EventType,
+		&i.DirectionBefore,
+		&i.DirectionAfter,
+		&i.TriggerCandleID,
+		pq.Array(&i.ReferenceSwingIds),
+		&i.EvaluationTime,
+		&i.AlgorithmVersion,
+		&i.SupersededAt,
+		&i.SupersededBy,
+		&i.CreatedAt,
+		&i.SweepValidated,
+		&i.SweepEventID,
+		&i.ProtectedSwingID,
+		&i.TriggerOpenTime,
+	)
+	return i, err
+}
+
 const getCurrentEventByTrigger = `-- name: GetCurrentEventByTrigger :one
 SELECT id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at, sweep_validated, sweep_event_id, protected_swing_id, trigger_open_time FROM structure_events
 WHERE instrument_id = $1 AND timeframe = $2 AND trigger_open_time = $3 AND superseded_at IS NULL
