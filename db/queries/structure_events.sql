@@ -56,6 +56,29 @@ WHERE instrument_id = $1 AND timeframe = $2 AND superseded_at IS NULL
 ORDER BY trigger_open_time ASC
 LIMIT 1;
 
+-- LatestSweepValidatedEventKnownAsOf finds the most recent current,
+-- sweep-validated break whose direction_after is $3 -- spec section
+-- 10's transactional liquidity: the reference level of the most recent
+-- sweep-validated break in the established trend, deliberately NOT
+-- pinned to the establishing break (EarliestSweepValidatedEventByProtectedSwing
+-- above), so the two diverge in an extended trend. reference_swing_ids[0]
+-- is the level this break took out.
+--
+-- Point-in-time safe: bounded by the trigger candle's own close_time <=
+-- $4, not merely trigger_open_time -- a break is only known once its
+-- trigger candle has actually closed. candles.close_time is fixed at
+-- open_time + 1 minute (000003's candles_duration_one_minute check), so
+-- this is equivalent to, but more direct than, bounding
+-- trigger_open_time by asOf minus one interval.
+-- name: LatestSweepValidatedEventKnownAsOf :one
+SELECT se.* FROM structure_events se
+JOIN candles c ON c.id = se.trigger_candle_id
+WHERE se.instrument_id = $1 AND se.timeframe = $2 AND se.superseded_at IS NULL
+  AND se.sweep_validated = true AND se.direction_after = $3
+  AND c.close_time <= $4
+ORDER BY se.trigger_open_time DESC
+LIMIT 1;
+
 -- LatestInvalidatingChochAfter finds whether a CHOCH flipping away
 -- from direction_before has occurred strictly after a protected
 -- anchor's establishment and strictly before the correction's resume

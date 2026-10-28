@@ -425,6 +425,26 @@ func (s *Store) EarliestSweepValidatedEventByProtectedSwing(ctx context.Context,
 	return fromEventRow(row)
 }
 
+// LatestSweepValidatedEventKnownAsOf returns the most recent current,
+// sweep-validated event whose direction_after is direction and whose
+// trigger candle has closed at or before asOf (point-in-time safe --
+// spec section 10), or ErrEventNotFound when no such break exists yet.
+func (s *Store) LatestSweepValidatedEventKnownAsOf(ctx context.Context, instrumentID int64, timeframe string, direction Direction, asOf time.Time) (StructureEvent, error) {
+	row, err := s.q.LatestSweepValidatedEventKnownAsOf(ctx, store.LatestSweepValidatedEventKnownAsOfParams{
+		InstrumentID:   instrumentID,
+		Timeframe:      timeframe,
+		DirectionAfter: direction.String(),
+		CloseTime:      asOf,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return StructureEvent{}, ErrEventNotFound
+		}
+		return StructureEvent{}, fmt.Errorf("analysis: latest sweep-validated event for direction %s known as of %s: %w", direction, asOf, err)
+	}
+	return fromEventRow(row)
+}
+
 // LatestInvalidatingChochBefore reports whether a current CHOCH with
 // direction_before == fromDirection exists strictly after the anchor's
 // own establishment (after) and strictly before the correction's
