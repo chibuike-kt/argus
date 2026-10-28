@@ -1,6 +1,6 @@
 # ARGUS Strategy Specification
 
-- Version: 0.4.0
+- Version: 0.5.0
 - Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
@@ -140,11 +140,17 @@ Protected anchors (one per side, independent):
 - Each anchor is a designated level. It remains the protected level on its side as the trend
   extends and newer confirmed swings form. It is not "the latest confirmed swing" on that
   side.
-- Invalidation. A protected low is invalidated only when a finalized candle closes strictly
-  below it, which is the CHOCH that flips to bearish; a protected high only when a finalized
-  candle closes strictly above it, the CHOCH that flips to bullish (section 3). A CHOCH
-  invalidates the anchor of the direction being left, never the one its own result validates
-  against.
+- Invalidation. A protected anchor is invalidated by the CHOCH that flips direction away from
+  the side it supports: the bullish protected low is cleared by a CHOCH to bearish, the bearish
+  protected high by a CHOCH to bullish (section 3). A CHOCH requires a finalized close strictly
+  beyond its reference swing, so a wick through a level never invalidates an anchor. Note that
+  the CHOCH reference is the latest confirmed opposing swing, which may sit inside the protected
+  range (a higher low above the protected low, or a lower high below the protected high); in
+  this version the anchor is cleared on the direction flip itself, not only on a close through
+  the protected level. Letting the anchor survive an internal CHOCH until a close goes strictly
+  through its own level is a deferred refinement, tied to the major/minor swing distinction and
+  not implemented in V1. A CHOCH invalidates only the anchor of the direction being left, never
+  the one its own result validates against.
 - Supersession. A protected low is replaced only by a newer swing that itself qualifies as a
   protected low under this section: a new sell-side sweep that reclaims and whose
   reversal-origin low confirms as a fractal. The protected high is superseded only by a newer
@@ -180,6 +186,49 @@ Sweep-validated break (the sequence):
   protected anchors are reconstructed independently as-of the resume point during a correction
   replay.
 
+## 8. Premium, discount, and equilibrium
+
+Premium, discount, and equilibrium split the active structure's range into a buy zone and a
+sell zone. It is a pure derived classification, computed on demand from stored swing
+revisions. This version persists nothing: no table and no new state.
+
+Range:
+
+- Bullish: the range is [protected low, latest confirmed swing high]. The low end is the
+  protected low anchor (section 7); the high end is the latest confirmed swing high (section
+  1), which moves up as new highs confirm while the protected low stays fixed until it is
+  invalidated or superseded. Bearish mirror: [latest confirmed swing low, protected high].
+- The range is defined only when the protected anchor on the trend side and the opposing
+  latest-confirmed reference swing both exist and form a valid positive range (high strictly
+  greater than low). It is undefined when direction is UNDETERMINED, when the required protected
+  anchor is absent, or when the endpoints do not form a positive range.
+- The engine must never substitute the latest opposing swing for a missing protected anchor.
+  Absence of the protected anchor means premium/discount is undefined, not computed from a
+  fallback. It is computed only when the protected anchor, the opposing reference swing, the
+  direction, and the sweep-validation state are mutually consistent.
+
+Equilibrium and zones:
+
+- Equilibrium is the single 50% level of the range. There is no equilibrium band in this version.
+- A price strictly below equilibrium is in discount, strictly above is in premium, and exactly
+  at equilibrium is equilibrium, which is neither discount nor premium.
+- In a bullish structure the buy zone is discount; in a bearish structure the sell zone is premium.
+- The classification is undefined outside a valid structure (see Range).
+
+Computation:
+
+- `equilibrium = low + (high - low) / 2` on scaled int64 prices, integer division truncating
+  toward the low. No floating point. The implementation validates `high > low` before computing
+  and uses arithmetic that cannot overflow within supported price bounds.
+
+Scope:
+
+- Premium/discount/equilibrium recomputes deterministically from the active swing's two
+  endpoints, with no append-only evidence and no new table. It is exposed as a computation for
+  downstream POI logic (for example, "is this level in discount"). If a later batch needs the
+  equilibrium value preserved as evidence on a POI or event, that batch defines the snapshot and
+  provenance; this version stores nothing.
+
 ## Scope of this version
 
 In scope: single instrument, single timeframe. Batch 1: swing detection, structural
@@ -187,9 +236,10 @@ direction state, and BOS / CHOCH classification with the threshold and determini
 above. Batch 2: single-candle liquidity sweeps (strict, same-candle reclaim), two independent
 protected anchors (one per side, each designated until invalidated), and sweep-validation of
 BOS / CHOCH as the opposing-side-sweep-then-break sequence. Direction behaviour from batch 1
-is unchanged by batch 2.
+is unchanged by batch 2. Batch 3: premium, discount, and equilibrium over the active
+structure's range, as a pure derived classification with no persistence.
 
-Not yet decided, do not implement: premium / discount / equilibrium; liquidity
+Not yet decided, do not implement: liquidity
 classification (transactional, structural, inducement) and structural-liquidity validity
 rules; supply/demand and support/resistance zones; equal highs and lows; order blocks;
 fair value gaps; displacement and ATR; POI (order block and QMR) and retests; higher-
@@ -227,3 +277,10 @@ Batch 2:
 - invalidation: a finalized close through the protected swing flips direction (CHOCH) and ends that anchor's eligibility,
 - a protected level that requires fractal confirmation (a raw sweep extreme that never confirms does not become protected),
 - a correction to a sweep candle that recomputes the sweep, the protected anchor, and any dependent break tag, with prior history preserved.
+
+Batch 3:
+
+- discount, premium, and exactly-equilibrium classification of prices within a valid bullish range, and the bearish mirror,
+- equilibrium value correctness, including an odd `high - low` where truncation toward the low applies,
+- undefined when direction is UNDETERMINED, when the protected anchor is absent (with no fallback to the latest opposing swing), and when the endpoints do not form a positive range,
+- the range top tracking a newly confirmed higher swing high while the protected low stays fixed, shifting equilibrium accordingly.
