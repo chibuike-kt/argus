@@ -36,18 +36,21 @@ func (q *Queries) BeginSupersedeEvent(ctx context.Context, arg BeginSupersedeEve
 }
 
 const getCurrentEventByTrigger = `-- name: GetCurrentEventByTrigger :one
-SELECT id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at, sweep_validated, sweep_event_id, protected_swing_id FROM structure_events
-WHERE instrument_id = $1 AND timeframe = $2 AND trigger_candle_id = $3 AND superseded_at IS NULL
+SELECT id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at, sweep_validated, sweep_event_id, protected_swing_id, trigger_open_time FROM structure_events
+WHERE instrument_id = $1 AND timeframe = $2 AND trigger_open_time = $3 AND superseded_at IS NULL
 `
 
 type GetCurrentEventByTriggerParams struct {
-	InstrumentID    int64  `json:"instrument_id"`
-	Timeframe       string `json:"timeframe"`
-	TriggerCandleID int64  `json:"trigger_candle_id"`
+	InstrumentID    int64     `json:"instrument_id"`
+	Timeframe       string    `json:"timeframe"`
+	TriggerOpenTime time.Time `json:"trigger_open_time"`
 }
 
+// GetCurrentEventByTrigger keys on trigger_open_time, not
+// trigger_candle_id: see 000007's comment on structure_events for why
+// a row id is not a safe position key across a candle correction.
 func (q *Queries) GetCurrentEventByTrigger(ctx context.Context, arg GetCurrentEventByTriggerParams) (StructureEvent, error) {
-	row := q.db.QueryRowContext(ctx, getCurrentEventByTrigger, arg.InstrumentID, arg.Timeframe, arg.TriggerCandleID)
+	row := q.db.QueryRowContext(ctx, getCurrentEventByTrigger, arg.InstrumentID, arg.Timeframe, arg.TriggerOpenTime)
 	var i StructureEvent
 	err := row.Scan(
 		&i.ID,
@@ -66,6 +69,7 @@ func (q *Queries) GetCurrentEventByTrigger(ctx context.Context, arg GetCurrentEv
 		&i.SweepValidated,
 		&i.SweepEventID,
 		&i.ProtectedSwingID,
+		&i.TriggerOpenTime,
 	)
 	return i, err
 }
@@ -73,11 +77,11 @@ func (q *Queries) GetCurrentEventByTrigger(ctx context.Context, arg GetCurrentEv
 const insertStructureEvent = `-- name: InsertStructureEvent :one
 INSERT INTO structure_events (
     instrument_id, timeframe, event_type, direction_before, direction_after,
-    trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version,
+    trigger_open_time, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version,
     sweep_validated, sweep_event_id, protected_swing_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-RETURNING id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at, sweep_validated, sweep_event_id, protected_swing_id
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+RETURNING id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at, sweep_validated, sweep_event_id, protected_swing_id, trigger_open_time
 `
 
 type InsertStructureEventParams struct {
@@ -86,6 +90,7 @@ type InsertStructureEventParams struct {
 	EventType         string        `json:"event_type"`
 	DirectionBefore   string        `json:"direction_before"`
 	DirectionAfter    string        `json:"direction_after"`
+	TriggerOpenTime   time.Time     `json:"trigger_open_time"`
 	TriggerCandleID   int64         `json:"trigger_candle_id"`
 	ReferenceSwingIds []int64       `json:"reference_swing_ids"`
 	EvaluationTime    time.Time     `json:"evaluation_time"`
@@ -102,6 +107,7 @@ func (q *Queries) InsertStructureEvent(ctx context.Context, arg InsertStructureE
 		arg.EventType,
 		arg.DirectionBefore,
 		arg.DirectionAfter,
+		arg.TriggerOpenTime,
 		arg.TriggerCandleID,
 		pq.Array(arg.ReferenceSwingIds),
 		arg.EvaluationTime,
@@ -128,32 +134,34 @@ func (q *Queries) InsertStructureEvent(ctx context.Context, arg InsertStructureE
 		&i.SweepValidated,
 		&i.SweepEventID,
 		&i.ProtectedSwingID,
+		&i.TriggerOpenTime,
 	)
 	return i, err
 }
 
 const latestCurrentEventBefore = `-- name: LatestCurrentEventBefore :one
-SELECT se.id, se.instrument_id, se.timeframe, se.event_type, se.direction_before, se.direction_after, se.trigger_candle_id, se.reference_swing_ids, se.evaluation_time, se.algorithm_version, se.superseded_at, se.superseded_by, se.created_at, se.sweep_validated, se.sweep_event_id, se.protected_swing_id FROM structure_events se
-JOIN candles c ON c.id = se.trigger_candle_id
-WHERE se.instrument_id = $1 AND se.timeframe = $2 AND se.superseded_at IS NULL
-  AND c.open_time < $3
-ORDER BY c.open_time DESC
+SELECT id, instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at, sweep_validated, sweep_event_id, protected_swing_id, trigger_open_time FROM structure_events
+WHERE instrument_id = $1 AND timeframe = $2 AND superseded_at IS NULL
+  AND trigger_open_time < $3
+ORDER BY trigger_open_time DESC
 LIMIT 1
 `
 
 type LatestCurrentEventBeforeParams struct {
-	InstrumentID int64     `json:"instrument_id"`
-	Timeframe    string    `json:"timeframe"`
-	OpenTime     time.Time `json:"open_time"`
+	InstrumentID    int64     `json:"instrument_id"`
+	Timeframe       string    `json:"timeframe"`
+	TriggerOpenTime time.Time `json:"trigger_open_time"`
 }
 
-// LatestCurrentEventBefore joins through to the trigger candle's
-// open_time because ordering "before a point in time" is meaningful in
-// candle time, not database insertion order. Used, like
-// LatestCurrentSwingBefore, to reconstruct as-of state for a
-// correction's recompute.
+// LatestCurrentEventBefore orders by trigger_open_time because "before
+// a point in time" is meaningful in candle time, not database insertion
+// order. Used, like LatestCurrentSwingBefore, to reconstruct as-of
+// state for a correction's recompute. This was never affected by the
+// trigger_candle_id keying bug (000007) -- it already compared candle
+// open_time via a join, never the row id -- but now that
+// trigger_open_time is a column on this table, the join is unnecessary.
 func (q *Queries) LatestCurrentEventBefore(ctx context.Context, arg LatestCurrentEventBeforeParams) (StructureEvent, error) {
-	row := q.db.QueryRowContext(ctx, latestCurrentEventBefore, arg.InstrumentID, arg.Timeframe, arg.OpenTime)
+	row := q.db.QueryRowContext(ctx, latestCurrentEventBefore, arg.InstrumentID, arg.Timeframe, arg.TriggerOpenTime)
 	var i StructureEvent
 	err := row.Scan(
 		&i.ID,
@@ -172,12 +180,13 @@ func (q *Queries) LatestCurrentEventBefore(ctx context.Context, arg LatestCurren
 		&i.SweepValidated,
 		&i.SweepEventID,
 		&i.ProtectedSwingID,
+		&i.TriggerOpenTime,
 	)
 	return i, err
 }
 
 const latestInvalidatingChochAfter = `-- name: LatestInvalidatingChochAfter :one
-SELECT se.id, se.instrument_id, se.timeframe, se.event_type, se.direction_before, se.direction_after, se.trigger_candle_id, se.reference_swing_ids, se.evaluation_time, se.algorithm_version, se.superseded_at, se.superseded_by, se.created_at, se.sweep_validated, se.sweep_event_id, se.protected_swing_id FROM structure_events se
+SELECT se.id, se.instrument_id, se.timeframe, se.event_type, se.direction_before, se.direction_after, se.trigger_candle_id, se.reference_swing_ids, se.evaluation_time, se.algorithm_version, se.superseded_at, se.superseded_by, se.created_at, se.sweep_validated, se.sweep_event_id, se.protected_swing_id, se.trigger_open_time FROM structure_events se
 JOIN candles c ON c.id = se.trigger_candle_id
 WHERE se.instrument_id = $1 AND se.timeframe = $2 AND se.superseded_at IS NULL
   AND se.event_type = 'choch' AND se.direction_before = $3
@@ -227,6 +236,7 @@ func (q *Queries) LatestInvalidatingChochAfter(ctx context.Context, arg LatestIn
 		&i.SweepValidated,
 		&i.SweepEventID,
 		&i.ProtectedSwingID,
+		&i.TriggerOpenTime,
 	)
 	return i, err
 }

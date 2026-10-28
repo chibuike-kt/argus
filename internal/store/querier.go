@@ -39,6 +39,9 @@ type Querier interface {
 	// from "already resolved" instead of guessing.
 	GetCandleGap(ctx context.Context, arg GetCandleGapParams) (CandleGap, error)
 	GetCurrentCandle(ctx context.Context, arg GetCurrentCandleParams) (Candle, error)
+	// GetCurrentEventByTrigger keys on trigger_open_time, not
+	// trigger_candle_id: see 000007's comment on structure_events for why
+	// a row id is not a safe position key across a candle correction.
 	GetCurrentEventByTrigger(ctx context.Context, arg GetCurrentEventByTriggerParams) (StructureEvent, error)
 	// GetCurrentSweepByTrigger keys on trigger_open_time, not
 	// trigger_candle_id: see 000006's comment on liquidity_sweeps for why
@@ -72,11 +75,13 @@ type Querier interface {
 	InsertStructureEvent(ctx context.Context, arg InsertStructureEventParams) (StructureEvent, error)
 	InsertSweep(ctx context.Context, arg InsertSweepParams) (LiquiditySweep, error)
 	InsertSwing(ctx context.Context, arg InsertSwingParams) (ConfirmedSwing, error)
-	// LatestCurrentEventBefore joins through to the trigger candle's
-	// open_time because ordering "before a point in time" is meaningful in
-	// candle time, not database insertion order. Used, like
-	// LatestCurrentSwingBefore, to reconstruct as-of state for a
-	// correction's recompute.
+	// LatestCurrentEventBefore orders by trigger_open_time because "before
+	// a point in time" is meaningful in candle time, not database insertion
+	// order. Used, like LatestCurrentSwingBefore, to reconstruct as-of
+	// state for a correction's recompute. This was never affected by the
+	// trigger_candle_id keying bug (000007) -- it already compared candle
+	// open_time via a join, never the row id -- but now that
+	// trigger_open_time is a column on this table, the join is unnecessary.
 	LatestCurrentEventBefore(ctx context.Context, arg LatestCurrentEventBeforeParams) (StructureEvent, error)
 	// LatestCurrentSwingBefore bounds by pivot_time, which is only a safe
 	// "already reconciled by the walk" bound relative to the POSITION

@@ -106,7 +106,7 @@ func TestIntegration_StructureEventTrigger_RejectsEvidenceChangeOnCurrentRow(t *
 	event, err := store.InsertEvent(context.Background(), NewStructureEvent{
 		InstrumentID: instrumentID, Timeframe: "1m", Type: EventBOS,
 		DirectionBefore: DirectionBullish, DirectionAfter: DirectionBullish,
-		TriggerCandleID: candleID, ReferenceSwingIDs: []int64{high.ID},
+		TriggerOpenTime: et(10), TriggerCandleID: candleID, ReferenceSwingIDs: []int64{high.ID},
 		EvaluationTime: clockEvalTime(10), AlgorithmVersion: testAlgorithmVersion,
 	})
 	if err != nil {
@@ -128,9 +128,9 @@ func TestIntegration_StructureEventTrigger_ChochDirectionShapeTightened(t *testi
 	// merely "different from before" -- a flip to 'undetermined' must
 	// be rejected by structure_events_direction_shape.
 	_, err := db.ExecContext(context.Background(),
-		`INSERT INTO structure_events (instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version)
-		 VALUES ($1, '1m', 'choch', 'bullish', 'undetermined', $2, ARRAY[1]::bigint[], $3, $4)`,
-		instrumentID, candleID, et(10), testAlgorithmVersion)
+		`INSERT INTO structure_events (instrument_id, timeframe, event_type, direction_before, direction_after, trigger_open_time, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version)
+		 VALUES ($1, '1m', 'choch', 'bullish', 'undetermined', $2, $3, ARRAY[1]::bigint[], $4, $5)`,
+		instrumentID, et(10), candleID, et(10), testAlgorithmVersion)
 	if err == nil {
 		t.Fatal("a CHOCH flipping to 'undetermined' was accepted, want the tightened CHECK to reject it")
 	}
@@ -146,18 +146,18 @@ func TestIntegration_StructureEventsCurrentIndex_ExactlyOnePerTrigger(t *testing
 	if _, err := store.InsertEvent(context.Background(), NewStructureEvent{
 		InstrumentID: instrumentID, Timeframe: "1m", Type: EventBOS,
 		DirectionBefore: DirectionBullish, DirectionAfter: DirectionBullish,
-		TriggerCandleID: candleID, ReferenceSwingIDs: []int64{high.ID},
+		TriggerOpenTime: et(10), TriggerCandleID: candleID, ReferenceSwingIDs: []int64{high.ID},
 		EvaluationTime: clockEvalTime(10), AlgorithmVersion: testAlgorithmVersion,
 	}); err != nil {
 		t.Fatalf("InsertEvent: %v", err)
 	}
 
 	_, err := db.ExecContext(context.Background(),
-		`INSERT INTO structure_events (instrument_id, timeframe, event_type, direction_before, direction_after, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version)
-		 VALUES ($1, '1m', 'bos', 'bullish', 'bullish', $2, ARRAY[1]::bigint[], $3, $4)`,
-		instrumentID, candleID, et(10), testAlgorithmVersion)
+		`INSERT INTO structure_events (instrument_id, timeframe, event_type, direction_before, direction_after, trigger_open_time, trigger_candle_id, reference_swing_ids, evaluation_time, algorithm_version)
+		 VALUES ($1, '1m', 'bos', 'bullish', 'bullish', $2, $3, ARRAY[1]::bigint[], $4, $5)`,
+		instrumentID, et(10), candleID, et(10), testAlgorithmVersion)
 	if err == nil {
-		t.Fatal("a second current event for the same trigger candle was inserted, want a unique-index violation")
+		t.Fatal("a second current event for the same position was inserted, want a unique-index violation")
 	}
 }
 

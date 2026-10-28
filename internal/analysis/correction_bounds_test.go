@@ -52,7 +52,7 @@ func TestIntegration_CorrectionAsOf_ExcludesSwingConfirmedAfterResumePoint(t *te
 	if _, err := store.InsertEvent(context.Background(), NewStructureEvent{
 		InstrumentID: instrumentID, Timeframe: "1m", Type: EventDirectionEstablished,
 		DirectionBefore: DirectionUndetermined, DirectionAfter: DirectionBullish,
-		TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{s0High.ID, s0High.ID, s0Low.ID, s0Low.ID},
+		TriggerOpenTime: et(1), TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{s0High.ID, s0High.ID, s0Low.ID, s0Low.ID},
 		EvaluationTime: clockEvalTime(1), AlgorithmVersion: testAlgorithmVersion,
 	}); err != nil {
 		t.Fatalf("seed establishment event: %v", err)
@@ -83,8 +83,7 @@ func TestIntegration_CorrectionAsOf_ExcludesSwingConfirmedAfterResumePoint(t *te
 	}
 	_ = trap // kept only to document intent; its row is not otherwise referenced
 
-	triggerID := mustCandleIDAt(t, db, instrumentID, 11)
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", triggerID)
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(11))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 11: %v (want a BOS: close=120 breaks the real reference 100; a stale-trap bug using 150 would see nothing)", err)
 	}
@@ -135,7 +134,7 @@ func TestIntegration_CorrectionReplay_EstablishmentWaitsForLaterSwingToBeReconci
 	if _, err := store.InsertEvent(context.Background(), NewStructureEvent{
 		InstrumentID: instrumentID, Timeframe: "1m", Type: EventDirectionEstablished,
 		DirectionBefore: DirectionUndetermined, DirectionAfter: DirectionBullish,
-		TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{hA.ID, hB.ID, lA.ID, lB.ID},
+		TriggerOpenTime: et(24), TriggerCandleID: establishTriggerID, ReferenceSwingIDs: []int64{hA.ID, hB.ID, lA.ID, lB.ID},
 		EvaluationTime: clockEvalTime(24), AlgorithmVersion: testAlgorithmVersion,
 	}); err != nil {
 		t.Fatalf("seed establishment event: %v", err)
@@ -160,15 +159,13 @@ func TestIntegration_CorrectionReplay_EstablishmentWaitsForLaterSwingToBeReconci
 	// (pivot 21) has not been reconciled by this replay pass yet. An
 	// unbounded ListLatestSwings would wrongly see it anyway and
 	// establish Bullish here, a full step early.
-	trigger22 := mustCandleIDAt(t, db, instrumentID, 22)
-	if _, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", trigger22); !errors.Is(err, ErrEventNotFound) {
+	if _, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(22)); !errors.Is(err, ErrEventNotFound) {
 		t.Fatalf("GetCurrentEvent at minute 22 = %v, want ErrEventNotFound: establishment must wait until lB (pivot 21) is actually reconciled by this replay, not read as a stale survivor", err)
 	}
 
 	// It must fire at minute 23, the candle whose own step 1 legitimately
 	// reconciles lB.
-	trigger23 := mustCandleIDAt(t, db, instrumentID, 23)
-	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", trigger23)
+	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(23))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 23: %v, want a direction-establishment event here", err)
 	}
