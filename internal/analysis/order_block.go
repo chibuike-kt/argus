@@ -52,6 +52,10 @@ type OrderBlock struct {
 	// candles.revision, carried through for correction-tracking evidence.
 	SourceCandleID int64
 	SourceRevision int32
+	// SourceOpenTime is the source candle's open_time -- the position
+	// key downstream callers (section 13's QMR search) use to window
+	// candles strictly after the order block without a second lookup.
+	SourceOpenTime time.Time
 	// Low and High are the zone boundaries: the full candle range.
 	// [R] modeling choice (spec section 12), not yet source-confirmed --
 	// body-only (open-to-close) is the other established convention; a
@@ -153,7 +157,7 @@ func newOrderBlock(direction Direction, breakEventID, protectedSwingID int64, c 
 	return OrderBlock{
 		Status: OrderBlockPresent, Direction: direction,
 		BreakEventID: breakEventID, ProtectedSwingID: protectedSwingID,
-		SourceCandleID: c.ID, SourceRevision: c.Revision,
+		SourceCandleID: c.ID, SourceRevision: c.Revision, SourceOpenTime: c.OpenTime,
 		Low: quant.Price(c.Low), High: quant.Price(c.High),
 	}
 }
