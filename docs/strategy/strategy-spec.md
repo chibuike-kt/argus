@@ -1,6 +1,6 @@
 # ARGUS Strategy Specification
 
-- Version: 0.8.0
+- Version: 0.9.0
 - Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
@@ -24,19 +24,11 @@ what it is:
 A tag records provenance, not confidence. An [R] or [U] is still implemented and deterministic;
 it is simply not source-confirmed and may change when verified.
 
-Open items register. One blocking item remains; the rest are deliberate V1 compromises flagged
+Open items register. No blocking items remain; the rest are deliberate V1 compromises flagged
 for revisit, not open hypotheses.
 
-Blocking, must be resolved before dependent work reads off it:
-
-1. Second fib low anchor (section 9): the swept swing versus the protected-low extreme. Not yet
-   resolvable, because the marked chart showing where the structural-liquidity fib is drawn has
-   not been supplied. POI's dependency on this anchor stays explicitly blocked until that source
-   evidence is reviewed; its structural-liquidity path inherits the provisional protected-low
-   extreme in the meantime, clearly flagged, and no certainty is invented.
-
-Deliberate V1 compromises, tagged [R], to revisit after backtesting. These are documented known
-limitations, not claims of source confirmation:
+Deliberate V1 compromises, tagged [R] or [U], to revisit after backtesting. These are documented
+known limitations, not claims of source confirmation:
 
 2. Mechanical structure engine (sections 2, 3, 7). Direction flips on a close through the latest
    confirmed opposing swing, and a protected anchor is invalidated by that same mechanical CHOCH
@@ -51,10 +43,23 @@ limitations, not claims of source confirmation:
    provenance (reference swings, sweep tags, before/after direction) needed to measure those
    outcomes.
 
+3. Single-candle sweep versus multi-candle shape (section 6), [U]. The trader says a valid sweep
+   or structural-liquidity level should be an obvious V or A of multiple candles, not just one
+   candle. Section 6 encodes the sweep as a single finalized candle with a same-candle reclaim,
+   and section 9's shape test applies only to the structural-liquidity swing, not to the sweep
+   target. Whether the sweep target should also pass a shape test could change which structures
+   validate; it is flagged for backtesting and unchanged in V1.
+
 Resolved: the transactional-liquidity update rule (section 10). Only a sweep-validated break
 updates the level, which under our definitions is exactly the set of new structural legs; this
 equivalence is a property of the model, not an independent transcript claim beyond "each break
 takes fresh liquidity."
+
+Resolved: the second fib low anchor (section 9), formerly the one blocking item. The trader draws
+the structural-liquidity fib "from the break of structure to the low," and that low is the
+protected (main) low, so the low anchor is the protected-low extreme (reversal origin), not the
+swept swing, exactly as section 9 implemented. Inferred from the transcripts (audio screen-share,
+not a pixel-marked chart) and submitted for product-owner confirmation with the POI batch.
 
 ## 1. Swing detection
 
@@ -298,7 +303,7 @@ Scope:
 
 ## 9. Structural liquidity
 
-_Provenance: [S] the at-or-below-50% rule and the intact, obvious-shape identity; [R] the establishing-break top anchor and the N=3 proxy; [U] the low anchor, open item 1._
+_Provenance: [S] the at-or-below-50% rule, the intact obvious-shape identity, and the protected-low extreme as the fib's low anchor (resolved from the transcripts); [R] the establishing-break top anchor and the N=3 proxy._
 
 Batch 4, the first of its three liquidity groups. Transactional liquidity and inducement are
 later sections; this one covers structural liquidity only. Structural liquidity is the low
@@ -312,9 +317,10 @@ premium/discount range:
 - Bullish: drawn from the protected low to the broken swing high, the swing high the
   sweep-validated bullish break closed above (section 7). Bearish: from the protected high to
   the broken swing low.
-- [Provisional] The low anchor (bullish) is the protected low, the reversal-origin extreme, not
-  the swept swing. This is the one open item still to verify against a marked chart; the
-  equilibrium and therefore the qualifying zone depend on it.
+- The low anchor (bullish) is the protected low, the reversal-origin extreme, not the swept
+  swing. The trader draws the fib from the break of structure to the low, and that low is the
+  protected (main) low, so the extreme is the low anchor. Resolved from the transcripts (see the
+  open-items register); the equilibrium and therefore the qualifying zone depend on it.
 - Equilibrium is the 50% level, computed exactly as in section 8 (`low + (high - low) / 2`,
   truncating toward the low). The qualifying half is at or below equilibrium for bullish, at or
   above for bearish.
@@ -441,6 +447,61 @@ Evidence and scope:
 - Point-in-time: B and the window candles are bounded by asOf (B's close_time <= asOf), the same
   discipline as sections 9 and 10. A candle correction recomputes it deterministically.
 
+## 13. Point of interest: QMR and POI selection
+
+_Provenance: [S] the two POI types, the QMR as the failed order block, its validity (in discount, above structural liquidity, not already mitigated), the order-block fallback, and "no structural liquidity, no POI"; [R] the deterministic fail, mitigated, and zone encodings; [A] derived, point-in-time, no persistence._
+
+Batch 5 (POI), group two. Section 12 identifies the order block; this section adds the second POI
+type, the QMR, and the rule that selects which POI a structure offers. Both POI types are derived
+and nothing here is persisted.
+
+QMR identity (the failed order block), bullish demand block; bearish supply mirrors:
+
+- The QMR (quasimodo reversal) is the trader's primary POI: an order block (section 12) that price
+  swept through after it formed, which then becomes the higher-confidence zone price is expected to
+  return to ("the order block that failed").
+- Fail trigger. The order block fails, becoming a QMR, when a finalized candle after the order
+  block's source candle sweeps its far boundary with section 6 sweep semantics: for a bullish
+  demand block, the candle's low is strictly below OB.low and its close is back strictly above
+  OB.low; for a bearish supply block, high strictly above OB.high and close back below. The
+  structure's direction (section 2) must still be current. [R] applying the section 6 sweep rule to
+  the order-block boundary is the deterministic reading of "the order block that failed, the low
+  price swept."
+- QMR zone. The failed order block's full zone [OB.low, OB.high]. [R] same full-candle convention
+  and open question as section 12's zone.
+- Already mitigated (spent). After the fail, the QMR is spent once price leaves the zone (a
+  finalized candle trades entirely beyond the near boundary, above OB.high for a bullish demand
+  block) and a later finalized candle then trades back into [OB.low, OB.high]. A spent QMR is no
+  longer offered as the POI. [S] the trader drops a QMR that "has already been mitigated"; [R] the
+  left-and-returned encoding.
+- Point-in-time. The QMR exists as of asOf only after its fail candle has closed, and is spent only
+  after its return candle has closed (close_time <= asOf throughout).
+
+POI selection. A structure offers at most one POI, chosen in this order (bullish; bearish mirrors):
+
+1. The QMR, when valid: it exists as a failed, unspent order block (above), its zone is in the
+   discount half (section 8, at or below equilibrium), and it sits above the structural liquidity
+   (section 9), the QMR's low strictly above the structural-liquidity low. [S]
+2. Otherwise the order block (section 12's current order block), when valid: the structure is
+   structural-present (section 9) and the order block is in the discount half (section 8). [S]
+3. Otherwise no POI. A structural-absent structure is the inducement case (section 11) and offers
+   no POI ("no structural liquidity, no trade"). [S]
+
+Why "above the structural liquidity": a QMR below the structural liquidity is skipped because the
+structural liquidity, being higher, is taken first and "there will always be another block above"
+to use instead, so the order block is selected. [S] The order block is a valid POI on its own,
+without any QMR, exactly when structural liquidity backs it and it is in discount. [S]
+
+Evidence and scope:
+
+- Derived from the order block (section 12), the candle series (fail, leave, and return checks),
+  structural liquidity (section 9), premium/discount (section 8), and direction (section 2). No
+  migration and no new table.
+- The result carries the selected POI type (qmr, order_block, or none), its zone [low, high], its
+  source (the order block's source candle, and for a QMR its fail candle), the validating
+  structural-liquidity reference, and the discount check used.
+- Point-in-time via asOf throughout; a candle correction recomputes it deterministically.
+
 ## Scope of this version
 
 In scope: single instrument, single timeframe. Batch 1: swing detection, structural
@@ -452,13 +513,15 @@ is unchanged by batch 2. Batch 3: premium, discount, and equilibrium over the ac
 structure's range, as a pure derived classification with no persistence. Batch 4: structural
 liquidity (section 9), transactional liquidity (section 10), and inducement (section 11), all
 derived classifications with no persistence, completing the liquidity layer. Batch 5 (POI, in
-progress): the order block (section 12) as a derived classification; the QMR, POI validity, and
-the entry types follow as later groups.
+progress): the order block (section 12) and the QMR with POI selection (section 13), both derived
+classifications with no persistence; the entry types (risk and confirmation) and the multi-timeframe
+top-down flow follow as later groups.
 
 Not yet decided, do not implement: supply/demand and support/resistance zones; equal highs and lows;
-fair value gaps; displacement and ATR; POI validity, the QMR, and retests (the order block is section 12); higher-
-timeframe context and multi-timeframe alignment; mandatory condition grouping; setup
-lifecycle; entry / stop / target construction; and event precedence on collision. These are
+fair value gaps; displacement and ATR; retests (the order block is section 12, the QMR and POI
+selection are section 13); higher-timeframe context and multi-timeframe alignment; risk and
+confirmation entry types; mandatory condition grouping; setup lifecycle; entry / stop / target
+construction; and event precedence on collision. These are
 later batches of this spec, in roughly that order.
 
 ## Golden fixtures required
@@ -530,3 +593,13 @@ Batch 5 (order block):
 - the order block tracks the most recent sweep-validated break: a later validated break moves it to the new leg's impulse,
 - point-in-time: a break whose trigger candle closes after asOf does not yet define an order block,
 - the order block recomputing deterministically under a candle correction.
+
+Batch 5 (QMR and POI selection):
+
+- a bullish QMR: an order block swept (failed) per section 6 semantics, selected as the POI when it is in discount and above the structural liquidity, and the bearish mirror,
+- a QMR that has been mitigated (price left the zone then returned) is spent, so the POI falls back to the order block,
+- a QMR below the structural liquidity is skipped and the order block above is selected,
+- the order block alone is the POI when no QMR exists but structural liquidity backs it and it is in the discount half,
+- no POI when the structure is structural-absent (the inducement case), even with an order block present,
+- point-in-time: a QMR whose fail candle has not closed as of asOf is not offered, and becomes available once that candle closes,
+- POI selection recomputing deterministically under a candle correction.
