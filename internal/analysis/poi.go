@@ -53,6 +53,12 @@ type POI struct {
 
 	OrderBlockCandleID       int64
 	OrderBlockCandleRevision int32
+	// OrderBlockOpenTime is the order block's own source candle's
+	// open_time -- the position key downstream callers (section 14's
+	// trade-plan status) use to window candles strictly after the POI's
+	// own formation without a second lookup, the same reuse this field
+	// gets from OrderBlock itself (section 12).
+	OrderBlockOpenTime time.Time
 
 	QMRFailCandleID       int64
 	QMRFailCandleRevision int32
@@ -257,7 +263,7 @@ func ResolvePOI(ctx context.Context, store *Store, candles CandleSource, state S
 				return POI{
 					Type: POIQMR, Direction: state.Direction,
 					Low: ob.Low, High: ob.High,
-					OrderBlockCandleID: ob.SourceCandleID, OrderBlockCandleRevision: ob.SourceRevision,
+					OrderBlockCandleID: ob.SourceCandleID, OrderBlockCandleRevision: ob.SourceRevision, OrderBlockOpenTime: ob.SourceOpenTime,
 					QMRFailCandleID: qmr.FailCandleID, QMRFailCandleRevision: qmr.FailCandleRev,
 					StructuralSwingID: structLiq.Swing.ID,
 					InDiscount:        true,
@@ -270,7 +276,7 @@ func ResolvePOI(ctx context.Context, store *Store, candles CandleSource, state S
 		return POI{
 			Type: POIOrderBlock, Direction: state.Direction,
 			Low: ob.Low, High: ob.High,
-			OrderBlockCandleID: ob.SourceCandleID, OrderBlockCandleRevision: ob.SourceRevision,
+			OrderBlockCandleID: ob.SourceCandleID, OrderBlockCandleRevision: ob.SourceRevision, OrderBlockOpenTime: ob.SourceOpenTime,
 			StructuralSwingID: structLiq.Swing.ID,
 			InDiscount:        true,
 		}, nil
