@@ -119,14 +119,19 @@ export function timeSeconds(t: Time): number {
   return typeof t === "number" ? t : unix(t as unknown as string);
 }
 
-// The position tool (and anything else that projects forward from an
-// anchor time to the pane's right edge, never back across history) clamps
-// xAnchor into [0, paneWidth] first, so the resulting span's width is never
-// negative -- a raw `paneWidth - xAnchor` is only safe to feed to
-// fillRect/strokeRect once xAnchor itself cannot exceed paneWidth, and
+// The position tool (and anything else that projects forward from a left
+// anchor time to a right boundary, never back across history) clamps the
+// left edge to 0 first, then never lets the right edge sit left of it, so
+// the resulting width is never negative -- a raw `xRight - xLeft` is only
+// safe to feed to fillRect/strokeRect once that ordering is guaranteed, and
 // canvas draws a negative width backwards from x, which is exactly a box
 // that fills to the left instead of projecting right.
-export function forwardSpan(xAnchor: number, paneWidth: number): { x0: number; width: number } {
-  const x0 = Math.max(0, Math.min(xAnchor, paneWidth));
-  return { x0, width: Math.max(0, paneWidth - x0) };
+//
+// xRight is the position's own right time-anchor's x (bounded box, a fixed
+// forward width), or the pane's width for anything that still means "project
+// to the edge" (callers choose which by what they pass).
+export function forwardSpan(xLeft: number, xRight: number): { x0: number; width: number } {
+  const x0 = Math.max(0, Math.min(xLeft, xRight));
+  const x1 = Math.max(x0, xRight);
+  return { x0, width: x1 - x0 };
 }

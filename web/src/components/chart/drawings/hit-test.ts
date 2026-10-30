@@ -92,10 +92,23 @@ export function getHandles(d: Drawing, acc: ChartAccessors): Handle[] {
       const handles: Handle[] = [];
       if (yEntry != null) handles.push({ id: "entry", px: { x, y: yEntry }, cursor: "move" });
       if (yStop != null) handles.push({ id: "stop", px: { x, y: yStop }, cursor: "resize" });
+      const targetYs: number[] = [];
       d.targets.forEach((t, i) => {
         const y = acc.series.priceToCoordinate(t);
-        if (y != null) handles.push({ id: `target-${i}`, px: { x, y }, cursor: "resize" });
+        if (y != null) {
+          targetYs.push(y);
+          handles.push({ id: `target-${i}`, px: { x, y }, cursor: "resize" });
+        }
       });
+      // The box's right edge: bounds the forward width, draggable like a
+      // rectangle's edge handle. Sits at the box's vertical midpoint so it
+      // never overlaps the entry/stop/target handles at x itself.
+      const xRight = acc.chart.timeScale().timeToCoordinate(d.rightTime);
+      if (xRight != null) {
+        const ys = [yEntry, yStop, ...targetYs].filter((v): v is Coordinate => v != null);
+        const midY = ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : (yEntry ?? 0);
+        handles.push({ id: "right", px: { x: xRight, y: midY }, cursor: "resize" });
+      }
       return handles;
     }
   }
@@ -167,6 +180,8 @@ export function hitTest(d: Drawing, acc: ChartAccessors, px: Px, paneWidth: numb
       const yStop = acc.series.priceToCoordinate(d.stop);
       if (x == null || yEntry == null) return null;
       if (px.x < x - BODY_TOLERANCE) return null; // never behind the anchor: the plan projects forward only
+      const xRight = acc.chart.timeScale().timeToCoordinate(d.rightTime);
+      if (xRight != null && px.x > xRight + BODY_TOLERANCE) return null; // bounded box: never past the right edge either
 
       // Anywhere inside the risk box (entry-to-stop) or the reward box
       // (entry-to-farthest-target) is a hit, not just within a sliver of

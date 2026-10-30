@@ -430,11 +430,14 @@ export class MeasurePrimitive extends BasePrimitive {
 // ---- Position tool (long / short): entry/stop/target lines + reward/risk boxes ----
 export class PositionPrimitive extends BasePrimitive {
   constructor(
-    private d: Pick<PositionDrawing, "kind" | "time" | "entry" | "stop" | "targets" | "style">,
+    private d: Pick<
+      PositionDrawing,
+      "kind" | "time" | "rightTime" | "entry" | "stop" | "targets" | "style"
+    >,
   ) {
     super();
   }
-  update(d: Pick<PositionDrawing, "kind" | "time" | "entry" | "stop" | "targets" | "style">) {
+  update(d: Pick<PositionDrawing, "kind" | "time" | "rightTime" | "entry" | "stop" | "targets" | "style">) {
     this.d = d;
     this.repaint();
   }
@@ -443,7 +446,7 @@ export class PositionPrimitive extends BasePrimitive {
       {
         renderer: () => ({
           draw: (target: RenderTarget) => {
-            const { time, entry, stop, targets } = this.d;
+            const { time, rightTime, entry, stop, targets } = this.d;
             const xe = this.x(time);
             const yEntry = this.y(entry);
             const yStop = this.y(stop);
@@ -454,13 +457,16 @@ export class PositionPrimitive extends BasePrimitive {
             const far = tps.length ? tps[tps.length - 1] : null;
 
             target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
-              const right = mediaSize.width;
-              // Projects forward from the anchor time to the pane's right
-              // edge, never back across history -- forwardSpan clamps x0
-              // into [0, right] first, so width can never go negative (a
-              // negative width draws backwards from x0, i.e. a box filling
-              // to the left of the entry instead of ahead of it).
-              const { x0, width: w } = forwardSpan(xe, right);
+              // Bounded box: entry time to the right time-anchor, a finite
+              // forward width -- never flooding to the pane's right edge.
+              // Falls back to the pane's own edge only if rightTime cannot
+              // currently be resolved to a coordinate (e.g. scrolled out of
+              // the chart's logical range). forwardSpan keeps the left
+              // clamp: the left edge can never end up past the right one,
+              // which is what let the box fill backwards before.
+              const xRightRaw = this.x(rightTime);
+              const { x0, width: w } = forwardSpan(xe, xRightRaw ?? mediaSize.width);
+              const x1 = x0 + w;
 
               // Reward above risk for a long (targets sit above entry, stop
               // below); the mirror holds automatically for a short, since
@@ -478,7 +484,7 @@ export class PositionPrimitive extends BasePrimitive {
                 ctx.setLineDash(dashed ? [4, 3] : []);
                 ctx.beginPath();
                 ctx.moveTo(x0, y + 0.5);
-                ctx.lineTo(right, y + 0.5);
+                ctx.lineTo(x1, y + 0.5);
                 ctx.stroke();
                 ctx.setLineDash([]);
               };
@@ -486,6 +492,20 @@ export class PositionPrimitive extends BasePrimitive {
               line(yEntry, ACCENT, false);
               line(yStop, DOWN, true);
               tps.forEach((o) => line(o.y, ACCENT, true));
+
+              // The right edge itself, so the bounded width (and its
+              // resize handle) is visible, not just implied by where the
+              // horizontal lines happen to stop.
+              const top = Math.min(yEntry, yStop, ...tps.map((o) => o.y));
+              const bottom = Math.max(yEntry, yStop, ...tps.map((o) => o.y));
+              ctx.strokeStyle = "rgba(255,255,255,0.35)";
+              ctx.lineWidth = 1;
+              ctx.setLineDash([3, 3]);
+              ctx.beginPath();
+              ctx.moveTo(x1 + 0.5, top);
+              ctx.lineTo(x1 + 0.5, bottom);
+              ctx.stroke();
+              ctx.setLineDash([]);
 
               const rrOf = (t: number) => Math.abs((t - entry) / (entry - stop));
               label(ctx, `Entry  ${fmt(entry)}`, x0 + 6, yEntry, ACCENT, INK);

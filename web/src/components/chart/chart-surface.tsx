@@ -152,6 +152,7 @@ export function ChartSurface({ className }: { className?: string }) {
       new PositionPrimitive({
         kind: "position-long",
         time: unix(candles[plan.fromIndex].openTime),
+        rightTime: lastTime,
         entry: plan.entry,
         stop: plan.stop,
         targets: plan.targets,

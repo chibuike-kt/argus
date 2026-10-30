@@ -94,6 +94,18 @@ export class DrawingController {
   setCandles(c: Candle[]) {
     this.candles = c;
   }
+  // The position tool's default forward width, in bars -- used only to
+  // seed rightTime on creation; dragging the right handle afterwards is
+  // unaffected by this constant.
+  private static readonly DEFAULT_FORWARD_BARS = 20;
+  private static readonly FALLBACK_BAR_SECONDS = 300; // 5m, matching the fixtures
+  private barIntervalSeconds(): number {
+    if (this.candles.length < 2) return DrawingController.FALLBACK_BAR_SECONDS;
+    const a = Date.parse(this.candles[0].openTime) / 1000;
+    const b = Date.parse(this.candles[1].openTime) / 1000;
+    const diff = b - a;
+    return diff > 0 ? diff : DrawingController.FALLBACK_BAR_SECONDS;
+  }
   setLocked(on: boolean) {
     this.locked = on;
   }
@@ -237,7 +249,7 @@ export class DrawingController {
         return;
       }
       // One-click tools commit immediately.
-      this.store.add(oneClickDrawing(kind, point));
+      this.store.add(oneClickDrawing(kind, point, this.barIntervalSeconds() * DrawingController.DEFAULT_FORWARD_BARS));
       this.finishCreation();
       return;
     }
@@ -468,7 +480,7 @@ function draftDrawing(kind: DrawKind, p1: DPoint, p2: DPoint, id = "__draft__"):
   }
 }
 
-function oneClickDrawing(kind: DrawKind, p: DPoint): Drawing {
+function oneClickDrawing(kind: DrawKind, p: DPoint, forwardSeconds: number): Drawing {
   const now = Date.now();
   const id = nextId();
   switch (kind) {
@@ -486,6 +498,7 @@ function oneClickDrawing(kind: DrawKind, p: DPoint): Drawing {
         id,
         kind,
         time: p.time,
+        rightTime: (timeSecondsOf(p.time) + forwardSeconds) as Time,
         entry: p.price,
         stop: long ? p.price - span : p.price + span,
         targets: [long ? p.price + span * 2 : p.price - span * 2],
