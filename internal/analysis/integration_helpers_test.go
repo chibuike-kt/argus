@@ -161,6 +161,39 @@ func feedCloseCandles(t *testing.T, db *sql.DB, instrumentID int64, bars []close
 	return ids
 }
 
+// ohlcBar is feedCloseCandles' counterpart for order-block fixtures,
+// where the candle's colour (open versus close, not just high/low/close)
+// determines the outcome -- feedCandles and feedCloseCandles both set
+// open == close by construction, which makes every candle they produce
+// a doji, unusable for testing section 12's colour test.
+type ohlcBar struct {
+	minute               int
+	open, high, low, cls int64
+}
+
+func feedOHLCCandles(t *testing.T, db *sql.DB, instrumentID int64, bars []ohlcBar) map[int]int64 {
+	t.Helper()
+	ids := make(map[int]int64, len(bars))
+	store := marketdata.NewStore(db, clock.Real{})
+	for _, b := range bars {
+		openTime := clock.NewEventTime(et(b.minute))
+		tick := marketdata.Tick{
+			InstrumentID: instrumentID, OpenTime: openTime,
+			Open: quant.Price(b.open), High: quant.Price(b.high), Low: quant.Price(b.low), Close: quant.Price(b.cls),
+			Volume: 1, Provider: "test", IngestedAt: clock.NewIngestionTime(time.Now()),
+		}
+		if _, err := store.UpsertForming(context.Background(), tick); err != nil {
+			t.Fatalf("UpsertForming minute=%d: %v", b.minute, err)
+		}
+		closed, err := store.Close(context.Background(), instrumentID, openTime)
+		if err != nil {
+			t.Fatalf("Close minute=%d: %v", b.minute, err)
+		}
+		ids[b.minute] = closed.ID
+	}
+	return ids
+}
+
 // seedSwing inserts a confirmed swing directly via the Store API,
 // bypassing fractal detection -- used by fixtures that only care about
 // the break/establishment decision given an already-confirmed swing,
