@@ -152,6 +152,21 @@ type Querier interface {
 	// nothing strictly before the resume point has been touched by the
 	// correction yet when this runs.
 	LatestQualifyingProtectedAnchorBefore(ctx context.Context, arg LatestQualifyingProtectedAnchorBeforeParams) (ConfirmedSwing, error)
+	// LatestSweepValidatedEventKnownAsOf finds the most recent current,
+	// sweep-validated break whose direction_after is $3 -- spec section
+	// 10's transactional liquidity: the reference level of the most recent
+	// sweep-validated break in the established trend, deliberately NOT
+	// pinned to the establishing break (EarliestSweepValidatedEventByProtectedSwing
+	// above), so the two diverge in an extended trend. reference_swing_ids[0]
+	// is the level this break took out.
+	//
+	// Point-in-time safe: bounded by the trigger candle's own close_time <=
+	// $4, not merely trigger_open_time -- a break is only known once its
+	// trigger candle has actually closed. candles.close_time is fixed at
+	// open_time + 1 minute (000003's candles_duration_one_minute check), so
+	// this is equivalent to, but more direct than, bounding
+	// trigger_open_time by asOf minus one interval.
+	LatestSweepValidatedEventKnownAsOf(ctx context.Context, arg LatestSweepValidatedEventKnownAsOfParams) (StructureEvent, error)
 	// ListCurrentCandlesInRange is the read path aggregation uses: the current
 	// (non-superseded) row for every open_time in [start, end), ordered so the
 	// caller can scan once for first/last open/close and reduce for high/low/

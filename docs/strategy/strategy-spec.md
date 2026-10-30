@@ -1,6 +1,6 @@
 # ARGUS Strategy Specification
 
-- Version: 0.6.0
+- Version: 0.7.1
 - Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
@@ -9,7 +9,38 @@ This is the versioned, approved specification the deterministic analysis engine 
 built against. Rules not stated here are not yet decided and must not be guessed
 (see CLAUDE.md and ADR-009). Each numbered decision is approved by the product owner.
 
+## Decision provenance and open items
+
+Every decision below carries a provenance tag, so a reader sees where it comes from, not only
+what it is:
+
+- [S] Source-confirmed: explicitly stated in the trader's transcripts or a supplied chart.
+- [A] Architecturally necessary: required for determinism, replay, data integrity, or
+  correctness, independent of the strategy.
+- [R] Recommendation: a reasoned deterministic default where the source is silent or loose.
+- [U] Unresolved: a hypothesis that could materially change signals or backtests, not yet
+  verified against the source.
+
+A tag records provenance, not confidence. An [R] or [U] is still implemented and deterministic;
+it is simply not source-confirmed and may change when verified.
+
+Open items register. These [U]s must be retired before the POI and entry batches read off them:
+
+1. Second fib low anchor (section 9): the swept swing versus the protected-low extreme. Resolve
+   with a marked chart showing where the structural-liquidity fib is drawn.
+2. Transactional-liquidity update rule (section 10): every sweep-validated BOS, versus only a
+   break that forms a new structural leg. Resolve by re-reading transcript 2's
+   transactional-liquidity passage.
+3. Anchor invalidation (section 7): the direction-flipping CHOCH (shipped) versus a close
+   strictly through the protected level itself. Tied to open item 4.
+4. Major versus minor break (sections 3 and 7): BOS/CHOCH on the latest confirmed swing
+   (shipped) is a deterministic default; the trader states a stronger rule, that a real bullish
+   break takes the previous lower high. Resolve by deciding whether to keep the mechanical
+   version or implement the lower-high rule.
+
 ## 1. Swing detection
+
+_Provenance: [R] the strict 2/2 fractal order (the source says "swings", not an order); [A] confirmation timing and the confirmed-only rule._
 
 Pivots use strict 2-left / 2-right fractals.
 
@@ -23,6 +54,8 @@ Pivots use strict 2-left / 2-right fractals.
 - Only confirmed swings feed structural direction and break classification.
 
 ## 2. Structural direction
+
+_Provenance: [S] direction and the BOS/CHOCH concept; [R] the event-driven state and the two-swing establishment rule; [U] open item 4, major versus minor break._
 
 Direction is one of BULLISH, BEARISH, or UNDETERMINED. It is an event-driven state,
 not a value recomputed on every pivot.
@@ -47,6 +80,8 @@ Transitions (once established):
 
 ## 3. Break classification
 
+_Provenance: [S] BOS as continuation and CHOCH as the reversal; [R] referencing the latest confirmed swing; [U] open item 4._
+
 BOS (break of structure) is a continuation of the current direction. CHOCH (change of
 character) is a break against it, and a CHOCH is the only event that authorizes a
 direction flip.
@@ -61,6 +96,8 @@ Reference levels:
 
 ## 4. Break threshold
 
+_Provenance: [R] strict close-beyond with no buffer; [A] the determinism. The buffer is deferred with ATR._
+
 - A break requires a finalized (closed) candle whose close is strictly beyond the reference
   level. A wick beyond the level without a close beyond is not a break. A close exactly at
   the level is not a break.
@@ -69,6 +106,8 @@ Reference levels:
   percentage, or ATR-relative) and is deferred together with the ATR decision.
 
 ## 5. Determinism and evidence
+
+_Provenance: [A] throughout (ADR-011, ADR-019)._
 
 Every structural event (confirmed swing, direction establishment, BOS, CHOCH) records:
 
@@ -85,6 +124,8 @@ events (ADR-019). No look-ahead: an event may use only candle data and pivot con
 available at its evaluation time.
 
 ## 6. Liquidity sweeps
+
+_Provenance: [S] sweeps as the precondition; [R] the same-candle, strict-reclaim V1 encoding; [A] the append-only recording._
 
 Liquidity-side glossary (fixed for the whole spec). Sell-side liquidity rests below swing
 lows (resting sell stops); a sell-side sweep takes it out and precedes bullish moves.
@@ -114,6 +155,8 @@ break is treated as a sweep-validated swing structure (section 7).
   version, and the evaluation time.
 
 ## 7. Protected structure and sweep-validated breaks
+
+_Provenance: [S] the sweep-then-break sequence (Reading B); [A] two independent anchors; [R] with [U] on invalidation, open item 3._
 
 This section models a sequence of two distinct events on opposite sides of the market, not
 a property of a single swing. Liquidity is taken on one side (a sweep, section 6), then
@@ -188,6 +231,8 @@ Sweep-validated break (the sequence):
 
 ## 8. Premium, discount, and equilibrium
 
+_Provenance: [S] discount and premium and the 50% split; [R] the latest-high top anchor; [A] the truncation._
+
 Premium, discount, and equilibrium split the active structure's range into a buy zone and a
 sell zone. It is a pure derived classification, computed on demand from stored swing
 revisions. This version persists nothing: no table and no new state.
@@ -230,6 +275,8 @@ Scope:
   provenance; this version stores nothing.
 
 ## 9. Structural liquidity
+
+_Provenance: [S] the at-or-below-50% rule and the intact, obvious-shape identity; [R] the establishing-break top anchor and the N=3 proxy; [U] the low anchor, open item 1._
 
 Batch 4, the first of its three liquidity groups. Transactional liquidity and inducement are
 later sections; this one covers structural liquidity only. Structural liquidity is the low
@@ -283,6 +330,55 @@ Determinism and persistence:
   this section. If a later batch records the identified structural liquidity as evidence on a
   setup or POI, that batch defines the snapshot; this section persists nothing.
 
+## 10. Transactional liquidity
+
+_Provenance: [S] the taken-level identity and timing; [R] most-recent-break tracking; [U] the update rule, open item 2._
+
+Batch 4, group two. Transactional liquidity is the level a sweep-validated break takes out, and
+taking it is what signals the correction, the pullback back into the zone.
+
+- Identity. Bullish transactional liquidity is the swing high taken out by a sweep-validated
+  bullish break, which is that break's reference swing. Bearish is the swing low taken out by a
+  sweep-validated bearish break.
+- Timing. A level becomes transactional liquidity only when a finalized candle closes strictly
+  beyond it as part of a sweep-validated break (sections 4, 7). Until taken it is an ordinary
+  confirmed swing, not transactional liquidity; there is no "pending" transactional liquidity,
+  so the current transactional liquidity is always already in the taken state.
+- Reference selection. Transactional liquidity is the reference level of the most recent
+  sweep-validated break in the established trend, and it updates with each successive
+  sweep-validated break. It is not pinned to the establishing break. Only a sweep-validated
+  break updates it: an unvalidated BOS does not overwrite the current level.
+- Distinct from the second fib (section 9). The second fib's top (bullish) is the establishing
+  break's reference level; transactional liquidity is the most recent sweep-validated break's
+  reference level. In an extended trend these are different levels. Example: the establishing
+  bullish break takes out 110, so the second fib's top stays at 110, while a later validated
+  break takes out 118, so transactional liquidity updates to 118.
+- Role and scope. Taking out transactional liquidity signals the correction phase (price pulls
+  back into the zone). The "anticipate the correction and trade the pullback" action is setup
+  and entry logic, deferred. Transactional liquidity is derived from the stored break events,
+  with no migration and no new persistence; this section exposes the current
+  transactional-liquidity level.
+
+## 11. Inducement liquidity
+
+_Provenance: [S] inducement as the structural-absent, expansion case; [A] mutual exclusivity with structural-present._
+
+Batch 4, group three, and the thinnest: it is the structural-absent branch of section 9 with a
+name and an exposed level, not a separate detector.
+
+- Identity. Inducement liquidity is the protected anchor of a structure that section 9
+  classifies structural-absent. Bullish: the protected low is the inducement, expected to be
+  swept down before an up-expansion. Bearish: the protected high.
+- Mutual exclusivity. A structure is exactly one of structural-present or inducement, which is
+  the section-9 classification already. Inducement adds no new state or detection, only the
+  label and the exposed level on the absent branch.
+- Role and scope. With no structural liquidity, the protected level is expected to be taken
+  (induced) before expansion, so there is no trade at that level until the inducement is swept
+  ("no structural liquidity, no trade"). The expansion anticipation and the no-trade gate are
+  setup and entry logic, deferred. Inducement is derived, with no migration and no new
+  persistence; this section exposes the inducement level (the protected anchor) and the
+  structural-present-versus-inducement classification.
+
 ## Scope of this version
 
 In scope: single instrument, single timeframe. Batch 1: swing detection, structural
@@ -291,12 +387,11 @@ above. Batch 2: single-candle liquidity sweeps (strict, same-candle reclaim), tw
 protected anchors (one per side, each designated until invalidated), and sweep-validation of
 BOS / CHOCH as the opposing-side-sweep-then-break sequence. Direction behaviour from batch 1
 is unchanged by batch 2. Batch 3: premium, discount, and equilibrium over the active
-structure's range, as a pure derived classification with no persistence. Batch 4 (in
-progress): structural liquidity (section 9) as a derived classification; transactional and
-inducement liquidity follow as later sections.
+structure's range, as a pure derived classification with no persistence. Batch 4: structural
+liquidity (section 9), transactional liquidity (section 10), and inducement (section 11), all
+derived classifications with no persistence, completing the liquidity layer.
 
-Not yet decided, do not implement: transactional and inducement liquidity (structural
-liquidity is section 9); supply/demand and support/resistance zones; equal highs and lows; order blocks;
+Not yet decided, do not implement: supply/demand and support/resistance zones; equal highs and lows; order blocks;
 fair value gaps; displacement and ATR; POI (order block and QMR) and retests; higher-
 timeframe context and multi-timeframe alignment; mandatory condition grouping; setup
 lifecycle; entry / stop / target construction; and event precedence on collision. These are
@@ -349,3 +444,15 @@ Batch 4 (structural liquidity):
 - a more recent qualifying swing superseding an earlier one as the structural liquidity,
 - structural-absent: no qualifying swing in the zone, classified as the inducement case,
 - the classification recomputing deterministically under a candle correction.
+
+Batch 4 (transactional liquidity):
+
+- transactional liquidity is the reference high taken by a sweep-validated bullish break, and the bearish mirror (the reference low),
+- it updates to the more recent sweep-validated break's level and is not pinned to the establishing break (the 110-then-118 case), while the second fib's top stays at the establishing break,
+- an unvalidated BOS does not update transactional liquidity (the current level is unchanged),
+- a swing level not yet taken by a sweep-validated break is not transactional liquidity.
+
+Batch 4 (inducement):
+
+- a structural-absent structure exposes the protected anchor as the inducement level (bullish protected low, bearish protected high),
+- a structural-present structure is not inducement (mutual exclusivity).

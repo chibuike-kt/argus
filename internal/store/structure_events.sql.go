@@ -288,6 +288,67 @@ func (q *Queries) LatestInvalidatingChochAfter(ctx context.Context, arg LatestIn
 	return i, err
 }
 
+const latestSweepValidatedEventKnownAsOf = `-- name: LatestSweepValidatedEventKnownAsOf :one
+SELECT se.id, se.instrument_id, se.timeframe, se.event_type, se.direction_before, se.direction_after, se.trigger_candle_id, se.reference_swing_ids, se.evaluation_time, se.algorithm_version, se.superseded_at, se.superseded_by, se.created_at, se.sweep_validated, se.sweep_event_id, se.protected_swing_id, se.trigger_open_time FROM structure_events se
+JOIN candles c ON c.id = se.trigger_candle_id
+WHERE se.instrument_id = $1 AND se.timeframe = $2 AND se.superseded_at IS NULL
+  AND se.sweep_validated = true AND se.direction_after = $3
+  AND c.close_time <= $4
+ORDER BY se.trigger_open_time DESC
+LIMIT 1
+`
+
+type LatestSweepValidatedEventKnownAsOfParams struct {
+	InstrumentID   int64     `json:"instrument_id"`
+	Timeframe      string    `json:"timeframe"`
+	DirectionAfter string    `json:"direction_after"`
+	CloseTime      time.Time `json:"close_time"`
+}
+
+// LatestSweepValidatedEventKnownAsOf finds the most recent current,
+// sweep-validated break whose direction_after is $3 -- spec section
+// 10's transactional liquidity: the reference level of the most recent
+// sweep-validated break in the established trend, deliberately NOT
+// pinned to the establishing break (EarliestSweepValidatedEventByProtectedSwing
+// above), so the two diverge in an extended trend. reference_swing_ids[0]
+// is the level this break took out.
+//
+// Point-in-time safe: bounded by the trigger candle's own close_time <=
+// $4, not merely trigger_open_time -- a break is only known once its
+// trigger candle has actually closed. candles.close_time is fixed at
+// open_time + 1 minute (000003's candles_duration_one_minute check), so
+// this is equivalent to, but more direct than, bounding
+// trigger_open_time by asOf minus one interval.
+func (q *Queries) LatestSweepValidatedEventKnownAsOf(ctx context.Context, arg LatestSweepValidatedEventKnownAsOfParams) (StructureEvent, error) {
+	row := q.db.QueryRowContext(ctx, latestSweepValidatedEventKnownAsOf,
+		arg.InstrumentID,
+		arg.Timeframe,
+		arg.DirectionAfter,
+		arg.CloseTime,
+	)
+	var i StructureEvent
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.Timeframe,
+		&i.EventType,
+		&i.DirectionBefore,
+		&i.DirectionAfter,
+		&i.TriggerCandleID,
+		pq.Array(&i.ReferenceSwingIds),
+		&i.EvaluationTime,
+		&i.AlgorithmVersion,
+		&i.SupersededAt,
+		&i.SupersededBy,
+		&i.CreatedAt,
+		&i.SweepValidated,
+		&i.SweepEventID,
+		&i.ProtectedSwingID,
+		&i.TriggerOpenTime,
+	)
+	return i, err
+}
+
 const resolveSupersedeEvent = `-- name: ResolveSupersedeEvent :execrows
 UPDATE structure_events
 SET superseded_by = $2
