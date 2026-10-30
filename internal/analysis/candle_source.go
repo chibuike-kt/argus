@@ -15,9 +15,18 @@ type CandleInput struct {
 	ID        int64
 	OpenTime  time.Time
 	CloseTime time.Time
-	High      int64
-	Low       int64
-	Close     int64
+	// Open is needed only by section 12's colour test (close versus
+	// open); every other comparison in this package is High/Low/Close
+	// against a swing or reference price, which is why Open was not on
+	// this struct before the order block needed it.
+	Open  int64
+	High  int64
+	Low   int64
+	Close int64
+	// Revision is the candle's correction-sequence number (candles.revision),
+	// carried through for evidence on a derived result that names a
+	// specific candle row -- see OrderBlock.SourceRevision.
+	Revision int32
 	// IsClosed lets the engine stop at the live edge rather than assume
 	// a range query returned only closed candles. Spec section 4: BOS,
 	// CHOCH and pivot confirmation all require a closed candle; a

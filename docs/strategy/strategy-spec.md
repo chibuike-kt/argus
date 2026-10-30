@@ -1,6 +1,6 @@
 # ARGUS Strategy Specification
 
-- Version: 0.7.1
+- Version: 0.8.0
 - Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
@@ -24,19 +24,37 @@ what it is:
 A tag records provenance, not confidence. An [R] or [U] is still implemented and deterministic;
 it is simply not source-confirmed and may change when verified.
 
-Open items register. These [U]s must be retired before the POI and entry batches read off them:
+Open items register. One blocking item remains; the rest are deliberate V1 compromises flagged
+for revisit, not open hypotheses.
 
-1. Second fib low anchor (section 9): the swept swing versus the protected-low extreme. Resolve
-   with a marked chart showing where the structural-liquidity fib is drawn.
-2. Transactional-liquidity update rule (section 10): every sweep-validated BOS, versus only a
-   break that forms a new structural leg. Resolve by re-reading transcript 2's
-   transactional-liquidity passage.
-3. Anchor invalidation (section 7): the direction-flipping CHOCH (shipped) versus a close
-   strictly through the protected level itself. Tied to open item 4.
-4. Major versus minor break (sections 3 and 7): BOS/CHOCH on the latest confirmed swing
-   (shipped) is a deterministic default; the trader states a stronger rule, that a real bullish
-   break takes the previous lower high. Resolve by deciding whether to keep the mechanical
-   version or implement the lower-high rule.
+Blocking, must be resolved before dependent work reads off it:
+
+1. Second fib low anchor (section 9): the swept swing versus the protected-low extreme. Not yet
+   resolvable, because the marked chart showing where the structural-liquidity fib is drawn has
+   not been supplied. POI's dependency on this anchor stays explicitly blocked until that source
+   evidence is reviewed; its structural-liquidity path inherits the provisional protected-low
+   extreme in the meantime, clearly flagged, and no certainty is invented.
+
+Deliberate V1 compromises, tagged [R], to revisit after backtesting. These are documented known
+limitations, not claims of source confirmation:
+
+2. Mechanical structure engine (sections 2, 3, 7). Direction flips on a close through the latest
+   confirmed opposing swing, and a protected anchor is invalidated by that same mechanical CHOCH
+   rather than by a close strictly through the protected level itself. The trader's model points
+   to the stronger rule, that a real reversal takes the previous lower high and a protected
+   level holds until price closes through it (see the three distinct concepts in section 7). The
+   mechanical version is deterministic, replayable, and already shipped; reworking it before POI
+   would add risk without evidence it harms signal quality. Known limitation: it may flip
+   direction, and clear an anchor, on internal structure the trader would not call a major
+   reversal. Revisit is triggered by backtest evidence of premature CHOCHs, excessive direction
+   flips, or degraded POI/setup quality; the append-only event history already preserves the
+   provenance (reference swings, sweep tags, before/after direction) needed to measure those
+   outcomes.
+
+Resolved: the transactional-liquidity update rule (section 10). Only a sweep-validated break
+updates the level, which under our definitions is exactly the set of new structural legs; this
+equivalence is a property of the model, not an independent transcript claim beyond "each break
+takes fresh liquidity."
 
 ## 1. Swing detection
 
@@ -55,7 +73,7 @@ Pivots use strict 2-left / 2-right fractals.
 
 ## 2. Structural direction
 
-_Provenance: [S] direction and the BOS/CHOCH concept; [R] the event-driven state and the two-swing establishment rule; [U] open item 4, major versus minor break._
+_Provenance: [S] direction and the BOS/CHOCH concept; [R] the event-driven state, the two-swing establishment rule, and the mechanical flip (a deliberate V1 compromise, revisit per open item 2)._
 
 Direction is one of BULLISH, BEARISH, or UNDETERMINED. It is an event-driven state,
 not a value recomputed on every pivot.
@@ -80,7 +98,7 @@ Transitions (once established):
 
 ## 3. Break classification
 
-_Provenance: [S] BOS as continuation and CHOCH as the reversal; [R] referencing the latest confirmed swing; [U] open item 4._
+_Provenance: [S] BOS as continuation and CHOCH as the reversal; [R] referencing the latest confirmed swing, a deliberate V1 compromise versus the trader's lower-high rule, revisit per open item 2._
 
 BOS (break of structure) is a continuation of the current direction. CHOCH (change of
 character) is a break against it, and a CHOCH is the only event that authorizes a
@@ -156,7 +174,7 @@ break is treated as a sweep-validated swing structure (section 7).
 
 ## 7. Protected structure and sweep-validated breaks
 
-_Provenance: [S] the sweep-then-break sequence (Reading B); [A] two independent anchors; [R] with [U] on invalidation, open item 3._
+_Provenance: [S] the sweep-then-break sequence (Reading B); [A] two independent anchors; [R] V1 couples anchor invalidation to the mechanical CHOCH, a documented discrepancy from the intended close-through-the-protected-level rule, revisit per open item 2._
 
 This section models a sequence of two distinct events on opposite sides of the market, not
 a property of a single swing. Liquidity is taken on one side (a sweep, section 6), then
@@ -183,17 +201,21 @@ Protected anchors (one per side, independent):
 - Each anchor is a designated level. It remains the protected level on its side as the trend
   extends and newer confirmed swings form. It is not "the latest confirmed swing" on that
   side.
-- Invalidation. A protected anchor is invalidated by the CHOCH that flips direction away from
-  the side it supports: the bullish protected low is cleared by a CHOCH to bearish, the bearish
-  protected high by a CHOCH to bullish (section 3). A CHOCH requires a finalized close strictly
-  beyond its reference swing, so a wick through a level never invalidates an anchor. Note that
-  the CHOCH reference is the latest confirmed opposing swing, which may sit inside the protected
-  range (a higher low above the protected low, or a lower high below the protected high); in
-  this version the anchor is cleared on the direction flip itself, not only on a close through
-  the protected level. Letting the anchor survive an internal CHOCH until a close goes strictly
-  through its own level is a deferred refinement, tied to the major/minor swing distinction and
-  not implemented in V1. A CHOCH invalidates only the anchor of the direction being left, never
-  the one its own result validates against.
+- Invalidation. Keep three concepts distinct. The protected anchor is the designated
+  sweep-origin level (above). The mechanical V1 CHOCH is a close through the latest confirmed
+  opposing swing (section 3). Anchor invalidation, as the strategy intends it, is a close
+  strictly through the protected level itself, and the trader's model points to that one. V1
+  does not implement it. Instead V1 couples invalidation to the mechanical CHOCH: it clears the
+  bullish protected low when a bullish-to-bearish CHOCH fires, and the bearish protected high
+  when a bullish CHOCH fires. The two rules can differ, because the CHOCH reference is the
+  latest confirmed opposing swing and may be an internal higher low above the protected low (or
+  a lower high below the protected high), so V1 may clear an anchor that price never closed
+  through. This coupling is a documented known discrepancy, tagged [R] and revisited with the
+  structure engine (open item 2); it is not a claim that both the mechanical rule and the
+  close-through-the-level rule are enforced. A CHOCH requires a finalized close, so a wick never
+  invalidates. A CHOCH clears only the anchor of the direction being left, never the one its own
+  result validates against. Superseding an anchor with a newer qualifying sweep is supersession,
+  not invalidation.
 - Supersession. A protected low is replaced only by a newer swing that itself qualifies as a
   protected low under this section: a new sell-side sweep that reclaims and whose
   reversal-origin low confirms as a fractal. The protected high is superseded only by a newer
@@ -332,7 +354,7 @@ Determinism and persistence:
 
 ## 10. Transactional liquidity
 
-_Provenance: [S] the taken-level identity and timing; [R] most-recent-break tracking; [U] the update rule, open item 2._
+_Provenance: [S] the taken-level identity and timing ("each break takes fresh liquidity"); [R] most-recent-break tracking. The every-validated-break-equals-new-structural-leg equivalence is a property of our definitions, not an independent transcript claim._
 
 Batch 4, group two. Transactional liquidity is the level a sweep-validated break takes out, and
 taking it is what signals the correction, the pullback back into the zone.
@@ -379,6 +401,46 @@ name and an exposed level, not a separate detector.
   persistence; this section exposes the inducement level (the protected anchor) and the
   structural-present-versus-inducement classification.
 
+## 12. Order block
+
+_Provenance: [S] the last-opposite-colour-candle-before-the-move identity; [R] the protected-anchor floor, the most-recent-break selection, and the full-range zone (the zone pending source verification); [A] derived, no persistence._
+
+Batch 5 (POI), group one. POI is the specific zone to trade from within a structure. The order
+block is one of the two POI types; the QMR (a later group) is the other. The order block is the
+origin of the impulse that produced the sweep-validated break: the last opposite-colour candle
+before that impulse.
+
+Identity (bullish; bearish mirrors):
+
+- Break candle B: the trigger candle of the most recent sweep-validated break in the current
+  trend, the finalized candle that closed strictly above the broken swing high (section 7). This
+  is the same break transactional liquidity tracks (section 10). Bearish: the candle that closed
+  strictly below the broken swing low.
+- Impulse window: candles with open_time in [protected-low pivot_time, B's open_time) for a
+  bullish structure, [protected-high pivot_time, B's open_time) for bearish. The protected anchor
+  is the floor, so the search never crosses the structure's origin into an earlier, unrelated leg.
+- Order block: the most recent bearish candle (close < open) in the window for bullish, the most
+  recent bullish candle (close > open) for bearish. Equivalently, walking back from B, the first
+  opposite-colour candle; everything between it and B is same-colour or doji, the impulse run. A
+  doji (close == open) never qualifies and is skipped.
+- When no qualifying opposite-colour candle exists in the window, the result is order-block-absent,
+  a defined classification like structural-absent, not an error. It is distinct from undefined,
+  which means there is no active structure or no sweep-validated break to anchor to.
+
+Zone:
+
+- The order block's zone is the full candle range, low to high. This is an [R] modeling choice,
+  not a transcript requirement; body-only (open to close) is the other established convention, and
+  a marked chart showing the zone drawn open-to-close would override it.
+
+Evidence and scope:
+
+- Derived from the break event, the protected anchor, and the candle series; no migration and no
+  new table. The result carries enough for downstream POI logic: the source candle and its
+  revision, the associated break, the direction, and the zone boundaries (low and high).
+- Point-in-time: B and the window candles are bounded by asOf (B's close_time <= asOf), the same
+  discipline as sections 9 and 10. A candle correction recomputes it deterministically.
+
 ## Scope of this version
 
 In scope: single instrument, single timeframe. Batch 1: swing detection, structural
@@ -389,10 +451,12 @@ BOS / CHOCH as the opposing-side-sweep-then-break sequence. Direction behaviour 
 is unchanged by batch 2. Batch 3: premium, discount, and equilibrium over the active
 structure's range, as a pure derived classification with no persistence. Batch 4: structural
 liquidity (section 9), transactional liquidity (section 10), and inducement (section 11), all
-derived classifications with no persistence, completing the liquidity layer.
+derived classifications with no persistence, completing the liquidity layer. Batch 5 (POI, in
+progress): the order block (section 12) as a derived classification; the QMR, POI validity, and
+the entry types follow as later groups.
 
-Not yet decided, do not implement: supply/demand and support/resistance zones; equal highs and lows; order blocks;
-fair value gaps; displacement and ATR; POI (order block and QMR) and retests; higher-
+Not yet decided, do not implement: supply/demand and support/resistance zones; equal highs and lows;
+fair value gaps; displacement and ATR; POI validity, the QMR, and retests (the order block is section 12); higher-
 timeframe context and multi-timeframe alignment; mandatory condition grouping; setup
 lifecycle; entry / stop / target construction; and event precedence on collision. These are
 later batches of this spec, in roughly that order.
@@ -456,3 +520,13 @@ Batch 4 (inducement):
 
 - a structural-absent structure exposes the protected anchor as the inducement level (bullish protected low, bearish protected high),
 - a structural-present structure is not inducement (mutual exclusivity).
+
+Batch 5 (order block):
+
+- a bullish order block (the most recent bearish candle in the impulse window, with the full candle-range zone) and the bearish mirror,
+- a doji in the window is skipped: the most recent true opposite-colour candle is selected, not the doji,
+- order-block-absent when the window holds no qualifying opposite-colour candle,
+- the protected-anchor floor: a qualifying opposite-colour candle before the protected anchor is not selected (it is outside the window),
+- the order block tracks the most recent sweep-validated break: a later validated break moves it to the new leg's impulse,
+- point-in-time: a break whose trigger candle closes after asOf does not yet define an order block,
+- the order block recomputing deterministically under a candle correction.

@@ -33,9 +33,11 @@ func (m *marketdataSource) ListCandles(ctx context.Context, instrumentID int64, 
 			ID:        row.ID,
 			OpenTime:  row.OpenTime,
 			CloseTime: row.CloseTime,
+			Open:      row.Open,
 			High:      row.High,
 			Low:       row.Low,
 			Close:     row.Close,
+			Revision:  row.Revision,
 			IsClosed:  row.IsClosed,
 		}
 	}
@@ -54,9 +56,11 @@ func (m *marketdataSource) LatestClosed(ctx context.Context, instrumentID int64)
 		ID:        c.ID,
 		OpenTime:  c.OpenTime.Time(),
 		CloseTime: c.CloseTime.Time(),
+		Open:      int64(c.Open),
 		High:      int64(c.High),
 		Low:       int64(c.Low),
 		Close:     int64(c.Close),
+		Revision:  c.Revision,
 		IsClosed:  c.IsClosed,
 	}, nil
 }
