@@ -64,6 +64,10 @@ export interface FibDrawing extends Base {
 export interface PositionDrawing extends Base {
   kind: "position-long" | "position-short";
   time: Time;
+  // rightTime bounds the box/lines to a finite forward width, instead of
+  // flooding to the pane's right edge -- a second, draggable time anchor,
+  // defaulting to a fixed number of bars ahead of time at creation.
+  rightTime: Time;
   entry: number;
   stop: number;
   targets: number[];

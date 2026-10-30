@@ -59,11 +59,12 @@ function hline(price: number): HLineDrawing {
   return { id: "h1", kind: "hline", price, style: DEFAULT_STYLE, createdAt: 0, updatedAt: 0 };
 }
 
-function position(entry: number, stop: number, targets: number[]): PositionDrawing {
+function position(entry: number, stop: number, targets: number[], rightTime = 10000): PositionDrawing {
   return {
     id: "p1",
     kind: "position-long",
     time: 10 as unknown as Time,
+    rightTime: rightTime as unknown as Time,
     entry,
     stop,
     targets,
@@ -93,11 +94,14 @@ describe("getHandles", () => {
     expect(byId.left).toEqual({ x: 10, y: 150 });
   });
 
-  it("returns entry/stop/target handles for a position, all at the anchor time", () => {
-    const d = position(100, 90, [110, 120]);
+  it("returns entry/stop/target handles at the anchor time, plus a right handle at the box's right time-anchor", () => {
+    const d = position(100, 90, [110, 120], 50);
     const handles = getHandles(d, acc);
-    expect(handles.map((h) => h.id)).toEqual(["entry", "stop", "target-0", "target-1"]);
-    expect(handles.every((h) => h.px.x === 10)).toBe(true);
+    expect(handles.map((h) => h.id)).toEqual(["entry", "stop", "target-0", "target-1", "right"]);
+    expect(handles.slice(0, 4).every((h) => h.px.x === 10)).toBe(true);
+    const right = handles.find((h) => h.id === "right");
+    expect(right?.px.x).toBe(50);
+    expect(right?.cursor).toBe("resize");
   });
 
   it("returns no handles for hline/vline (they move as a whole via a body hit)", () => {
@@ -176,6 +180,20 @@ describe("hitTest", () => {
   it("misses a position above the reward box and below the risk box", () => {
     const d = position(100, 90, [110]);
     expect(hitTest(d, acc, { x: 500, y: 300 }, PANE_WIDTH)).toBeNull();
+  });
+
+  it("is a bounded box: misses past the right time-anchor even at a y inside the box", () => {
+    const d = position(100, 90, [110], 200); // box spans x=[10,200]
+    expect(hitTest(d, acc, { x: 95, y: 95 }, PANE_WIDTH)).toEqual({ kind: "body" }); // inside
+    expect(hitTest(d, acc, { x: 400, y: 95 }, PANE_WIDTH)).toBeNull(); // same y, past the right edge
+  });
+
+  it("hits the right handle at the box's own right time-anchor", () => {
+    const d = position(100, 90, [110], 200);
+    // midpoint of [min(entry,stop,target), max(...)] = midpoint of [90,110] = 100
+    const r = hitTest(d, acc, { x: 200, y: 100 }, PANE_WIDTH);
+    expect(r?.kind).toBe("handle");
+    if (r?.kind === "handle") expect(r.handle.id).toBe("right");
   });
 });
 
