@@ -56,7 +56,7 @@ Draft, then review trade-offs and evidence, then approve, revise or reject, then
 
 | ADR | Title | Status |
 | --- | --- | --- |
-| [ADR-008](ADR-008-interactive-live-charts-and-analytical-drawing-tools.md) | Interactive live charts and analytical drawing tools | Product requirement confirmed; charting technology open |
+| [ADR-008](ADR-008-interactive-live-charts-and-analytical-drawing-tools.md) | Interactive live charts and analytical drawing tools | Charting technology decided (Option A); phase 2 (interaction layer) implemented |
 
 ### Technical-analysis engine
 

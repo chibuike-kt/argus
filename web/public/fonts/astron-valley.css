@@ -1,0 +1,19 @@
+/*
+ * Astron Valley: display typeface for the ARGUS logo only (the "A" monogram
+ * in the lime mark and the ARGUS wordmark). Not for body or UI text.
+ * Self-hosted woff2, converted from the licensed OTF.
+ */
+@font-face {
+  font-family: "Astron Valley";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/AstronValley-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Astron Valley";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/AstronValley-Bold.woff2") format("woff2");
+}

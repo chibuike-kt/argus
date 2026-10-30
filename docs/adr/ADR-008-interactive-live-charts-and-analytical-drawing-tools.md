@@ -1,9 +1,9 @@
 # ADR-008: Interactive live charts and analytical drawing tools
 
-- Status: Product requirement confirmed; charting technology open
+- Status: Charting technology decided (Option A); phase 2 (interaction layer) implemented
 - Category: Charting and visual analysis
-- Version: 0.1.0-draft
-- Last updated: 26 October 2026
+- Version: 0.2.0
+- Last updated: 30 October 2026
 - Related: [ADR-009](ADR-009-deterministic-versioned-multi-timeframe-analysis.md), [ADR-010](ADR-010-setup-state-invalidation-and-re-entry.md)
 
 ---
@@ -155,3 +155,51 @@ Trade-offs:
 The charting library will not be selected until the team verifies the required drawing functionality, licensing, access conditions, editing APIs, persistence requirements and implementation cost.
 
 The desired TradingView-like experience is confirmed. The technology used to deliver it is not.
+
+## Decision: Option A, implemented in two phases
+
+Option A (TradingView Lightweight Charts v5 with a custom drawing engine) is adopted. Rendering
+uses v5's `ISeriesPrimitive` plugin API; everything else -- selection, editing, persistence, undo/
+redo -- is ARGUS's own.
+
+**Phase 1 (rendering).** `ISeriesPrimitive` classes, one per drawing kind, drawing to the pane's
+canvas from chart/series coordinate conversions (`timeToCoordinate`/`priceToCoordinate` and their
+inverses). No interaction.
+
+**Phase 2 (interaction), implemented 30 October 2026.** Three concerns, kept separate so each is
+testable and swappable on its own:
+
+- **Store** (`web/src/components/chart/drawings/store.ts`): the drawing list, selection, and a
+  snapshot-based undo/redo stack, behind a `DrawingsPersistence` adapter interface. The only
+  implementation today is `localStorage`, keyed by instrument + timeframe (switching either swaps
+  the visible set). A server-backed adapter implements the same two-method interface and drops in
+  without changing the store's callers -- the "data swap, not a rewrite" ARGUS's own system
+  annotations are already held to (see below).
+- **Controller** (`drawings/controller.ts`): tool lifecycle (two-point and one-click creation,
+  click-click and click-drag-release both committing, Esc to cancel), hit testing and selection,
+  and drag (move the whole drawing, or reshape via a handle), all driven by pointer events plus the
+  same chart coordinate conversions phase 1 already used. Hit testing and handle geometry
+  (`drawings/hit-test.ts`, `drawings/geometry.ts`, `drawings/transform.ts`) are pure functions, not
+  methods on the primitives -- the primitive protocol's own `hitTest` hook was not used, since
+  ARGUS's selection model (handles, drag-to-reshape, a floating context toolbar) needed more state
+  than that hook is shaped to carry.
+- **Presentation**: a handle overlay (its own `ISeriesPrimitive`, attached only while something is
+  selected) and a floating context toolbar / right-click menu as ordinary React components
+  (`drawings/context-toolbar.tsx`, `drawings/context-menu.tsx`), positioned from the same handle
+  geometry the controller hit-tests against.
+
+Every anchor is stored as time + price, never a pixel -- a drawing stays correct under zoom, pan,
+and as new candles arrive, mirroring ADR-009/ADR-019's point-in-time discipline on the backend.
+
+**System annotations** (the order block, POI, and trade plan the engine produces) render through
+the same primitive classes, in a distinct provenance-blue tone, but are never inserted into the
+user drawing store and never hit-tested by the controller -- satisfying this ADR's "separate
+ownership and change semantics" requirement structurally, not by a visibility flag. They are
+fixture-fed (`web/src/mocks/fixtures.ts`) until a live engine endpoint exists; swapping that source
+is the data change the store/controller split above was built to localise, not a UI rewrite.
+
+**Open for a later batch:** the full persisted drawing object model this ADR's "Drawing object
+model" section describes (owner, linked POI/setup, revision history, strategy version) --
+phase 2 ships a lighter client-only shape sufficient for user drawings; a server-backed store is
+where that fuller model would actually need to exist. Multi-timeframe trend-line anchoring to
+detected structure (this ADR's automated-trend-line requirement) also waits on that live data.
