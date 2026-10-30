@@ -1,9 +1,12 @@
 import { Pill } from "@/components/ui/pill";
 import { Stat } from "@/components/ui/stat";
 import { ProvenanceChip } from "@/components/ui/provenance-chip";
+import { SetupStateBadge } from "@/components/ui/setup-state-badge";
 import { setup } from "@/mocks/fixtures";
+import type { POIType } from "@/types/domain";
 
 const n = (v: number) => v.toLocaleString("en-US", { maximumFractionDigits: 1 });
+const POI_LABEL: Record<POIType, string> = { order_block: "Order block", qmr: "QMR" };
 
 export function SetupPanel() {
   const bull = setup.direction === "bullish";
@@ -14,10 +17,13 @@ export function SetupPanel() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-semibold">Proposed setup</span>
-        <Pill variant={bull ? "up" : "down"} dot>
-          {setup.direction}
-        </Pill>
+        <span className="text-sm font-semibold">The active plan</span>
+        <div className="flex items-center gap-1.5">
+          <Pill variant={bull ? "up" : "down"} dot>
+            {setup.direction}
+          </Pill>
+          <SetupStateBadge state={setup.state} />
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-2">
@@ -44,12 +50,13 @@ export function SetupPanel() {
             <Pill key={t} variant="glass" size="md" className="gap-1.5">
               <span className="text-fg-subtle">TP{i + 1}</span>
               {n(t)}
+              <span className="text-accent">{(Math.abs(t - setup.entry) / risk).toFixed(1)}R</span>
             </Pill>
           ))}
         </div>
       </div>
 
-      <Pill variant="outline">POI: order block</Pill>
+      <Pill variant="outline">POI: {POI_LABEL[setup.poiType]}</Pill>
 
       <div className="border-t border-line pt-3">
         <div className="mb-2 flex items-center justify-between">

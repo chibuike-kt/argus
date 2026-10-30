@@ -4,8 +4,8 @@ import { IconButton } from "@/components/ui/icon-button";
 import { cn } from "@/lib/cn";
 
 const NAV = [
-  { to: "/analysis", label: "Analysis" },
   { to: "/setups", label: "Setups" },
+  { to: "/analysis", label: "Analysis" },
   { to: "/style", label: "Design system" },
 ];
 

@@ -289,6 +289,14 @@ export class DrawingController {
       original: d,
       historyPushed: false,
     };
+    // Suspend the chart's own pan/zoom for the duration of the drag. In
+    // cursor mode (no drawing tool active) applyCursorAndPan() leaves them
+    // enabled, since the chart's own canvas receives the same pointer
+    // events ours does (they bubble from the same element): without this,
+    // dragging a drawing's body also pans the chart underneath it, and the
+    // two coordinate shifts cancel out horizontally -- the drawing visibly
+    // moves with price but appears stuck in time.
+    this.chart.applyOptions({ handleScroll: false, handleScale: false });
   }
 
   private onPointerMove = (e: PointerEvent) => {
@@ -347,6 +355,7 @@ export class DrawingController {
     if (this.drag) {
       if (this.host.hasPointerCapture(e.pointerId)) this.host.releasePointerCapture(e.pointerId);
       this.drag = null;
+      this.applyCursorAndPan(); // restores pan/zoom now the drag is over
     }
   };
 

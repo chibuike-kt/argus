@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { ChevronRight } from "lucide-react";
 import { Panel } from "@/components/ui/panel";
 import { Pill } from "@/components/ui/pill";
+import { SetupStateBadge } from "@/components/ui/setup-state-badge";
 import { CoinIcon, baseTicker } from "@/components/ui/coin-icon";
 import { setups, asOf } from "@/mocks/fixtures";
 import type { SetupState, POIType } from "@/types/domain";
@@ -15,14 +16,12 @@ const n = (v: number) => v.toLocaleString("en-US", { maximumFractionDigits: 4 })
 
 const POI_LABEL: Record<POIType, string> = { order_block: "Order block", qmr: "QMR" };
 
-const STATE: Record<SetupState, { label: string; cls: string }> = {
-  valid: { label: "Valid", cls: "bg-up/15 text-up" },
-  forming: { label: "Forming", cls: "bg-prov-r/15 text-prov-r" },
-  triggered: { label: "Triggered", cls: "bg-accent/20 text-accent" },
-  invalidated: { label: "Invalidated", cls: "bg-down/15 text-down" },
-};
-
-const FILTERS = ["All", "Valid", "Forming", "Triggered"];
+const FILTERS: { label: string; value: SetupState | "all" }[] = [
+  { label: "All", value: "all" },
+  { label: "Actionable", value: "valid" },
+  { label: "Forming", value: "forming" },
+  { label: "Triggered", value: "triggered" },
+];
 
 function age(createdAt: string) {
   const ms = new Date(asOf).getTime() - new Date(createdAt).getTime();
@@ -33,8 +32,8 @@ function age(createdAt: string) {
 }
 
 export function Setups() {
-  const [filter, setFilter] = useState("All");
-  const rows = setups.filter((s) => filter === "All" || s.state === filter.toLowerCase());
+  const [filter, setFilter] = useState<SetupState | "all">("all");
+  const rows = setups.filter((s) => filter === "all" || s.state === filter);
 
   return (
     <div className="mx-auto h-full max-w-[1200px] space-y-5 overflow-y-auto p-4 sm:p-6">
@@ -42,20 +41,20 @@ export function Setups() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Setups</h1>
           <p className="mt-1 text-sm text-fg-muted">
-            Proposed trade plans across your watchlist. {setups.length} active.
+            What ARGUS found across your watchlist. {setups.length} live findings.
           </p>
         </div>
         <div className="glass inline-flex items-center gap-1 rounded-full p-1">
           {FILTERS.map((f) => (
             <button
-              key={f}
-              onClick={() => setFilter(f)}
+              key={f.value}
+              onClick={() => setFilter(f.value)}
               className={cn(
                 "focus-ring h-8 rounded-full px-4 text-[13px] font-medium transition-colors",
-                f === filter ? "bg-accent text-accent-foreground" : "text-fg-muted hover:text-fg",
+                f.value === filter ? "bg-accent text-accent-foreground" : "text-fg-muted hover:text-fg",
               )}
             >
-              {f}
+              {f.label}
             </button>
           ))}
         </div>
@@ -107,16 +106,9 @@ export function Setups() {
               <span className="tnum text-right text-down">{n(s.stop)}</span>
               <span className="tnum text-right font-medium text-accent">{s.rr.toFixed(1)}</span>
               <span>
-                <span
-                  className={cn(
-                    "inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium",
-                    STATE[s.state].cls,
-                  )}
-                >
-                  {STATE[s.state].label}
-                </span>
+                <SetupStateBadge state={s.state} />
               </span>
-              <span className="tnum text-right text-fg-subtle">{age(s.createdAt)}</span>
+              <span className="tnum text-right text-fg-subtle">{age(s.createdAt)} ago</span>
               <ChevronRight className="size-4 justify-self-end text-fg-subtle" />
             </Link>
           );

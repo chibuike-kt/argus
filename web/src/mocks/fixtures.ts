@@ -1,4 +1,4 @@
-import type { Candle, Instrument, Setup, SetupSummary } from "@/types/domain";
+import type { Candle, DataQuality, Instrument, Setup, SetupSummary } from "@/types/domain";
 
 // Static fixtures so the scaffold renders without the backend. Shapes match
 // @/types/domain; swap for live /api/v1 data when the endpoints land.
@@ -25,6 +25,12 @@ export const markets: Instrument[] = [
 ];
 
 export const asOf = "2026-10-29T14:40:00Z";
+
+// ARGUS only acts on trusted data (ADR-006); the analysis panel surfaces
+// this next to the plan, not as a footnote. finalizedThrough matches asOf
+// here (the happy path); flip status to "degraded"/"stale" and add a note
+// to see those states in the panel.
+export const dataQuality: DataQuality = { status: "live", finalizedThrough: asOf };
 
 // The Setups inbox: proposed plans across the watchlist.
 export const setups: SetupSummary[] = [

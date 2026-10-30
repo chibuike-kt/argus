@@ -88,6 +88,22 @@ export interface Instrument {
   changePct: number;
 }
 
+// Freshness and finality of the market data a setup/plan was computed
+// against (ADR-006). ARGUS only acts on trusted data, so this is surfaced
+// next to the plan, not buried: "live" is finalized through the most recent
+// closed candle with no gaps; "degraded" means data arrived late or thin but
+// is still usable; "stale" means the feed has fallen behind and nothing new
+// should be acted on until it recovers.
+export type DataQualityStatus = "live" | "degraded" | "stale";
+
+export interface DataQuality {
+  status: DataQualityStatus;
+  // ISO-8601 UTC: the close_time of the most recent finalized candle this
+  // analysis is known-correct through.
+  finalizedThrough: string;
+  note?: string;
+}
+
 // A compact row for the Setups list (the inbox). The full Setup, with its
 // evidence chain, is loaded on the analysis workspace.
 export interface SetupSummary {

@@ -7,7 +7,7 @@ import type {
   SeriesAttachedParameter,
 } from "lightweight-charts";
 import { candles as fixtureCandles } from "@/mocks/fixtures";
-import { barsBetween, timeSeconds, type ChartAccessors } from "./geometry";
+import { barsBetween, forwardSpan, timeSeconds, type ChartAccessors } from "./geometry";
 import { extendPoint, getHandles, type Handle } from "./hit-test";
 import {
   FIB_LEVELS,
@@ -425,8 +425,12 @@ export class PositionPrimitive extends BasePrimitive {
 
             target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
               const right = mediaSize.width;
-              const x0 = Math.max(0, xe);
-              const w = right - x0;
+              // Projects forward from the anchor time to the pane's right
+              // edge, never back across history -- forwardSpan clamps x0
+              // into [0, right] first, so width can never go negative (a
+              // negative width draws backwards from x0, i.e. a box filling
+              // to the left of the entry instead of ahead of it).
+              const { x0, width: w } = forwardSpan(xe, right);
 
               // Reward above risk for a long (targets sit above entry, stop
               // below); the mirror holds automatically for a short, since
@@ -461,6 +465,38 @@ export class PositionPrimitive extends BasePrimitive {
                 const pct = Math.abs((o.t - entry) / entry) * 100;
                 label(ctx, `TP${i + 1}  ${fmt(o.t)}  +${pct.toFixed(2)}%  ${rrOf(o.t).toFixed(2)}R`, x0 + 6, o.y, "rgba(215,254,98,0.18)", ACCENT);
               });
+            });
+          },
+        }),
+      },
+    ];
+  }
+}
+
+// ---- System label: a small background-chip label at a point, for ARGUS's
+// own structure markers (swings, BOS/CHOCH, sweeps). Deliberately a chip
+// (reuses the same label() helper hline/fib/position use for their own
+// levels), not bare text, so a system marker never looks like a plain user
+// "text" drawing (TextPrimitive), which draws unstyled fillText. Never
+// constructed from a Drawing, never attached to the user store. ----
+export class SystemLabelPrimitive extends BasePrimitive {
+  constructor(
+    private p: { time: Time; price: number },
+    private text: string,
+    private color: string,
+  ) {
+    super();
+  }
+  paneViews() {
+    return [
+      {
+        renderer: () => ({
+          draw: (target: RenderTarget) => {
+            const x = this.x(this.p.time);
+            const y = this.y(this.p.price);
+            if (x == null || y == null) return;
+            target.useMediaCoordinateSpace(({ context: ctx }) => {
+              label(ctx, this.text, x, y, this.color, INK);
             });
           },
         }),

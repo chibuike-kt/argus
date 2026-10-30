@@ -157,6 +157,26 @@ describe("hitTest", () => {
     const r = hitTest(d, acc, { x: 500, y: 90 }, PANE_WIDTH);
     expect(r).toEqual({ kind: "body" });
   });
+
+  it("hits anywhere inside a position's risk box, not just near the entry or stop line", () => {
+    const d = position(100, 90, [110]);
+    // y=95 is the midpoint between entry (100) and stop (90) -- not within
+    // tolerance of either line on its own, only inside the box between them.
+    const r = hitTest(d, acc, { x: 500, y: 95 }, PANE_WIDTH);
+    expect(r).toEqual({ kind: "body" });
+  });
+
+  it("hits anywhere inside a position's reward box, between entry and the farthest target", () => {
+    const d = position(100, 90, [110, 140]);
+    // y=125, well clear of entry (100), target-0 (110), and target-1 (140).
+    const r = hitTest(d, acc, { x: 500, y: 125 }, PANE_WIDTH);
+    expect(r).toEqual({ kind: "body" });
+  });
+
+  it("misses a position above the reward box and below the risk box", () => {
+    const d = position(100, 90, [110]);
+    expect(hitTest(d, acc, { x: 500, y: 300 }, PANE_WIDTH)).toBeNull();
+  });
 });
 
 describe("extendPoint", () => {

@@ -48,8 +48,8 @@ const INTERVAL_GROUPS: { label: string; items: [string, string][] }[] = [
 ];
 
 const NAV = [
-  { to: "/analysis", label: "Analysis" },
   { to: "/setups", label: "Setups" },
+  { to: "/analysis", label: "Analysis" },
 ];
 
 function Divider() {
@@ -125,7 +125,7 @@ export function ChartToolbar() {
   const { timeframe: tf, setTimeframe: setTf, drawings } = useDrawing();
   return (
     <div className="glass relative z-30 flex items-center gap-1.5 rounded-xl px-2 py-1.5">
-      <Link to="/analysis" className="flex items-center gap-2 pl-1">
+      <Link to="/setups" className="flex items-center gap-2 pl-1">
         <span className="grid size-8 place-items-center rounded-md bg-accent text-accent-foreground">
           <span className="font-display text-lg leading-none">A</span>
         </span>

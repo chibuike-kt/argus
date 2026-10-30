@@ -114,3 +114,15 @@ export function barsBetween(t1: Time, t2: Time, candles: Candle[]): number {
 export function timeSeconds(t: Time): number {
   return typeof t === "number" ? t : unix(t as unknown as string);
 }
+
+// The position tool (and anything else that projects forward from an
+// anchor time to the pane's right edge, never back across history) clamps
+// xAnchor into [0, paneWidth] first, so the resulting span's width is never
+// negative -- a raw `paneWidth - xAnchor` is only safe to feed to
+// fillRect/strokeRect once xAnchor itself cannot exceed paneWidth, and
+// canvas draws a negative width backwards from x, which is exactly a box
+// that fills to the left instead of projecting right.
+export function forwardSpan(xAnchor: number, paneWidth: number): { x0: number; width: number } {
+  const x0 = Math.max(0, Math.min(xAnchor, paneWidth));
+  return { x0, width: Math.max(0, paneWidth - x0) };
+}

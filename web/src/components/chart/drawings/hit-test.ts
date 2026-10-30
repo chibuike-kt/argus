@@ -1,3 +1,4 @@
+import type { Coordinate } from "lightweight-charts";
 import type { Drawing } from "./types";
 import { type ChartAccessors, type Px, distance, distanceToSegment, insideRect, toPixel } from "./geometry";
 
@@ -11,8 +12,12 @@ export interface Handle {
 
 export type HitResult = { kind: "handle"; handle: Handle } | { kind: "body" } | null;
 
-const HANDLE_TOLERANCE = 7;
-const BODY_TOLERANCE = 6;
+const HANDLE_TOLERANCE = 8;
+const BODY_TOLERANCE = 8;
+
+function between(v: number, a: number, b: number, tolerance: number): boolean {
+  return v >= Math.min(a, b) - tolerance && v <= Math.max(a, b) + tolerance;
+}
 
 function rectHandles(a: Px, b: Px): Handle[] {
   const left = Math.min(a.x, b.x);
@@ -153,10 +158,18 @@ export function hitTest(d: Drawing, acc: ChartAccessors, px: Px, paneWidth: numb
       const x = acc.chart.timeScale().timeToCoordinate(d.time);
       const yEntry = acc.series.priceToCoordinate(d.entry);
       const yStop = acc.series.priceToCoordinate(d.stop);
-      if (x == null) return null;
-      const lines = [yEntry, yStop, ...d.targets.map((t) => acc.series.priceToCoordinate(t))];
-      for (const y of lines) {
-        if (y != null && px.x >= x && Math.abs(px.y - y) <= BODY_TOLERANCE) return { kind: "body" };
+      if (x == null || yEntry == null) return null;
+      if (px.x < x - BODY_TOLERANCE) return null; // never behind the anchor: the plan projects forward only
+
+      // Anywhere inside the risk box (entry-to-stop) or the reward box
+      // (entry-to-farthest-target) is a hit, not just within a sliver of
+      // one of the lines themselves -- "a position anywhere in its box."
+      if (yStop != null && between(px.y, yEntry, yStop, BODY_TOLERANCE)) return { kind: "body" };
+      const targetYs = d.targets
+        .map((v) => acc.series.priceToCoordinate(v))
+        .filter((v): v is Coordinate => v != null);
+      if (targetYs.length && between(px.y, yEntry, targetYs[targetYs.length - 1], BODY_TOLERANCE)) {
+        return { kind: "body" };
       }
       return null;
     }

@@ -17,7 +17,14 @@ import { CoinIcon } from "@/components/ui/coin-icon";
 import { cn } from "@/lib/cn";
 import { useDrawing } from "./drawing-context";
 import { cloneDrawing } from "./drawings/types";
-import { RectanglePrimitive, PositionPrimitive, primitiveFor, updatePrimitive } from "./drawings/primitives";
+import {
+  RectanglePrimitive,
+  PositionPrimitive,
+  HLinePrimitive,
+  SystemLabelPrimitive,
+  primitiveFor,
+  updatePrimitive,
+} from "./drawings/primitives";
 import { getHandles } from "./drawings/hit-test";
 import { DrawingController } from "./drawings/controller";
 import { ContextToolbar } from "./drawings/context-toolbar";
@@ -131,6 +138,37 @@ export function ChartSurface({ className }: { className?: string }) {
         targets: plan.targets,
         style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
       }),
+    );
+
+    // Structure (confirmed swings) and events (BOS/CHOCH/sweep): the
+    // "structure, sweeps" part of ARGUS's read, so the chart opens with
+    // more than just the POI and the plan already drawn.
+    for (const s of annotations.swings) {
+      const price = Math.round(s.price).toLocaleString("en-US");
+      series.attachPrimitive(
+        new SystemLabelPrimitive(
+          { time: unix(candles[s.index].openTime), price: s.price },
+          `${s.kind === "high" ? "H" : "L"} ${price}`,
+          SYSTEM_COLOR,
+        ),
+      );
+    }
+    for (const e of annotations.events) {
+      series.attachPrimitive(
+        new SystemLabelPrimitive({ time: unix(candles[e.index].openTime), price: e.price }, e.label, SYSTEM_COLOR),
+      );
+    }
+
+    // Premium/discount split (spec section 8): the active range's
+    // equilibrium, the SMC buy-zone/sell-zone divider.
+    series.attachPrimitive(
+      new HLinePrimitive({
+        price: annotations.range.equilibrium,
+        style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "dashed" },
+      }),
+    );
+    series.attachPrimitive(
+      new SystemLabelPrimitive({ time: lastTime, price: annotations.range.equilibrium }, "Equilibrium", SYSTEM_COLOR),
     );
 
     chart.timeScale().fitContent();

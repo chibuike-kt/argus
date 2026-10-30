@@ -1,21 +1,6 @@
 import { Clock } from "lucide-react";
 import { asOf } from "@/mocks/fixtures";
-
-function fmtUTC(iso: string) {
-  const d = new Date(iso);
-  const date = d.toLocaleString("en-GB", {
-    month: "short",
-    day: "2-digit",
-    timeZone: "UTC",
-  });
-  const time = d.toLocaleString("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "UTC",
-  });
-  return `${date}, ${time} UTC`;
-}
+import { formatUTC } from "@/lib/format";
 
 // Point-in-time indicator. ARGUS answers "what was known as of this moment",
 // so the clock is a first-class control. The scrubber lives in the analysis
@@ -28,7 +13,7 @@ export function AsOfControl() {
         <span className="text-[9px] font-medium uppercase tracking-wider text-fg-subtle">
           As of
         </span>
-        <span className="tnum mt-0.5 text-xs font-medium">{fmtUTC(asOf)}</span>
+        <span className="tnum mt-0.5 text-xs font-medium">{formatUTC(asOf)}</span>
       </span>
     </button>
   );
