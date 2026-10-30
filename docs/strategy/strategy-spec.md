@@ -1,6 +1,6 @@
 # ARGUS Strategy Specification
 
-- Version: 0.9.0
+- Version: 0.10.0
 - Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
@@ -49,6 +49,12 @@ known limitations, not claims of source confirmation:
    and section 9's shape test applies only to the structural-liquidity swing, not to the sweep
    target. Whether the sweep target should also pass a shape test could change which structures
    validate; it is flagged for backtesting and unchanged in V1.
+
+4. Single order block, no "block above" fallback (sections 13, 14), [R]. When a QMR sits at or
+   below the structural liquidity, the trader looks for a different, higher order block to trade
+   from. Section 12 identifies only one order block (the most recent), so section 13's fallback
+   returns that single block rather than a higher one, and the plan builds on it. Revisit when the
+   POI layer supports multiple order-block candidates.
 
 Resolved: the transactional-liquidity update rule (section 10). Only a sweep-validated break
 updates the level, which under our definitions is exactly the set of new structural legs; this
@@ -502,6 +508,78 @@ Evidence and scope:
   structural-liquidity reference, and the discount check used.
 - Point-in-time via asOf throughout; a candle correction recomputes it deterministically.
 
+## 14. Trade plan (risk entry)
+
+_Provenance: [S] enter at the POI, the stop covering the protected level, targets at opposing liquidity, and R:R as information only (ADR-012); [R] the proximal-edge entry, no V1 stop buffer, the first-three-opposing-levels target selection, and the minimal status set; [A] derived, point-in-time, no persistence._
+
+Batch 6. The trade plan turns the POI (section 13) into a proposed risk entry: an entry, a stop,
+ordered targets, and an R:R per target, with a minimal derived status. No order is ever submitted
+(ADR-001). It is derived, point-in-time, and persists nothing, like sections 8 through 13. Position
+sizing, the volatility stop buffer (ADR-012), the full setup lifecycle (ADR-010), the confirmation
+entry, and multi-timeframe are deferred to later batches.
+
+Inputs: a POI (section 13, type qmr or order_block, with its zone and direction), the protected
+anchor (section 7), the confirmed opposing swings (section 1) and transactional liquidity (section
+10) as target sources, and the candle series, all as of asOf. No POI (section 13 returns none)
+means no plan.
+
+Entry (bullish; bearish mirrors):
+
+- The risk entry is the POI zone. The entry price is the zone's proximal edge, the level a limit
+  order fills first as price pulls back in: the zone high for a bullish POI, the zone low for a
+  bearish one. [R]
+
+Stop:
+
+- The stop is the structure's invalidation level: the protected low for bullish, the protected high
+  for bearish (section 7), the level whose close-through invalidates the setup. V1 sets the stop at
+  that level exactly; the volatility buffer (ADR-012) is a later knob and is not applied. [S], [R]
+- Guard: the plan requires the entry strictly beyond the stop in the trade direction (entry > stop
+  for bullish, entry < stop for bearish). If it is not, the plan is undefined. [A]
+
+Targets:
+
+- The target sources are the confirmed opposing swings (section 1) and the transactional-liquidity
+  level (section 10). The targets are those source levels lying strictly beyond the entry in the
+  trade direction (above the entry for bullish, below for bearish), ordered by distance from the
+  entry nearest first, de-duplicated (levels within a minimum tick distance collapse to one), and
+  capped at three. [S], [R] In a standard setup the transactional-liquidity level sits behind the
+  entry and is excluded by the beyond-the-entry filter; it is kept as a source only for the cases
+  where it does not.
+- Targets are directionally ordered and distinct (ADR-012). When no source level lies beyond the
+  entry, the plan has no structural target: targets is empty and R:R is undefined. [A]
+
+R:R:
+
+- Computed per target and shown as information only, never an eligibility filter (ADR-012). For
+  target i, bullish R:R is (target_i minus entry) divided by (entry minus stop); bearish mirrors.
+  The plan carries the R:R alongside each target. [S from ADR-012]
+
+Plan status (minimal, derived, as of asOf):
+
+- none: section 13 returns no POI.
+- invalidated: a finalized candle has closed strictly through the protected level (below the
+  protected low for bullish, above the protected high for bearish). [S]
+- triggered: not invalidated, and a finalized candle after the POI formed has reached the entry
+  level (bullish: a candle low at or below the entry; bearish: a candle high at or above the entry). [R]
+- actionable: a POI is present, the setup is not invalidated, and price has not yet reached the
+  entry. [R]
+- Precedence within V1: invalidated outranks triggered outranks actionable, evaluated in that order
+  against the finalized candle sequence up to asOf. The full ADR-010 lifecycle (detected, awaiting
+  confirmation, confirmed, expired, cancelled), candidate identity and deduplication, re-entry, and
+  event precedence on collision are a dedicated later batch. [R]
+
+Evidence and scope:
+
+- Derived from the POI (section 13), the protected anchor (section 7), the confirmed opposing swings
+  (section 1), transactional liquidity (section 10), and the candle series. No migration, no new table.
+- The result carries: the plan status, direction, entry, stop, the ordered targets each with its
+  R:R, and references to the POI and the protected anchor it was built from.
+- Point-in-time: every candle consulted is bounded by close_time <= asOf; entry, stop, and targets
+  are levels from the POI and confirmed swings, already asOf-bounded; the status reflects only
+  finalized candles up to asOf, so triggered and invalidated flip as asOf advances. A candle
+  correction recomputes the plan deterministically.
+
 ## Scope of this version
 
 In scope: single instrument, single timeframe. Batch 1: swing detection, structural
@@ -512,17 +590,19 @@ BOS / CHOCH as the opposing-side-sweep-then-break sequence. Direction behaviour 
 is unchanged by batch 2. Batch 3: premium, discount, and equilibrium over the active
 structure's range, as a pure derived classification with no persistence. Batch 4: structural
 liquidity (section 9), transactional liquidity (section 10), and inducement (section 11), all
-derived classifications with no persistence, completing the liquidity layer. Batch 5 (POI, in
-progress): the order block (section 12) and the QMR with POI selection (section 13), both derived
-classifications with no persistence; the entry types (risk and confirmation) and the multi-timeframe
-top-down flow follow as later groups.
+derived classifications with no persistence, completing the liquidity layer. Batch 5 (POI): the
+order block (section 12) and the QMR with POI selection (section 13), both derived classifications
+with no persistence. Batch 6: the trade plan (section 14), the risk entry derived from the POI with
+entry, stop, ordered targets, per-target R:R and a minimal status, also with no persistence; the
+confirmation entry and the multi-timeframe top-down flow follow as later batches.
 
 Not yet decided, do not implement: supply/demand and support/resistance zones; equal highs and lows;
-fair value gaps; displacement and ATR; retests (the order block is section 12, the QMR and POI
-selection are section 13); higher-timeframe context and multi-timeframe alignment; risk and
-confirmation entry types; mandatory condition grouping; setup lifecycle; entry / stop / target
-construction; and event precedence on collision. These are
-later batches of this spec, in roughly that order.
+fair value gaps; displacement and ATR; retests; higher-timeframe context and multi-timeframe
+alignment; the confirmation entry type; position sizing and the volatility stop buffer; mandatory
+condition grouping; the full setup lifecycle (candidates, expiry, cancellation, re-entry) and event
+precedence on collision; and trading-cost estimation. (The order block is section 12, the QMR and
+POI selection section 13, the risk-entry trade plan section 14.) These are later batches of this
+spec, in roughly that order.
 
 ## Golden fixtures required
 
@@ -603,3 +683,15 @@ Batch 5 (QMR and POI selection):
 - no POI when the structure is structural-absent (the inducement case), even with an order block present,
 - point-in-time: a QMR whose fail candle has not closed as of asOf is not offered, and becomes available once that candle closes,
 - POI selection recomputing deterministically under a candle correction.
+
+Batch 6 (trade plan, risk entry):
+
+- a bullish plan from a QMR POI: entry at the zone's proximal (top) edge, stop at the protected low, targets the opposing structural levels beyond entry ordered nearest-first, and the bearish mirror,
+- targets de-duplicated (two opposing levels within the minimum tick distance collapse to one) and capped at three when more than three lie beyond the entry,
+- empty targets and undefined R:R when no eligible opposing level lies beyond the entry,
+- the plan undefined when the entry is not strictly beyond the stop in the trade direction,
+- status actionable (price has not reached entry), triggered (a finalized candle has reached entry, not invalidated), and invalidated (a finalized candle closed through the protected level),
+- no plan (status none) when section 13 returns no POI,
+- R:R per target informational, computed (target − entry) / (entry − stop), never filtering a target,
+- point-in-time: triggered and invalidated flip as asOf advances over finalized candles,
+- the whole plan recomputing deterministically under a candle correction.
