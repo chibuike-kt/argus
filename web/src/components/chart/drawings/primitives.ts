@@ -243,9 +243,13 @@ export class FibPrimitive extends BasePrimitive {
             const y2 = this.y(this.d.p2.price);
             if (x1 == null || x2 == null || y1 == null || y2 == null) return;
             const { p1, p2 } = this.d;
-            target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+            target.useMediaCoordinateSpace(({ context: ctx }) => {
+              // Bounded strictly between the fib's own two anchors -- never
+              // to the pane's edge. p1/p2 are already each a handle, so the
+              // right one (by time) already acts as the draggable right
+              // edge; no third anchor needed, unlike the position tool.
               const left = Math.min(x1, x2);
-              const right = mediaSize.width;
+              const right = Math.max(x1, x2);
               for (const level of FIB_LEVELS) {
                 const price = p1.price + (p2.price - p1.price) * level;
                 const y = this.y(price);
@@ -448,24 +452,25 @@ export class PositionPrimitive extends BasePrimitive {
           draw: (target: RenderTarget) => {
             const { time, rightTime, entry, stop, targets } = this.d;
             const xe = this.x(time);
+            const xRight = this.x(rightTime);
             const yEntry = this.y(entry);
             const yStop = this.y(stop);
-            if (xe == null || yEntry == null || yStop == null) return;
+            // Bounded box: entry time to the right time-anchor only -- never
+            // the pane's own width. If the right anchor cannot currently be
+            // resolved to a coordinate (scrolled out of the chart's logical
+            // range), skip this frame rather than guess at the pane edge;
+            // the box reappears once it is back on screen.
+            if (xe == null || xRight == null || yEntry == null || yStop == null) return;
             const tps = targets
               .map((t) => ({ t, y: this.y(t) }))
               .filter((o): o is { t: number; y: number } => o.y != null);
             const far = tps.length ? tps[tps.length - 1] : null;
 
-            target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
-              // Bounded box: entry time to the right time-anchor, a finite
-              // forward width -- never flooding to the pane's right edge.
-              // Falls back to the pane's own edge only if rightTime cannot
-              // currently be resolved to a coordinate (e.g. scrolled out of
-              // the chart's logical range). forwardSpan keeps the left
-              // clamp: the left edge can never end up past the right one,
-              // which is what let the box fill backwards before.
-              const xRightRaw = this.x(rightTime);
-              const { x0, width: w } = forwardSpan(xe, xRightRaw ?? mediaSize.width);
+            target.useMediaCoordinateSpace(({ context: ctx }) => {
+              // forwardSpan keeps the left clamp: the left edge can never
+              // end up past the right one, which is what let the box fill
+              // backwards before.
+              const { x0, width: w } = forwardSpan(xe, xRight);
               const x1 = x0 + w;
 
               // Reward above risk for a long (targets sit above entry, stop

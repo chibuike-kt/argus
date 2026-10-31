@@ -4,6 +4,7 @@ import { extendPoint, getHandles, hitTest } from "./hit-test";
 import type { ChartAccessors } from "./geometry";
 import {
   DEFAULT_STYLE,
+  type FibDrawing,
   type HLineDrawing,
   type PositionDrawing,
   type RectangleDrawing,
@@ -63,6 +64,18 @@ function rectangle(
 
 function hline(price: number): HLineDrawing {
   return { id: "h1", kind: "hline", price, style: DEFAULT_STYLE, createdAt: 0, updatedAt: 0 };
+}
+
+function fib(p1: { time: number; price: number }, p2: { time: number; price: number }): FibDrawing {
+  return {
+    id: "f1",
+    kind: "fib",
+    p1: { time: p1.time as unknown as Time, price: p1.price },
+    p2: { time: p2.time as unknown as Time, price: p2.price },
+    style: DEFAULT_STYLE,
+    createdAt: 0,
+    updatedAt: 0,
+  };
 }
 
 function position(entry: number, stop: number, targets: number[], rightTime = 10000): PositionDrawing {
@@ -203,6 +216,12 @@ describe("hitTest", () => {
     const r = hitTest(d, acc, { x: 200, y: 100 }, PANE_WIDTH);
     expect(r?.kind).toBe("handle");
     if (r?.kind === "handle") expect(r.handle.id).toBe("right");
+  });
+
+  it("hits a fib's body strictly between its own two anchors, not out to the pane edge", () => {
+    const d = fib({ time: 0, price: 0 }, { time: 100, price: 100 });
+    expect(hitTest(d, acc, { x: 50, y: 50 }, PANE_WIDTH)).toEqual({ kind: "body" }); // between the anchors
+    expect(hitTest(d, acc, { x: 500, y: 50 }, PANE_WIDTH)).toBeNull(); // well past the right anchor
   });
 });
 

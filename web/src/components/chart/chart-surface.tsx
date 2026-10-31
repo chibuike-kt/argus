@@ -75,6 +75,17 @@ export function ChartSurface({ className }: { className?: string }) {
   const [bar, setBar] = useState<OHLC>(candles[candles.length - 1]);
   const [toolbarTick, setToolbarTick] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  // Bumped once the chart/series/controller are (re)created. React 18
+  // StrictMode double-invokes a mount-once effect in dev: init runs, its
+  // cleanup tears the chart down, then init runs again. The drawing
+  // reconciliation effect below is keyed on the store's own data, which
+  // does not change just because the chart was recreated -- without this,
+  // any drawing already in the store before that remount (e.g. loaded from
+  // localStorage on page load) gets attached to the first, now-destroyed
+  // series and never reattached to the one actually on screen. Including
+  // chartGeneration in that effect's deps forces it to re-run exactly when
+  // the series identity changes, regardless of whether the data did.
+  const [chartGeneration, setChartGeneration] = useState(0);
 
   const { activeTool, setActiveTool, magnetOn, stayInDrawingMode, locked, hidden, drawings } =
     useDrawing();
@@ -216,6 +227,7 @@ export function ChartSurface({ className }: { className?: string }) {
     controller.setCandles(candles);
     controller.attach();
     controllerRef.current = controller;
+    setChartGeneration((g) => g + 1);
 
     return () => {
       controller.detach();
@@ -279,12 +291,12 @@ export function ChartSurface({ className }: { className?: string }) {
     }
     controllerRef.current?.syncSelectionOverlay();
     setToolbarTick((t) => t + 1);
-  }, [list, hidden]);
+  }, [list, hidden, chartGeneration]);
 
   useEffect(() => {
     controllerRef.current?.syncSelectionOverlay();
     setToolbarTick((t) => t + 1);
-  }, [selectedId]);
+  }, [selectedId, chartGeneration]);
 
   // Context toolbar position: topmost handle of the selected drawing, in
   // container-relative pixels. toolbarTick forces a recompute on pan/zoom/

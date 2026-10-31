@@ -25,22 +25,6 @@ export function toPixel({ chart, series }: ChartAccessors, p: DPoint): Px | null
   return { x, y };
 }
 
-// Pixel space -> chart space, for turning a raw pointer event into a point
-// a drawing can store. fallbackTime covers the clamped edge where the time
-// scale cannot resolve the pixel to a bar (e.g. past the last candle) --
-// callers pass the chart's own last known time rather than silently
-// dropping the point, matching how the chart's own crosshair clamps.
-export function toPoint(
-  { chart, series }: ChartAccessors,
-  px: Px,
-  fallbackTime: Time,
-): DPoint | null {
-  const price = series.coordinateToPrice(px.y);
-  if (price == null) return null;
-  const time = chart.timeScale().coordinateToTime(px.x);
-  return { time: (time ?? fallbackTime) as Time, price };
-}
-
 export function distance(a: Px, b: Px): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
@@ -63,6 +47,30 @@ export function insideRect(p: Px, a: Px, b: Px): boolean {
   const top = Math.min(a.y, b.y);
   const bottom = Math.max(a.y, b.y);
   return p.x >= left && p.x <= right && p.y >= top && p.y <= bottom;
+}
+
+// Pixel space -> a smooth (sub-bar) time, in seconds. chart.timeScale()
+// .coordinateToTime always snaps to the nearest bar's own time, which is
+// why dragging felt like it was stepping bar by bar: the time never
+// changed while the mouse moved within one bar's pixel width. This instead
+// reads the chart's fractional logical position (a bar index that varies
+// continuously, e.g. 10.37 for 37% of the way from bar 10 into bar 11) and
+// linearly interpolates between the two candles it falls between, so the
+// result moves pixel-smoothly. base is clamped so base/base+1 are always a
+// valid candle pair; frac is left unclamped against that pair, which
+// extrapolates smoothly (using that pair's own interval) for a logical
+// position before the first or after the last candle too, rather than
+// needing a separate case for it.
+export function coordinateToSmoothTimeSeconds(acc: ChartAccessors, x: number, candles: Candle[]): number | null {
+  if (candles.length < 2) return null;
+  const logical = acc.chart.timeScale().coordinateToLogical(x);
+  if (logical == null) return null;
+  const lastIdx = candles.length - 1;
+  const base = Math.min(Math.max(Math.floor(logical), 0), lastIdx - 1);
+  const frac = logical - base;
+  const t0 = unix(candles[base].openTime);
+  const t1 = unix(candles[base + 1].openTime);
+  return t0 + frac * (t1 - t0);
 }
 
 // --- Magnet: snap a candidate point to the nearest candle's O/H/L/C ---

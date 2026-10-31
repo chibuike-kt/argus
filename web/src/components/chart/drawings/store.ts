@@ -1,5 +1,5 @@
 import { useMemo, useSyncExternalStore } from "react";
-import type { Drawing } from "./types";
+import { migrateDrawing, type Drawing } from "./types";
 
 // Everything the store needs from a persistence backend. localStorage is the
 // only implementation today; a server-backed sync swaps in here later
@@ -77,7 +77,7 @@ export class DrawingsStore {
   setScope(scopeKey: string) {
     if (scopeKey === this.scopeKey) return;
     this.scopeKey = scopeKey;
-    const loaded = this.persistence.load(scopeKey) ?? [];
+    const loaded = (this.persistence.load(scopeKey) ?? []).map(migrateDrawing);
     this.state = {
       order: loaded.map((d) => d.id),
       byId: Object.fromEntries(loaded.map((d) => [d.id, d])),

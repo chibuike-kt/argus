@@ -151,7 +151,8 @@ export function hitTest(d: Drawing, acc: ChartAccessors, px: Px, paneWidth: numb
       const p2 = toPixel(acc, d.p2);
       if (!p1 || !p2) return null;
       const left = Math.min(p1.x, p2.x);
-      if (px.x < left - BODY_TOLERANCE || px.x > paneWidth) return null;
+      const right = Math.max(p1.x, p2.x);
+      if (px.x < left - BODY_TOLERANCE || px.x > right + BODY_TOLERANCE) return null;
       const top = Math.min(p1.y, p2.y) - BODY_TOLERANCE;
       const bottom = Math.max(p1.y, p2.y) + BODY_TOLERANCE;
       return px.y >= top && px.y <= bottom ? { kind: "body" } : null;
