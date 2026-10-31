@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Time } from "lightweight-charts";
 import type { Candle } from "@/types/domain";
-import { coordinateToSmoothTimeSeconds, forwardSpan, timeSecondsToSmoothCoordinate, type ChartAccessors } from "./geometry";
+import {
+  coordinateToSmoothTimeSeconds,
+  forwardSpan,
+  timeSecondsToSmoothCoordinate,
+  type ChartAccessors,
+} from "./geometry";
 
 // Three 5-minute candles: seconds 0, 300, 600. coordinateToLogical is faked
 // directly (x IS the logical value, for test clarity) since what is under

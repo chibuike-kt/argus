@@ -10,7 +10,13 @@ import {
   type Drawing,
   type DrawKind,
 } from "./types";
-import { coordinateToSmoothTimeSeconds, distance, snapToCandle, type ChartAccessors, type Px } from "./geometry";
+import {
+  coordinateToSmoothTimeSeconds,
+  distance,
+  snapToCandle,
+  type ChartAccessors,
+  type Px,
+} from "./geometry";
 import { getHandles, hitTest, type Handle, type HitResult } from "./hit-test";
 import { primitiveFor, updatePrimitive, SelectionOverlayPrimitive } from "./primitives";
 import { rectAnchorsOf, reshapeDrawing, translateDrawing, type RectAnchors } from "./transform";
@@ -265,7 +271,13 @@ export class DrawingController {
         return;
       }
       // One-click tools commit immediately.
-      this.store.add(oneClickDrawing(kind, point, this.barIntervalSeconds() * DrawingController.DEFAULT_FORWARD_BARS));
+      this.store.add(
+        oneClickDrawing(
+          kind,
+          point,
+          this.barIntervalSeconds() * DrawingController.DEFAULT_FORWARD_BARS,
+        ),
+      );
       this.finishCreation();
       return;
     }

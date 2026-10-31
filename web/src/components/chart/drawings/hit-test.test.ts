@@ -78,7 +78,12 @@ function fib(p1: { time: number; price: number }, p2: { time: number; price: num
   };
 }
 
-function position(entry: number, stop: number, targets: number[], rightTime = 10000): PositionDrawing {
+function position(
+  entry: number,
+  stop: number,
+  targets: number[],
+  rightTime = 10000,
+): PositionDrawing {
   return {
     id: "p1",
     kind: "position-long",

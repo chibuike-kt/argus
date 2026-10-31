@@ -95,7 +95,13 @@ describe("translateDrawing (drag the body)", () => {
       updatedAt: 0,
     };
     const patch = translateDrawing(d, 5, 20);
-    expect(patch).toEqual({ time: t(120), rightTime: t(320), entry: 105, stop: 95, targets: [115, 125] });
+    expect(patch).toEqual({
+      time: t(120),
+      rightTime: t(320),
+      entry: 105,
+      stop: 95,
+      targets: [115, 125],
+    });
   });
 });
 

@@ -7,7 +7,13 @@ import type {
   SeriesAttachedParameter,
 } from "lightweight-charts";
 import { candles as fixtureCandles } from "@/mocks/fixtures";
-import { barsBetween, forwardSpan, timeSeconds, timeSecondsToSmoothCoordinate, type ChartAccessors } from "./geometry";
+import {
+  barsBetween,
+  forwardSpan,
+  timeSeconds,
+  timeSecondsToSmoothCoordinate,
+  type ChartAccessors,
+} from "./geometry";
 import { extendPoint, getHandles, type Handle } from "./hit-test";
 import {
   FIB_LEVELS,
@@ -441,7 +447,12 @@ export class PositionPrimitive extends BasePrimitive {
   ) {
     super();
   }
-  update(d: Pick<PositionDrawing, "kind" | "time" | "rightTime" | "entry" | "stop" | "targets" | "style">) {
+  update(
+    d: Pick<
+      PositionDrawing,
+      "kind" | "time" | "rightTime" | "entry" | "stop" | "targets" | "style"
+    >,
+  ) {
     this.d = d;
     this.repaint();
   }
@@ -475,7 +486,9 @@ export class PositionPrimitive extends BasePrimitive {
               // snapped to the pane edge. The edge itself is only the
               // absolute last resort, if even that fails to resolve.
               const resolveX = (t: Time, fallback: number) =>
-                this.x(t) ?? timeSecondsToSmoothCoordinate(acc, timeSeconds(t), fixtureCandles) ?? fallback;
+                this.x(t) ??
+                timeSecondsToSmoothCoordinate(acc, timeSeconds(t), fixtureCandles) ??
+                fallback;
               const xe = resolveX(time, 0);
               const xRight = resolveX(rightTime, mediaSize.width);
 

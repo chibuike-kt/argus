@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Time } from "lightweight-charts";
-import { DEFAULT_STYLE, FIB_LEVELS, migrateDrawing, type HLineDrawing, type PositionDrawing } from "./types";
+import {
+  DEFAULT_STYLE,
+  FIB_LEVELS,
+  migrateDrawing,
+  type HLineDrawing,
+  type PositionDrawing,
+} from "./types";
 
 describe("FIB_LEVELS", () => {
   it("is exactly the three anchors + equilibrium levels, not the full retracement ladder", () => {
@@ -44,7 +50,14 @@ describe("migrateDrawing", () => {
   });
 
   it("leaves non-position drawings untouched", () => {
-    const d: HLineDrawing = { id: "h1", kind: "hline", price: 100, style: DEFAULT_STYLE, createdAt: 0, updatedAt: 0 };
+    const d: HLineDrawing = {
+      id: "h1",
+      kind: "hline",
+      price: 100,
+      style: DEFAULT_STYLE,
+      createdAt: 0,
+      updatedAt: 0,
+    };
     expect(migrateDrawing(d)).toBe(d);
   });
 });

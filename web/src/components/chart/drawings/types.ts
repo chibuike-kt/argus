@@ -159,7 +159,10 @@ const LEGACY_POSITION_FORWARD_SECONDS = 6000;
 
 export function migrateDrawing(d: Drawing): Drawing {
   if ((d.kind === "position-long" || d.kind === "position-short") && d.rightTime == null) {
-    const timeSeconds = typeof d.time === "number" ? d.time : Math.floor(Date.parse(d.time as unknown as string) / 1000);
+    const timeSeconds =
+      typeof d.time === "number"
+        ? d.time
+        : Math.floor(Date.parse(d.time as unknown as string) / 1000);
     return { ...d, rightTime: (timeSeconds + LEGACY_POSITION_FORWARD_SECONDS) as Time };
   }
   return d;
