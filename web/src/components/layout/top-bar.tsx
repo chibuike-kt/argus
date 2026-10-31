@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { Bell, Settings } from "lucide-react";
+import { Bell, Gear } from "@phosphor-icons/react";
 import { IconButton } from "@/components/ui/icon-button";
 import { cn } from "@/lib/cn";
 
@@ -41,7 +41,7 @@ export function TopBar() {
           <Bell />
         </IconButton>
         <IconButton variant="ghost" aria-label="Settings">
-          <Settings />
+          <Gear />
         </IconButton>
         <span className="ml-1 grid size-9 place-items-center rounded-full bg-surface-2 text-sm font-semibold text-fg-muted">
           K

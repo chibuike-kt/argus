@@ -1,24 +1,27 @@
 import { type ReactNode } from "react";
-import { NavLink, Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
-  ChevronDown,
-  CandlestickChart,
+  CaretDown,
+  ChartBar,
   SlidersHorizontal,
   Bell,
-  History,
-  Undo2,
-  Redo2,
+  ClockCounterClockwise,
+  ArrowUUpLeft,
+  ArrowUUpRight,
   Camera,
-  Settings,
+  Gear,
   Check,
-} from "lucide-react";
+  ArrowLeft,
+  MagnifyingGlass,
+} from "@phosphor-icons/react";
 import { IconButton } from "@/components/ui/icon-button";
 import { Button } from "@/components/ui/button";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { instrument } from "@/mocks/fixtures";
 import { cn } from "@/lib/cn";
 import { useDrawing } from "@/components/chart/drawing-context";
+import { useCommandPalette } from "@/components/workspace/command-palette";
 
 const INTERVAL_GROUPS: { label: string; items: [string, string][] }[] = [
   {
@@ -45,11 +48,6 @@ const INTERVAL_GROUPS: { label: string; items: [string, string][] }[] = [
       ["1W", "1 week"],
     ],
   },
-];
-
-const NAV = [
-  { to: "/setups", label: "Setups" },
-  { to: "/analysis", label: "Analysis" },
 ];
 
 function Divider() {
@@ -79,7 +77,7 @@ function IntervalMenu({ tf, onSelect }: { tf: string; onSelect: (v: string) => v
           className="focus-ring inline-flex h-7 items-center gap-1 rounded-md px-2 text-[13px] font-semibold text-fg outline-none transition-colors hover:bg-white/5 data-[state=open]:bg-white/5"
         >
           {tf}
-          <ChevronDown className="size-3.5 text-fg-subtle" />
+          <CaretDown className="size-3.5 text-fg-subtle" />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
@@ -123,40 +121,25 @@ function IntervalMenu({ tf, onSelect }: { tf: string; onSelect: (v: string) => v
 // then the chart controls, then the chart actions and account on the right.
 export function ChartToolbar() {
   const { timeframe: tf, setTimeframe: setTf, drawings } = useDrawing();
+  const navigate = useNavigate();
+  const palette = useCommandPalette();
   return (
-    <div className="glass relative z-30 flex items-center gap-1.5 rounded-xl px-2 py-1.5">
-      <Link to="/setups" className="flex items-center gap-2 pl-1">
-        <span className="grid size-8 place-items-center rounded-md bg-accent text-accent-foreground">
-          <span className="font-display text-lg leading-none">A</span>
-        </span>
-        <span className="font-display hidden text-lg leading-none tracking-wide sm:inline">
-          ARGUS
-        </span>
-      </Link>
-
-      <nav className="ml-1 hidden items-center gap-0.5 xl:flex">
-        {NAV.map((nv) => (
-          <NavLink
-            key={nv.to}
-            to={nv.to}
-            className={({ isActive }) =>
-              cn(
-                "inline-flex h-7 items-center rounded-md px-2.5 text-[13px] font-medium transition-colors",
-                isActive ? "bg-white/10 text-fg" : "text-fg-muted hover:text-fg",
-              )
-            }
-          >
-            {nv.label}
-          </NavLink>
-        ))}
-      </nav>
+    <div className="argus-in glass relative z-30 flex items-center gap-1.5 rounded-xl px-2 py-1.5">
+      <IconButton
+        variant="ghost"
+        size="sm"
+        aria-label="Back to setups"
+        onClick={() => navigate("/setups")}
+      >
+        <ArrowLeft />
+      </IconButton>
 
       <Divider />
 
       <button className="focus-ring flex items-center gap-2 rounded-md px-2 py-1 hover:bg-white/5">
         <CoinIcon symbol={instrument.symbol} size={20} />
         <span className="text-sm font-semibold">{instrument.symbol}</span>
-        <ChevronDown className="size-3.5 text-fg-subtle" />
+        <CaretDown className="size-3.5 text-fg-subtle" />
       </button>
 
       <Divider />
@@ -165,13 +148,25 @@ export function ChartToolbar() {
 
       <Divider />
 
-      <ToolbarBtn icon={<CandlestickChart />} label="Chart type" />
+      <ToolbarBtn icon={<ChartBar />} label="Chart type" />
       <ToolbarBtn icon={<SlidersHorizontal />} label="Indicators" text="Indicators" />
       <ToolbarBtn icon={<Bell />} label="Alert" text="Alert" />
 
       <div className="ml-auto flex items-center gap-1.5">
+        <button
+          onClick={palette.open}
+          aria-label="Search (Ctrl+K)"
+          title="Jump to a symbol or page"
+          className="focus-ring inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] text-fg-subtle transition-colors hover:bg-white/5 hover:text-fg"
+        >
+          <MagnifyingGlass className="size-4" />
+          <kbd className="hidden rounded border border-line px-1.5 py-0.5 text-[10px] lg:inline">
+            Ctrl K
+          </kbd>
+        </button>
+        <Divider />
         <Button variant="glass" size="sm" className="gap-1.5">
-          <History className="size-4 text-accent" /> Replay
+          <ClockCounterClockwise className="size-4 text-accent" /> Replay
         </Button>
         <IconButton
           variant="ghost"
@@ -180,7 +175,7 @@ export function ChartToolbar() {
           disabled={!drawings.canUndo}
           onClick={() => drawings.undo()}
         >
-          <Undo2 />
+          <ArrowUUpLeft />
         </IconButton>
         <IconButton
           variant="ghost"
@@ -189,14 +184,14 @@ export function ChartToolbar() {
           disabled={!drawings.canRedo}
           onClick={() => drawings.redo()}
         >
-          <Redo2 />
+          <ArrowUUpRight />
         </IconButton>
         <IconButton variant="ghost" size="sm" aria-label="Screenshot">
           <Camera />
         </IconButton>
         <Divider />
         <IconButton variant="ghost" size="sm" aria-label="Settings">
-          <Settings />
+          <Gear />
         </IconButton>
         <span className="ml-0.5 grid size-8 place-items-center rounded-full bg-surface-2 text-[13px] font-semibold text-fg-muted">
           K

@@ -21,9 +21,7 @@ const panel = cva("rounded-xl", {
   defaultVariants: { variant: "glass", pad: "md" },
 });
 
-export interface PanelProps
-  extends HTMLAttributes<HTMLDivElement>,
-    VariantProps<typeof panel> {}
+export interface PanelProps extends HTMLAttributes<HTMLDivElement>, VariantProps<typeof panel> {}
 
 export const Panel = forwardRef<HTMLDivElement, PanelProps>(
   ({ className, variant, pad, ...props }, ref) => (

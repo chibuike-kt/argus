@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Copy, Trash2, Settings2, Minus } from "lucide-react";
+import { Copy, Trash, GearSix, Minus } from "@phosphor-icons/react";
 import { cn } from "@/lib/cn";
 import type { Drawing, LineStyle } from "./types";
 
-const PALETTE = ["#d7fe62", "#ff5b5b", "#8ab4ff", "#ffc470", "#ffffff", "#6e6e6e"];
+const PALETTE = ["#6d7bff", "#f0616d", "#2ebd85", "#f5b461", "#ffffff", "#9aa1ab"];
 const WIDTHS = [1, 1.5, 2, 3];
 
 export interface ContextToolbarProps {
@@ -24,10 +24,23 @@ const LABELLABLE: Drawing["kind"][] = ["rectangle", "text"];
 // line style, width, an inline label editor for kinds that carry text, and
 // clone/delete. Kept in its own module per the brief's "handle rendering and
 // the context toolbar as their own concerns."
-export function ContextToolbar({ drawing, x, y, onStyleChange, onLabelChange, onClone, onDelete }: ContextToolbarProps) {
+export function ContextToolbar({
+  drawing,
+  x,
+  y,
+  onStyleChange,
+  onLabelChange,
+  onClone,
+  onDelete,
+}: ContextToolbarProps) {
   const [editingLabel, setEditingLabel] = useState(false);
   const canLabel = LABELLABLE.includes(drawing.kind) && onLabelChange;
-  const currentLabel = drawing.kind === "text" ? drawing.text : drawing.kind === "rectangle" ? drawing.label ?? "" : "";
+  const currentLabel =
+    drawing.kind === "text"
+      ? drawing.text
+      : drawing.kind === "rectangle"
+        ? (drawing.label ?? "")
+        : "";
 
   return (
     <div
@@ -55,7 +68,9 @@ export function ContextToolbar({ drawing, x, y, onStyleChange, onLabelChange, on
       <button
         aria-label="Toggle dashed"
         title="Line style"
-        onClick={() => onStyleChange({ lineStyle: drawing.style.lineStyle === "dashed" ? "solid" : "dashed" })}
+        onClick={() =>
+          onStyleChange({ lineStyle: drawing.style.lineStyle === "dashed" ? "solid" : "dashed" })
+        }
         className={cn(
           "focus-ring grid size-6 place-items-center rounded-md hover:bg-white/5",
           drawing.style.lineStyle === "dashed" ? "text-accent" : "text-fg-muted",
@@ -88,20 +103,33 @@ export function ContextToolbar({ drawing, x, y, onStyleChange, onLabelChange, on
             aria-label="Edit label"
             title="Edit label"
             onClick={() => setEditingLabel((v) => !v)}
-            className={cn("focus-ring grid size-6 place-items-center rounded-md hover:bg-white/5", editingLabel ? "text-accent" : "text-fg-muted")}
+            className={cn(
+              "focus-ring grid size-6 place-items-center rounded-md hover:bg-white/5",
+              editingLabel ? "text-accent" : "text-fg-muted",
+            )}
           >
-            <Settings2 className="size-4" />
+            <GearSix className="size-4" />
           </button>
         </>
       )}
 
       <span className="h-5 w-px bg-line" />
 
-      <button aria-label="Clone" title="Clone" onClick={onClone} className="focus-ring grid size-6 place-items-center rounded-md text-fg-muted hover:bg-white/5 hover:text-fg">
+      <button
+        aria-label="Clone"
+        title="Clone"
+        onClick={onClone}
+        className="focus-ring grid size-6 place-items-center rounded-md text-fg-muted hover:bg-white/5 hover:text-fg"
+      >
         <Copy className="size-4" />
       </button>
-      <button aria-label="Delete" title="Delete" onClick={onDelete} className="focus-ring grid size-6 place-items-center rounded-md text-fg-muted hover:bg-down/15 hover:text-down">
-        <Trash2 className="size-4" />
+      <button
+        aria-label="Delete"
+        title="Delete"
+        onClick={onDelete}
+        className="focus-ring grid size-6 place-items-center rounded-md text-fg-muted hover:bg-down/15 hover:text-down"
+      >
+        <Trash className="size-4" />
       </button>
 
       {editingLabel && canLabel && (

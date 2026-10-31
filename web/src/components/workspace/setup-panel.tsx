@@ -44,7 +44,9 @@ export function SetupPanel() {
       </div>
 
       <div>
-        <div className="text-[11px] font-medium uppercase tracking-wide text-fg-subtle">Targets</div>
+        <div className="text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
+          Targets
+        </div>
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {setup.targets.map((t, i) => (
             <Pill key={t} variant="glass" size="md" className="gap-1.5">

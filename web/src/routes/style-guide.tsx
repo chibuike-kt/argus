@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Bell, Plus, Search, SlidersHorizontal } from "lucide-react";
+import { Bell, Plus, MagnifyingGlass, SlidersHorizontal } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Panel } from "@/components/ui/panel";
@@ -11,15 +11,7 @@ import { TabsRoot, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { Provenance } from "@/types/domain";
 import { cn } from "@/lib/cn";
 
-function Section({
-  title,
-  desc,
-  children,
-}: {
-  title: string;
-  desc?: string;
-  children: ReactNode;
-}) {
+function Section({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
   return (
     <section className="space-y-4 border-t border-line pt-8 first:border-0 first:pt-0">
       <div>
@@ -58,18 +50,19 @@ export function StyleGuide() {
       <header className="space-y-2">
         <h1 className="text-3xl font-semibold tracking-tight">ARGUS design system</h1>
         <p className="max-w-2xl text-fg-muted">
-          Pure black, lime accent, liquid glass. The foundation for the analyst
-          surfaces. Typeface is Poppins, with Astron Valley reserved for the
-          ARGUS logo mark and wordmark.
+          A trading-intelligence terminal: a calm neutral canvas, flat segmented cards, and two
+          colour languages kept strictly apart -- the market speaks green/red, ARGUS's own marks
+          speak the indigo accent. Typeface is IBM Plex Sans with IBM Plex Mono for every number,
+          and Astron Valley reserved for the ARGUS logo mark and wordmark.
         </p>
       </header>
 
       <Section
         title="Typography"
-        desc="Poppins across the interface. Numerics use tabular figures so prices and times stay aligned under live updates."
+        desc="IBM Plex Sans across the interface. Every number -- prices, times, deltas -- renders in IBM Plex Mono via the .tnum class, with tabular figures so they stay aligned under live updates."
       >
         <Panel variant="strong" pad="lg" className="space-y-6">
-          <div className="text-6xl font-semibold tracking-tight">Poppins</div>
+          <div className="text-6xl font-semibold tracking-tight">Plex Sans</div>
           <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
             <span className="text-2xl font-light">Light 300</span>
             <span className="text-2xl font-normal">Regular 400</span>
@@ -90,39 +83,42 @@ export function StyleGuide() {
         </Panel>
       </Section>
 
-      <Section title="Color" desc="Color is reserved for meaning: lime for action and bullish, red for bearish, and one hue per provenance tag.">
+      <Section
+        title="Color"
+        desc="Two colour languages, kept apart: emerald/coral for the market itself (candles, watchlist, performance), indigo for ARGUS's own intelligence (POI, plan, bias, structure, plus focus/active/selection). One hue per provenance tag."
+      >
         <div className="space-y-6">
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-            <Swatch name="Base" hex="#000000" cls="bg-base" />
-            <Swatch name="Surface" hex="#141414" cls="bg-surface" />
-            <Swatch name="Surface 2" hex="#1B1B1D" cls="bg-surface-2" />
-            <Swatch name="Elevated" hex="#282828" cls="bg-elevated" />
-            <Swatch name="Grey" hex="#474747" cls="bg-grey" />
+            <Swatch name="Base" hex="#0A0B0D" cls="bg-base" />
+            <Swatch name="Surface" hex="#101216" cls="bg-surface" />
+            <Swatch name="Surface 2" hex="#15181E" cls="bg-surface-2" />
+            <Swatch name="Elevated" hex="#1C2027" cls="bg-elevated" />
+            <Swatch name="Grey" hex="#3A3F47" cls="bg-grey" />
           </div>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-            <Swatch name="Accent" hex="#D7FE62" cls="bg-accent" />
-            <Swatch name="Accent strong" hex="#C6F24E" cls="bg-accent-strong" />
-            <Swatch name="Up" hex="#D7FE62" cls="bg-up" />
-            <Swatch name="Down" hex="#FF5B5B" cls="bg-down" />
-            <Swatch name="Foreground" hex="#FFFFFF" cls="bg-fg" />
+            <Swatch name="Accent (ARGUS)" hex="#6D7BFF" cls="bg-accent" />
+            <Swatch name="Accent strong" hex="#5561E6" cls="bg-accent-strong" />
+            <Swatch name="Up (market)" hex="#2EBD85" cls="bg-up" />
+            <Swatch name="Down (market)" hex="#F0616D" cls="bg-down" />
+            <Swatch name="Foreground" hex="#F3F5F7" cls="bg-fg" />
           </div>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <Swatch name="Prov S" hex="#D7FE62" cls="bg-prov-s" />
-            <Swatch name="Prov A" hex="#8AB4FF" cls="bg-prov-a" />
-            <Swatch name="Prov R" hex="#FFC470" cls="bg-prov-r" />
-            <Swatch name="Prov U" hex="#FF6B6B" cls="bg-prov-u" />
+            <Swatch name="Prov S" hex="#2EBD85" cls="bg-prov-s" />
+            <Swatch name="Prov A" hex="#6D7BFF" cls="bg-prov-a" />
+            <Swatch name="Prov R" hex="#F5B461" cls="bg-prov-r" />
+            <Swatch name="Prov U" hex="#F0616D" cls="bg-prov-u" />
           </div>
         </div>
       </Section>
 
       <Section
         title="Surfaces"
-        desc="Three glass treatments plus the solid lime surface for the primary highlighted panel."
+        desc="Flat segmented cards -- solid fill, hairline border, no blur -- plus the indigo-tinted surface for highlighted/active panels."
       >
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Panel variant="glass" pad="lg" className="h-32">
             <div className="text-sm font-medium">glass</div>
-            <div className="mt-1 text-xs text-fg-muted">Default frosted panel</div>
+            <div className="mt-1 text-xs text-fg-muted">Default flat panel</div>
           </Panel>
           <Panel variant="strong" pad="lg" className="h-32">
             <div className="text-sm font-medium">glass-strong</div>
@@ -133,7 +129,7 @@ export function StyleGuide() {
             <div className="mt-1 text-xs text-fg-muted">Highlighted / active</div>
           </Panel>
           <Panel variant="lime" pad="lg" className="h-32">
-            <div className="text-sm font-semibold">lime</div>
+            <div className="text-sm font-semibold">accent fill</div>
             <div className="mt-1 text-xs text-accent-foreground/70">Hero stat panel</div>
           </Panel>
         </div>
@@ -149,7 +145,7 @@ export function StyleGuide() {
             <Plus /> Add
           </Button>
           <IconButton aria-label="Search">
-            <Search />
+            <MagnifyingGlass />
           </IconButton>
           <IconButton variant="solid" aria-label="Filters">
             <SlidersHorizontal />

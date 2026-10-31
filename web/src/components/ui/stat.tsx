@@ -33,9 +33,7 @@ export function Stat({
       <span className="text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
         {label}
       </span>
-      <span className={cn("tnum font-semibold leading-tight", valueSize, valueTone)}>
-        {value}
-      </span>
+      <span className={cn("tnum font-semibold leading-tight", valueSize, valueTone)}>{value}</span>
       {delta && (
         <span
           className={cn(

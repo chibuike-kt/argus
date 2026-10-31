@@ -12,7 +12,11 @@ function shift(p: DPoint, deltaPrice: number, deltaTimeSec: number): DPoint {
 // Moves the whole drawing by a price/time delta, preserving its shape --
 // the "drag the body" behaviour. hline only has a price axis to move on;
 // vline only a time axis; everything else moves on both.
-export function translateDrawing(d: Drawing, deltaPrice: number, deltaTimeSec: number): Partial<Drawing> {
+export function translateDrawing(
+  d: Drawing,
+  deltaPrice: number,
+  deltaTimeSec: number,
+): Partial<Drawing> {
   switch (d.kind) {
     case "trendline":
     case "ray":
@@ -20,7 +24,10 @@ export function translateDrawing(d: Drawing, deltaPrice: number, deltaTimeSec: n
     case "fib":
     case "measure":
     case "rectangle":
-      return { p1: shift(d.p1, deltaPrice, deltaTimeSec), p2: shift(d.p2, deltaPrice, deltaTimeSec) };
+      return {
+        p1: shift(d.p1, deltaPrice, deltaTimeSec),
+        p2: shift(d.p2, deltaPrice, deltaTimeSec),
+      };
     case "hline":
       return { price: d.price + deltaPrice };
     case "vline":
@@ -31,6 +38,10 @@ export function translateDrawing(d: Drawing, deltaPrice: number, deltaTimeSec: n
     case "position-short":
       return {
         time: (timeSeconds(d.time) + deltaTimeSec) as Time,
+        // rightTime shifts by the same delta so the box's own width stays
+        // constant when moving the whole drawing -- only the "right" handle
+        // changes the width itself.
+        rightTime: (timeSeconds(d.rightTime) + deltaTimeSec) as Time,
         entry: d.entry + deltaPrice,
         stop: d.stop + deltaPrice,
         targets: d.targets.map((t) => t + deltaPrice),
@@ -107,7 +118,12 @@ function resizeRectangle(
 // Adjusts a single handle -- the "drag a handle to reshape/resize" behaviour.
 // anchors is only consulted for rectangle corner/edge handles; pass the
 // RectAnchors captured at drag start (see rectAnchorsOf).
-export function reshapeDrawing(d: Drawing, handleId: string, newPoint: DPoint, anchors?: RectAnchors): Partial<Drawing> {
+export function reshapeDrawing(
+  d: Drawing,
+  handleId: string,
+  newPoint: DPoint,
+  anchors?: RectAnchors,
+): Partial<Drawing> {
   switch (d.kind) {
     case "trendline":
     case "ray":
@@ -123,6 +139,7 @@ export function reshapeDrawing(d: Drawing, handleId: string, newPoint: DPoint, a
     case "position-short": {
       if (handleId === "entry") return { entry: newPoint.price };
       if (handleId === "stop") return { stop: newPoint.price };
+      if (handleId === "right") return { rightTime: newPoint.time };
       if (handleId.startsWith("target-")) {
         const i = Number(handleId.slice("target-".length));
         const targets = [...d.targets];

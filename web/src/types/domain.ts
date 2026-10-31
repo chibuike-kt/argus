@@ -86,6 +86,9 @@ export interface Instrument {
   venue: string;
   last: number;
   changePct: number;
+  // %-over-timeframe, for the analysis panel's performance tiles. Optional:
+  // only the primary instrument fixture carries it today.
+  performance?: { "1D": number; "1W": number; "1M": number };
 }
 
 // Freshness and finality of the market data a setup/plan was computed

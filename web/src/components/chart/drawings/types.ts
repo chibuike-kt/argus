@@ -18,7 +18,7 @@ export interface DrawingStyle {
 }
 
 export const DEFAULT_STYLE: DrawingStyle = {
-  color: "#d7fe62",
+  color: "#6d7bff",
   lineWidth: 1.5,
   lineStyle: "solid",
 };
@@ -53,7 +53,13 @@ export interface RectangleDrawing extends Base {
   label?: string;
 }
 
-export const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.705, 0.786, 1] as const;
+// Three levels only: the two anchors (0, 1) and the equilibrium (0.5) --
+// the premium/discount split, the one level that needs to read as a
+// distinct line, not the full retracement ladder (0.236/0.382/0.618/
+// 0.705/0.786). TradingView's own fib shows the full ladder by default;
+// ARGUS's reason for a fib is specifically the equilibrium split, so this
+// is a deliberate narrowing, not a parity gap.
+export const FIB_LEVELS = [0, 0.5, 1] as const;
 
 export interface FibDrawing extends Base {
   kind: "fib";
@@ -64,6 +70,10 @@ export interface FibDrawing extends Base {
 export interface PositionDrawing extends Base {
   kind: "position-long" | "position-short";
   time: Time;
+  // rightTime bounds the box/lines to a finite forward width, instead of
+  // flooding to the pane's right edge -- a second, draggable time anchor,
+  // defaulting to a fixed number of bars ahead of time at creation.
+  rightTime: Time;
   entry: number;
   stop: number;
   targets: number[];
@@ -96,7 +106,14 @@ export type DrawKind = Drawing["kind"];
 // Two-point tools: first click sets p1, the mouse previews, second click (or
 // release, for click-drag-release) commits p2. One-click tools place and
 // commit immediately. Kinds not listed here are not yet drawing tools.
-export const TWO_POINT_KINDS: DrawKind[] = ["trendline", "ray", "extended", "rectangle", "fib", "measure"];
+export const TWO_POINT_KINDS: DrawKind[] = [
+  "trendline",
+  "ray",
+  "extended",
+  "rectangle",
+  "fib",
+  "measure",
+];
 
 // Which rail tool id maps to which drawing kind. Tools not listed here select
 // but do not yet draw (patterns, elliott, gann, ... -- out of V1 per the brief).
@@ -127,6 +144,28 @@ export function cloneDrawing(d: Drawing): Drawing {
 // into this pure module's type surface.
 function structuredCloneLike<T>(v: T): T {
   return typeof structuredClone === "function" ? structuredClone(v) : JSON.parse(JSON.stringify(v));
+}
+
+// Repairs a drawing loaded from persistence that predates a field this
+// module later added as required -- rightTime, added after some users
+// already had position drawings saved without it. Without this, a legacy
+// position's rightTime is undefined: resolving it to a coordinate returns
+// null, and the primitive skips drawing that position entirely (invisible),
+// rather than guessing at the pane's edge. The fixed 6000s (20 bars at a
+// 5-minute interval, the fixture data's own cadence) is a one-time repair
+// value, not a live default -- new positions get a real one from the
+// controller, which knows the chart's actual bar interval.
+const LEGACY_POSITION_FORWARD_SECONDS = 6000;
+
+export function migrateDrawing(d: Drawing): Drawing {
+  if ((d.kind === "position-long" || d.kind === "position-short") && d.rightTime == null) {
+    const timeSeconds =
+      typeof d.time === "number"
+        ? d.time
+        : Math.floor(Date.parse(d.time as unknown as string) / 1000);
+    return { ...d, rightTime: (timeSeconds + LEGACY_POSITION_FORWARD_SECONDS) as Time };
+  }
+  return d;
 }
 
 // Every point a drawing carries, for generic move/hit-test/handle code that

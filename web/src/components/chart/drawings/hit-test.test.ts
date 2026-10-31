@@ -4,6 +4,7 @@ import { extendPoint, getHandles, hitTest } from "./hit-test";
 import type { ChartAccessors } from "./geometry";
 import {
   DEFAULT_STYLE,
+  type FibDrawing,
   type HLineDrawing,
   type PositionDrawing,
   type RectangleDrawing,
@@ -31,7 +32,10 @@ function fakeAccessors(): ChartAccessors {
 const acc = fakeAccessors();
 const PANE_WIDTH = 1000;
 
-function trendline(p1: { time: number; price: number }, p2: { time: number; price: number }): TrendLineDrawing {
+function trendline(
+  p1: { time: number; price: number },
+  p2: { time: number; price: number },
+): TrendLineDrawing {
   return {
     id: "t1",
     kind: "trendline",
@@ -43,7 +47,10 @@ function trendline(p1: { time: number; price: number }, p2: { time: number; pric
   };
 }
 
-function rectangle(p1: { time: number; price: number }, p2: { time: number; price: number }): RectangleDrawing {
+function rectangle(
+  p1: { time: number; price: number },
+  p2: { time: number; price: number },
+): RectangleDrawing {
   return {
     id: "r1",
     kind: "rectangle",
@@ -59,11 +66,29 @@ function hline(price: number): HLineDrawing {
   return { id: "h1", kind: "hline", price, style: DEFAULT_STYLE, createdAt: 0, updatedAt: 0 };
 }
 
-function position(entry: number, stop: number, targets: number[]): PositionDrawing {
+function fib(p1: { time: number; price: number }, p2: { time: number; price: number }): FibDrawing {
+  return {
+    id: "f1",
+    kind: "fib",
+    p1: { time: p1.time as unknown as Time, price: p1.price },
+    p2: { time: p2.time as unknown as Time, price: p2.price },
+    style: DEFAULT_STYLE,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+}
+
+function position(
+  entry: number,
+  stop: number,
+  targets: number[],
+  rightTime = 10000,
+): PositionDrawing {
   return {
     id: "p1",
     kind: "position-long",
     time: 10 as unknown as Time,
+    rightTime: rightTime as unknown as Time,
     entry,
     stop,
     targets,
@@ -93,11 +118,14 @@ describe("getHandles", () => {
     expect(byId.left).toEqual({ x: 10, y: 150 });
   });
 
-  it("returns entry/stop/target handles for a position, all at the anchor time", () => {
-    const d = position(100, 90, [110, 120]);
+  it("returns entry/stop/target handles at the anchor time, plus a right handle at the box's right time-anchor", () => {
+    const d = position(100, 90, [110, 120], 50);
     const handles = getHandles(d, acc);
-    expect(handles.map((h) => h.id)).toEqual(["entry", "stop", "target-0", "target-1"]);
-    expect(handles.every((h) => h.px.x === 10)).toBe(true);
+    expect(handles.map((h) => h.id)).toEqual(["entry", "stop", "target-0", "target-1", "right"]);
+    expect(handles.slice(0, 4).every((h) => h.px.x === 10)).toBe(true);
+    const right = handles.find((h) => h.id === "right");
+    expect(right?.px.x).toBe(50);
+    expect(right?.cursor).toBe("resize");
   });
 
   it("returns no handles for hline/vline (they move as a whole via a body hit)", () => {
@@ -109,7 +137,10 @@ describe("hitTest", () => {
   it("hits a trend line's p1 handle within tolerance, not exactly on it", () => {
     const d = trendline({ time: 10, price: 100 }, { time: 50, price: 200 });
     const r = hitTest(d, acc, { x: 13, y: 103 }, PANE_WIDTH);
-    expect(r).toEqual({ kind: "handle", handle: { id: "p1", px: { x: 10, y: 100 }, cursor: "resize" } });
+    expect(r).toEqual({
+      kind: "handle",
+      handle: { id: "p1", px: { x: 10, y: 100 }, cursor: "resize" },
+    });
   });
 
   it("hits a trend line's body when near the segment but far from either endpoint", () => {
@@ -176,6 +207,26 @@ describe("hitTest", () => {
   it("misses a position above the reward box and below the risk box", () => {
     const d = position(100, 90, [110]);
     expect(hitTest(d, acc, { x: 500, y: 300 }, PANE_WIDTH)).toBeNull();
+  });
+
+  it("is a bounded box: misses past the right time-anchor even at a y inside the box", () => {
+    const d = position(100, 90, [110], 200); // box spans x=[10,200]
+    expect(hitTest(d, acc, { x: 95, y: 95 }, PANE_WIDTH)).toEqual({ kind: "body" }); // inside
+    expect(hitTest(d, acc, { x: 400, y: 95 }, PANE_WIDTH)).toBeNull(); // same y, past the right edge
+  });
+
+  it("hits the right handle at the box's own right time-anchor", () => {
+    const d = position(100, 90, [110], 200);
+    // midpoint of [min(entry,stop,target), max(...)] = midpoint of [90,110] = 100
+    const r = hitTest(d, acc, { x: 200, y: 100 }, PANE_WIDTH);
+    expect(r?.kind).toBe("handle");
+    if (r?.kind === "handle") expect(r.handle.id).toBe("right");
+  });
+
+  it("hits a fib's body strictly between its own two anchors, not out to the pane edge", () => {
+    const d = fib({ time: 0, price: 0 }, { time: 100, price: 100 });
+    expect(hitTest(d, acc, { x: 50, y: 50 }, PANE_WIDTH)).toEqual({ kind: "body" }); // between the anchors
+    expect(hitTest(d, acc, { x: 500, y: 50 }, PANE_WIDTH)).toBeNull(); // well past the right anchor
   });
 });
 

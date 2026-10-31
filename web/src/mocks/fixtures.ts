@@ -9,6 +9,7 @@ export const instrument: Instrument = {
   venue: "BINANCE",
   last: 68360,
   changePct: 0.53,
+  performance: { "1D": 0.53, "1W": 2.84, "1M": -4.12 },
 };
 
 // Watchlist for the markets strip. Icons resolve from the symbol.

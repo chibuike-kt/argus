@@ -10,7 +10,13 @@ import {
   type Drawing,
   type DrawKind,
 } from "./types";
-import { distance, snapToCandle, toPoint, type ChartAccessors, type Px } from "./geometry";
+import {
+  coordinateToSmoothTimeSeconds,
+  distance,
+  snapToCandle,
+  type ChartAccessors,
+  type Px,
+} from "./geometry";
 import { getHandles, hitTest, type Handle, type HitResult } from "./hit-test";
 import { primitiveFor, updatePrimitive, SelectionOverlayPrimitive } from "./primitives";
 import { rectAnchorsOf, reshapeDrawing, translateDrawing, type RectAnchors } from "./transform";
@@ -94,6 +100,18 @@ export class DrawingController {
   setCandles(c: Candle[]) {
     this.candles = c;
   }
+  // The position tool's default forward width, in bars -- used only to
+  // seed rightTime on creation; dragging the right handle afterwards is
+  // unaffected by this constant.
+  private static readonly DEFAULT_FORWARD_BARS = 20;
+  private static readonly FALLBACK_BAR_SECONDS = 300; // 5m, matching the fixtures
+  private barIntervalSeconds(): number {
+    if (this.candles.length < 2) return DrawingController.FALLBACK_BAR_SECONDS;
+    const a = Date.parse(this.candles[0].openTime) / 1000;
+    const b = Date.parse(this.candles[1].openTime) / 1000;
+    const diff = b - a;
+    return diff > 0 ? diff : DrawingController.FALLBACK_BAR_SECONDS;
+  }
   setLocked(on: boolean) {
     this.locked = on;
   }
@@ -166,10 +184,26 @@ export class DrawingController {
   }
 
   private resolvePoint(px: Px): DPoint | null {
-    const fallback = this.chart.timeScale().coordinateToTime(this.paneWidth()) ?? (0 as Time);
-    const p = toPoint(this.acc, px, fallback);
-    if (!p) return null;
-    return this.magnetOn ? snapToCandle(p, this.candles) : p;
+    const price = this.series.coordinateToPrice(px.y);
+    if (price == null) return null;
+
+    // Smooth (sub-bar) time by default -- coordinateToTime snaps to the
+    // nearest bar, which is what made dragging step bar by bar. Falls back
+    // to the library's own (bar-snapped) resolution only when there are
+    // too few candles to interpolate at all.
+    const smoothSeconds = coordinateToSmoothTimeSeconds(this.acc, px.x, this.candles);
+    let time: Time;
+    if (smoothSeconds != null) {
+      time = smoothSeconds as unknown as Time;
+    } else {
+      const fallback = this.chart.timeScale().coordinateToTime(this.paneWidth()) ?? (0 as Time);
+      time = (this.chart.timeScale().coordinateToTime(px.x) ?? fallback) as Time;
+    }
+
+    const point: DPoint = { time, price };
+    // Magnet (candle O/H/L/C snap) is the only thing that should quantize
+    // the point -- off by default, so placement and dragging stay smooth.
+    return this.magnetOn ? snapToCandle(point, this.candles) : point;
   }
 
   private paneWidth(): number {
@@ -237,7 +271,13 @@ export class DrawingController {
         return;
       }
       // One-click tools commit immediately.
-      this.store.add(oneClickDrawing(kind, point));
+      this.store.add(
+        oneClickDrawing(
+          kind,
+          point,
+          this.barIntervalSeconds() * DrawingController.DEFAULT_FORWARD_BARS,
+        ),
+      );
       this.finishCreation();
       return;
     }
@@ -279,7 +319,11 @@ export class DrawingController {
     }
   };
 
-  private beginDrag(d: Drawing, origin: DPoint, opts: { mode: "move" | "handle"; handle?: Handle }) {
+  private beginDrag(
+    d: Drawing,
+    origin: DPoint,
+    opts: { mode: "move" | "handle"; handle?: Handle },
+  ) {
     this.drag = {
       id: d.id,
       mode: opts.mode,
@@ -373,7 +417,8 @@ export class DrawingController {
   private onKeyDown = (e: KeyboardEvent) => {
     const target = e.target as HTMLElement | null;
     const editing =
-      target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      target &&
+      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
     if (editing) return;
 
     const mod = e.ctrlKey || e.metaKey;
@@ -463,7 +508,7 @@ function draftDrawing(kind: DrawKind, p1: DPoint, p2: DPoint, id = "__draft__"):
   }
 }
 
-function oneClickDrawing(kind: DrawKind, p: DPoint): Drawing {
+function oneClickDrawing(kind: DrawKind, p: DPoint, forwardSeconds: number): Drawing {
   const now = Date.now();
   const id = nextId();
   switch (kind) {
@@ -481,6 +526,7 @@ function oneClickDrawing(kind: DrawKind, p: DPoint): Drawing {
         id,
         kind,
         time: p.time,
+        rightTime: (timeSecondsOf(p.time) + forwardSeconds) as Time,
         entry: p.price,
         stop: long ? p.price - span : p.price + span,
         targets: [long ? p.price + span * 2 : p.price - span * 2],

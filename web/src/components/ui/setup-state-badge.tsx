@@ -17,7 +17,13 @@ const META: Record<SetupState, { label: string; cls: string }> = {
 export function SetupStateBadge({ state, className }: { state: SetupState; className?: string }) {
   const meta = META[state];
   return (
-    <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium", meta.cls, className)}>
+    <span
+      className={cn(
+        "inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium",
+        meta.cls,
+        className,
+      )}
+    >
       {meta.label}
     </span>
   );

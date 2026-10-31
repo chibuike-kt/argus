@@ -1,44 +1,44 @@
 import { useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
-  MousePointer2,
+  Cursor,
   Crosshair,
   Circle,
   Eraser,
-  TrendingUp,
-  TrendingDown,
-  MoveUpRight,
-  MoveHorizontal,
-  MoveVertical,
+  TrendUp,
+  TrendDown,
+  ArrowUpRight,
+  ArrowsLeftRight,
+  ArrowsDownUp,
   Minus,
-  SeparatorVertical,
-  Rows3,
-  AlignJustify,
+  LineVertical,
+  Rows,
+  TextAlignJustify,
   Clock,
-  Spline,
+  Path,
   Square,
   Triangle,
-  PenTool,
+  PenNib,
   Target,
-  BarChart3,
-  Type,
-  StickyNote,
-  MessageSquare,
+  ChartBar,
+  TextT,
+  Note,
+  ChatCircle,
   Tag,
   Ruler,
-  Magnet,
+  MagnetStraight,
   Lock,
   Eye,
-  EyeOff,
-  Trash2,
+  EyeSlash,
+  Trash,
   Star,
-  type LucideIcon,
-} from "lucide-react";
+  type Icon,
+} from "@phosphor-icons/react";
 import { cn } from "@/lib/cn";
 import { useDrawing } from "@/components/chart/drawing-context";
 import { TOOL_TO_KIND } from "@/components/chart/drawings/types";
 
-type Variant = { id: string; label: string; icon: LucideIcon; fav?: boolean; disabled?: boolean };
+type Variant = { id: string; label: string; icon: Icon; fav?: boolean; disabled?: boolean };
 type Group = { id: string; variants: Variant[] };
 
 // Grouped drawing tools, TradingView-style. The rail shows the group's
@@ -51,27 +51,27 @@ const GROUPS: Group[] = [
     variants: [
       { id: "cross", label: "Cursor", icon: Crosshair },
       { id: "dot", label: "Dot", icon: Circle },
-      { id: "arrow", label: "Arrow", icon: MousePointer2 },
+      { id: "arrow", label: "Arrow", icon: Cursor },
       { id: "eraser", label: "Eraser", icon: Eraser },
     ],
   },
   {
     id: "lines",
     variants: [
-      { id: "trend", label: "Trend line", icon: TrendingUp, fav: true },
-      { id: "ray", label: "Ray", icon: MoveUpRight },
-      { id: "extended", label: "Extended line", icon: MoveHorizontal },
+      { id: "trend", label: "Trend line", icon: TrendUp, fav: true },
+      { id: "ray", label: "Ray", icon: ArrowUpRight },
+      { id: "extended", label: "Extended line", icon: ArrowsLeftRight },
       { id: "hline", label: "Horizontal line", icon: Minus, fav: true },
-      { id: "vline", label: "Vertical line", icon: SeparatorVertical },
+      { id: "vline", label: "Vertical line", icon: LineVertical },
     ],
   },
   {
     id: "fib",
     variants: [
-      { id: "fib-retr", label: "Fib retracement", icon: Rows3, fav: true },
-      { id: "fib-ext", label: "Fib extension", icon: AlignJustify, disabled: true },
+      { id: "fib-retr", label: "Fib retracement", icon: Rows, fav: true },
+      { id: "fib-ext", label: "Fib extension", icon: TextAlignJustify, disabled: true },
       { id: "fib-time", label: "Fib time zone", icon: Clock, disabled: true },
-      { id: "fib-chan", label: "Fib channel", icon: Spline, disabled: true },
+      { id: "fib-chan", label: "Fib channel", icon: Path, disabled: true },
     ],
   },
   {
@@ -80,25 +80,25 @@ const GROUPS: Group[] = [
       { id: "rect", label: "Rectangle", icon: Square, fav: true },
       { id: "ellipse", label: "Ellipse", icon: Circle, disabled: true },
       { id: "triangle", label: "Triangle", icon: Triangle, disabled: true },
-      { id: "path", label: "Path", icon: PenTool, disabled: true },
+      { id: "path", label: "Path", icon: PenNib, disabled: true },
     ],
   },
   {
     id: "forecast",
     variants: [
-      { id: "long", label: "Long position", icon: TrendingUp, fav: true },
-      { id: "short", label: "Short position", icon: TrendingDown, fav: true },
+      { id: "long", label: "Long position", icon: TrendUp, fav: true },
+      { id: "short", label: "Short position", icon: TrendDown, fav: true },
       { id: "forecast", label: "Position forecast", icon: Target, disabled: true },
-      { id: "bars", label: "Bars pattern", icon: BarChart3, disabled: true },
-      { id: "price-range", label: "Price range", icon: MoveVertical, disabled: true },
+      { id: "bars", label: "Bars pattern", icon: ChartBar, disabled: true },
+      { id: "price-range", label: "Price range", icon: ArrowsDownUp, disabled: true },
     ],
   },
   {
     id: "text",
     variants: [
-      { id: "text", label: "Text", icon: Type, fav: true },
-      { id: "note", label: "Note", icon: StickyNote, disabled: true },
-      { id: "callout", label: "Callout", icon: MessageSquare, disabled: true },
+      { id: "text", label: "Text", icon: TextT, fav: true },
+      { id: "note", label: "Note", icon: Note, disabled: true },
+      { id: "callout", label: "Callout", icon: ChatCircle, disabled: true },
       { id: "label", label: "Price label", icon: Tag, disabled: true },
     ],
   },
@@ -129,7 +129,7 @@ function ToolGroup({
   onPick: (i: number) => void;
 }) {
   const v = group.variants[activeVariantIndex];
-  const Icon = v.icon;
+  const VariantIcon = v.icon;
   const hasFlyout = group.variants.length > 1;
   return (
     <div className="relative">
@@ -139,10 +139,12 @@ function ToolGroup({
         title={v.label}
         className={cn(
           "focus-ring grid size-9 place-items-center rounded-md transition-colors [&_svg]:size-[19px]",
-          isActiveGroup ? "bg-accent text-accent-foreground" : "text-fg-muted hover:bg-white/5 hover:text-fg",
+          isActiveGroup
+            ? "bg-accent text-accent-foreground"
+            : "text-fg-muted hover:bg-white/5 hover:text-fg",
         )}
       >
-        <Icon />
+        <VariantIcon weight={isActiveGroup ? "fill" : "regular"} />
       </button>
 
       {hasFlyout && (
@@ -161,7 +163,12 @@ function ToolGroup({
             </button>
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
-            <DropdownMenu.Content side="right" align="start" sideOffset={10} className="glass-strong z-[60] min-w-[220px] rounded-lg p-1 shadow-xl">
+            <DropdownMenu.Content
+              side="right"
+              align="start"
+              sideOffset={10}
+              className="glass-strong z-[60] min-w-[220px] rounded-lg p-1 shadow-xl"
+            >
               {group.variants.map((variant, i) => {
                 const VI = variant.icon;
                 return (
@@ -179,10 +186,21 @@ function ToolGroup({
                     )}
                   >
                     <span className="flex items-center gap-2.5">
-                      <VI className={cn("size-4", i === activeVariantIndex && !variant.disabled ? "text-accent" : "text-fg-subtle")} />
+                      <VI
+                        weight={i === activeVariantIndex && !variant.disabled ? "fill" : "regular"}
+                        className={cn(
+                          "size-4",
+                          i === activeVariantIndex && !variant.disabled
+                            ? "text-accent"
+                            : "text-fg-subtle",
+                        )}
+                      />
                       {variant.label}
                     </span>
-                    <Star className={cn("size-3.5", variant.fav ? "fill-accent text-accent" : "text-fg-subtle/30")} />
+                    <Star
+                      weight={variant.fav ? "fill" : "regular"}
+                      className={cn("size-3.5", variant.fav ? "text-accent" : "text-fg-subtle/30")}
+                    />
                   </DropdownMenu.Item>
                 );
               })}
@@ -195,7 +213,17 @@ function ToolGroup({
 }
 
 export function ToolRail() {
-  const { activeTool, setActiveTool, magnetOn, setMagnetOn, locked, setLocked, hidden, setHidden, drawings } = useDrawing();
+  const {
+    activeTool,
+    setActiveTool,
+    magnetOn,
+    setMagnetOn,
+    locked,
+    setLocked,
+    hidden,
+    setHidden,
+    drawings,
+  } = useDrawing();
   // "Last picked variant" per group -- a UI convenience, not the source of
   // truth for what's active (that is always TOOL_INDEX[activeTool]).
   const [lastPicked, setLastPicked] = useState<Record<string, number>>({});
@@ -212,10 +240,13 @@ export function ToolRail() {
   const count = drawings.drawings.length;
 
   return (
-    <div className="glass flex w-12 shrink-0 flex-col items-center gap-0.5 rounded-xl py-1.5">
+    <div
+      className="argus-in glass flex w-12 shrink-0 flex-col items-center gap-0.5 rounded-xl py-1.5"
+      style={{ "--argus-in-delay": "40ms" } as React.CSSProperties}
+    >
       {GROUPS.map((g) => {
         const isActiveGroup = activeEntry?.groupId === g.id;
-        const variantIndex = isActiveGroup ? activeEntry.index : lastPicked[g.id] ?? 0;
+        const variantIndex = isActiveGroup ? activeEntry.index : (lastPicked[g.id] ?? 0);
         return (
           <ToolGroup
             key={g.id}
@@ -239,7 +270,7 @@ export function ToolRail() {
           magnetOn ? "bg-accent/15 text-accent" : "text-fg-muted hover:bg-white/5 hover:text-fg",
         )}
       >
-        <Magnet />
+        <MagnetStraight weight={magnetOn ? "fill" : "regular"} />
       </button>
       <button
         onClick={() => setLocked(!locked)}
@@ -250,7 +281,7 @@ export function ToolRail() {
           locked ? "bg-accent/15 text-accent" : "text-fg-muted hover:bg-white/5 hover:text-fg",
         )}
       >
-        <Lock />
+        <Lock weight={locked ? "fill" : "regular"} />
       </button>
       <button
         onClick={() => setHidden(!hidden)}
@@ -261,7 +292,7 @@ export function ToolRail() {
           hidden ? "bg-accent/15 text-accent" : "text-fg-muted hover:bg-white/5 hover:text-fg",
         )}
       >
-        {hidden ? <EyeOff /> : <Eye />}
+        {hidden ? <EyeSlash weight="fill" /> : <Eye />}
       </button>
 
       <DropdownMenu.Root open={confirmingClear} onOpenChange={setConfirmingClear}>
@@ -272,11 +303,16 @@ export function ToolRail() {
             disabled={count === 0}
             className="focus-ring grid size-9 place-items-center rounded-md text-fg-muted transition-colors hover:bg-white/5 hover:text-fg disabled:opacity-30 [&_svg]:size-[18px]"
           >
-            <Trash2 />
+            <Trash />
           </button>
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
-          <DropdownMenu.Content side="right" align="end" sideOffset={10} className="glass-strong z-[60] w-56 rounded-lg p-3 shadow-xl">
+          <DropdownMenu.Content
+            side="right"
+            align="end"
+            sideOffset={10}
+            className="glass-strong z-[60] w-56 rounded-lg p-3 shadow-xl"
+          >
             <p className="text-[13px] text-fg-muted">
               Delete all {count} drawing{count === 1 ? "" : "s"}? This cannot be undone.
             </p>
