@@ -7,7 +7,7 @@ import type {
   SeriesAttachedParameter,
 } from "lightweight-charts";
 import { candles as fixtureCandles } from "@/mocks/fixtures";
-import { barsBetween, forwardSpan, timeSeconds, type ChartAccessors } from "./geometry";
+import { barsBetween, forwardSpan, timeSeconds, timeSecondsToSmoothCoordinate, type ChartAccessors } from "./geometry";
 import { extendPoint, getHandles, type Handle } from "./hit-test";
 import {
   FIB_LEVELS,
@@ -420,20 +420,32 @@ export class PositionPrimitive extends BasePrimitive {
         renderer: () => ({
           draw: (target: RenderTarget) => {
             const { time, rightTime, entry, stop, targets } = this.d;
-            const xe = this.x(time);
-            const xRight = this.x(rightTime);
             const yEntry = this.y(entry);
             const yStop = this.y(stop);
-            // Bounded box: entry time to the right time-anchor only -- never
-            // the pane's own width. If the right anchor cannot currently be
-            // resolved to a coordinate (scrolled out of the chart's logical
-            // range), skip this frame rather than guess at the pane edge;
-            // the box reappears once it is back on screen.
-            if (xe == null || xRight == null || yEntry == null || yStop == null) return;
+            // The position must always render -- timeToCoordinate returning
+            // null (the right anchor, a fixed number of bars forward, lands
+            // past the last candle on a short series -- the normal case, not
+            // an edge case) is not a reason to skip it. Only a genuinely
+            // unresolved price (the series not sized yet) bails.
+            if (yEntry == null || yStop == null) return;
             const tps = targets.map((t) => ({ t, y: this.y(t) })).filter((o): o is { t: number; y: number } => o.y != null);
             const far = tps.length ? tps[tps.length - 1] : null;
+            const acc = this.accessors();
+            if (!acc) return;
 
-            target.useMediaCoordinateSpace(({ context: ctx }) => {
+            target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+              // In range, timeToCoordinate resolves directly. Out of range,
+              // fall through to the logical scale, which keeps extrapolating
+              // a coordinate beyond the data (unlike timeToCoordinate, which
+              // just returns null there) -- the right anchor still lands at
+              // a real, finite x proportional to how far forward it is, not
+              // snapped to the pane edge. The edge itself is only the
+              // absolute last resort, if even that fails to resolve.
+              const resolveX = (t: Time, fallback: number) =>
+                this.x(t) ?? timeSecondsToSmoothCoordinate(acc, timeSeconds(t), fixtureCandles) ?? fallback;
+              const xe = resolveX(time, 0);
+              const xRight = resolveX(rightTime, mediaSize.width);
+
               // forwardSpan keeps the left clamp: the left edge can never
               // end up past the right one, which is what let the box fill
               // backwards before.
