@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { Time } from "lightweight-charts";
 import type { Candle } from "@/types/domain";
-import { coordinateToSmoothTimeSeconds, forwardSpan, type ChartAccessors } from "./geometry";
+import { coordinateToSmoothTimeSeconds, forwardSpan, timeSecondsToSmoothCoordinate, type ChartAccessors } from "./geometry";
 
 // Three 5-minute candles: seconds 0, 300, 600. coordinateToLogical is faked
 // directly (x IS the logical value, for test clarity) since what is under
@@ -14,6 +15,29 @@ const CANDLES: Candle[] = [
 
 function fakeAccessors(logicalOf: (x: number) => number | null): ChartAccessors {
   const chart = { timeScale: () => ({ coordinateToLogical: (x: number) => logicalOf(x) }) };
+  return { chart, series: {} } as unknown as ChartAccessors;
+}
+
+// One consistent scale throughout -- 300 seconds (the fixture's own bar
+// interval) per logical unit, 20px per logical unit -- so the "direct"
+// path (timeToCoordinate, in range) and the "extrapolated" path
+// (logicalToCoordinate, out of range) land in the same coordinate space.
+// timeToCoordinate returns null outside the data, matching the real
+// library (it will not place a bar-aligned coordinate for a time that is
+// not an actual bar), which is what forces the extrapolation path to be
+// the one under test there.
+function fakeLogicalAccessors(): ChartAccessors {
+  const toLogical = (seconds: number) => seconds / 300;
+  const inRange = (seconds: number) => seconds >= 0 && seconds <= 600;
+  const chart = {
+    timeScale: () => ({
+      logicalToCoordinate: (logical: number) => logical * 20,
+      timeToCoordinate: (t: Time) => {
+        const seconds = t as unknown as number;
+        return inRange(seconds) ? toLogical(seconds) * 20 : null;
+      },
+    }),
+  };
   return { chart, series: {} } as unknown as ChartAccessors;
 }
 
@@ -77,5 +101,63 @@ describe("coordinateToSmoothTimeSeconds", () => {
   it("returns null with fewer than two candles -- nothing to interpolate between", () => {
     const acc = fakeAccessors(() => 0);
     expect(coordinateToSmoothTimeSeconds(acc, 0, [CANDLES[0]])).toBeNull();
+  });
+});
+
+describe("timeSecondsToSmoothCoordinate", () => {
+  const acc = fakeLogicalAccessors(); // logicalToCoordinate(logical) = logical * 20
+
+  it("resolves a candle's exact coordinate at its own time", () => {
+    expect(timeSecondsToSmoothCoordinate(acc, 0, CANDLES)).toBe(0); // logical 0 -> 0*20
+    expect(timeSecondsToSmoothCoordinate(acc, 600, CANDLES)).toBe(40); // logical 2 -> 2*20
+  });
+
+  it("interpolates within a bar", () => {
+    expect(timeSecondsToSmoothCoordinate(acc, 150, CANDLES)).toBe(10); // logical 0.5 -> 10
+  });
+
+  // This is the regression: a position's rightTime (entry + N bars) lands
+  // past the last candle on a short series, timeToCoordinate returns null
+  // for it, and the primitive used to skip drawing the box entirely.
+  // Extrapolating through the logical scale resolves a real, finite x
+  // beyond the last candle's own coordinate instead.
+  it("extrapolates a finite coordinate beyond the last candle, further right than the last candle itself", () => {
+    const x = timeSecondsToSmoothCoordinate(acc, 900, CANDLES); // 1 bar past the last candle (600)
+    expect(x).not.toBeNull();
+    expect(x).toBe(60); // logical 3 -> 60
+    const lastCandleX = timeSecondsToSmoothCoordinate(acc, 600, CANDLES)!;
+    expect(x!).toBeGreaterThan(lastCandleX);
+  });
+
+  it("extrapolates before the first candle too", () => {
+    expect(timeSecondsToSmoothCoordinate(acc, -300, CANDLES)).toBe(-20); // logical -1 -> -20
+  });
+
+  it("returns null with fewer than two candles", () => {
+    expect(timeSecondsToSmoothCoordinate(acc, 0, [CANDLES[0]])).toBeNull();
+  });
+});
+
+describe("position box resolution (regression: rightTime beyond the last candle)", () => {
+  // Mirrors PositionPrimitive's own resolveX: timeToCoordinate first, then
+  // timeSecondsToSmoothCoordinate's extrapolation, then an absolute
+  // fallback -- never null, so the box is never skipped.
+  function resolveX(acc: ChartAccessors, t: Time, candles: Candle[], fallback: number): number {
+    const direct = acc.chart.timeScale().timeToCoordinate(t);
+    if (direct != null) return direct;
+    return timeSecondsToSmoothCoordinate(acc, t as unknown as number, candles) ?? fallback;
+  }
+
+  it("still produces a drawn box of non-zero width when rightTime is beyond the last candle", () => {
+    const acc = fakeLogicalAccessors();
+    const entryTime = 300 as unknown as Time; // in range: resolves directly
+    const rightTime = 900 as unknown as Time; // 1 bar past the last candle: out of range
+
+    const xe = resolveX(acc, entryTime, CANDLES, 0);
+    const xRight = resolveX(acc, rightTime, CANDLES, 99999);
+
+    expect(xRight).toBe(60); // the extrapolated coordinate, not the 99999 fallback
+    const { width } = forwardSpan(xe, xRight);
+    expect(width).toBeGreaterThan(0);
   });
 });

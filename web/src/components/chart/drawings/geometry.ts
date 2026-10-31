@@ -1,4 +1,4 @@
-import type { IChartApi, ISeriesApi, SeriesType, Time } from "lightweight-charts";
+import type { IChartApi, ISeriesApi, Logical, SeriesType, Time } from "lightweight-charts";
 import type { Candle } from "@/types/domain";
 import type { DPoint } from "./types";
 
@@ -71,6 +71,34 @@ export function coordinateToSmoothTimeSeconds(acc: ChartAccessors, x: number, ca
   const t0 = unix(candles[base].openTime);
   const t1 = unix(candles[base + 1].openTime);
   return t0 + frac * (t1 - t0);
+}
+
+// The inverse of coordinateToSmoothTimeSeconds: given a time (in seconds,
+// possibly beyond the last candle or before the first -- a right time-
+// anchor at "entry + N bars" routinely lands past the last candle, which
+// is the normal case, not an edge case), find the fractional logical
+// position it corresponds to and resolve that to a coordinate.
+// timeToCoordinate itself returns null once the time falls outside the
+// range it can place a bar at; logicalToCoordinate keeps resolving a
+// coordinate for a logical position beyond the data (extrapolating along
+// the same scale), which is what lets an out-of-range anchor still resolve
+// to a real, finite x instead of being unresolvable.
+export function timeSecondsToSmoothCoordinate(acc: ChartAccessors, seconds: number, candles: Candle[]): number | null {
+  if (candles.length < 2) return null;
+  const times = candles.map((c) => unix(c.openTime));
+  const lastIdx = times.length - 1;
+
+  // The pair of consecutive candles to interpolate/extrapolate from:
+  // the bracketing pair when seconds falls within the data, otherwise the
+  // first or last pair, extrapolated using that pair's own interval.
+  let base = 0;
+  while (base < lastIdx - 1 && times[base + 1] < seconds) base++;
+
+  const t0 = times[base];
+  const t1 = times[base + 1];
+  const frac = t1 === t0 ? 0 : (seconds - t0) / (t1 - t0);
+  const logical = base + frac;
+  return acc.chart.timeScale().logicalToCoordinate(logical as unknown as Logical);
 }
 
 // --- Magnet: snap a candidate point to the nearest candle's O/H/L/C ---
