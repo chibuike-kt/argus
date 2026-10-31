@@ -210,13 +210,12 @@ export class RectanglePrimitive extends BasePrimitive {
               const top = Math.min(y1, y2);
               const w = Math.abs(x2 - x1);
               const h = Math.abs(y2 - y1);
-              ctx.fillStyle = withAlpha(this.d.style.color, 0.08);
+              // Borderless -- a flat tinted zone, not an outlined box.
+              // 0.12 matches the position tool's own reward/risk fills.
+              ctx.fillStyle = withAlpha(this.d.style.color, 0.12);
               ctx.fillRect(left, top, w, h);
-              applyLine(ctx, this.d.style);
-              ctx.strokeRect(left + 0.5, top + 0.5, w, h);
-              ctx.setLineDash([]);
               if (this.d.label) {
-                ctx.font = "600 10px IBM Plex Sans, sans-serif";
+                ctx.font = "600 10px Montserrat, sans-serif";
                 ctx.fillStyle = this.d.style.color;
                 ctx.textBaseline = "top";
                 ctx.fillText(this.d.label.toUpperCase(), left + 6, top + 5);
@@ -372,7 +371,7 @@ export class TextPrimitive extends BasePrimitive {
             const y = this.y(this.d.p.price);
             if (x == null || y == null) return;
             target.useMediaCoordinateSpace(({ context: ctx }) => {
-              ctx.font = "500 12px IBM Plex Sans, sans-serif";
+              ctx.font = "500 12px Montserrat, sans-serif";
               ctx.fillStyle = this.d.style.color;
               ctx.textBaseline = "middle";
               ctx.fillText(this.d.text || "Text", x, y);
@@ -414,13 +413,9 @@ export class MeasurePrimitive extends BasePrimitive {
               const top = Math.min(y1, y2);
               const w = Math.abs(x2 - x1);
               const h = Math.abs(y2 - y1);
+              // Borderless -- a flat tinted zone, not an outlined box.
               ctx.fillStyle = withAlpha(color, 0.12);
               ctx.fillRect(left, top, w, h);
-              ctx.strokeStyle = color;
-              ctx.lineWidth = 1;
-              ctx.setLineDash([4, 3]);
-              ctx.strokeRect(left + 0.5, top + 0.5, w, h);
-              ctx.setLineDash([]);
 
               const delta = p2.price - p1.price;
               const pct = (delta / p1.price) * 100;
@@ -519,23 +514,13 @@ export class PositionPrimitive extends BasePrimitive {
                 ctx.setLineDash([]);
               };
 
+              // Borderless -- the box's bound is implied by where the fill
+              // and the entry/stop/target lines stop, not an outlined edge.
+              // The right edge is still fully interactive (its resize handle
+              // draws separately, only while selected).
               line(yEntry, ACCENT, false);
               line(yStop, DOWN, true);
               tps.forEach((o) => line(o.y, ACCENT, true));
-
-              // The right edge itself, so the bounded width (and its
-              // resize handle) is visible, not just implied by where the
-              // horizontal lines happen to stop.
-              const top = Math.min(yEntry, yStop, ...tps.map((o) => o.y));
-              const bottom = Math.max(yEntry, yStop, ...tps.map((o) => o.y));
-              ctx.strokeStyle = "rgba(255,255,255,0.35)";
-              ctx.lineWidth = 1;
-              ctx.setLineDash([3, 3]);
-              ctx.beginPath();
-              ctx.moveTo(x1 + 0.5, top);
-              ctx.lineTo(x1 + 0.5, bottom);
-              ctx.stroke();
-              ctx.setLineDash([]);
 
               const rrOf = (t: number) => Math.abs((t - entry) / (entry - stop));
               label(ctx, `Entry  ${fmt(entry)}`, x0 + 6, yEntry, ACCENT, INK);

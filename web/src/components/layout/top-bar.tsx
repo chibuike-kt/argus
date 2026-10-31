@@ -27,7 +27,9 @@ export function TopBar() {
             className={({ isActive }) =>
               cn(
                 "inline-flex h-8 items-center rounded-full px-4 text-[13px] font-medium transition-colors",
-                isActive ? "bg-accent text-accent-foreground" : "text-fg-muted hover:text-fg",
+                isActive
+                  ? "bg-chrome-active text-chrome-active-foreground"
+                  : "text-fg-muted hover:text-fg",
               )
             }
           >

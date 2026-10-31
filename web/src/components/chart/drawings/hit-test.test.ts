@@ -118,11 +118,21 @@ describe("getHandles", () => {
     expect(byId.left).toEqual({ x: 10, y: 150 });
   });
 
-  it("returns entry/stop/target handles at the anchor time, plus a right handle at the box's right time-anchor", () => {
+  it("returns entry/stop/target handles at the anchor time, plus left/right handles at the box's own time-anchors", () => {
     const d = position(100, 90, [110, 120], 50);
     const handles = getHandles(d, acc);
-    expect(handles.map((h) => h.id)).toEqual(["entry", "stop", "target-0", "target-1", "right"]);
+    expect(handles.map((h) => h.id)).toEqual([
+      "entry",
+      "stop",
+      "target-0",
+      "target-1",
+      "left",
+      "right",
+    ]);
     expect(handles.slice(0, 4).every((h) => h.px.x === 10)).toBe(true);
+    const left = handles.find((h) => h.id === "left");
+    expect(left?.px.x).toBe(10);
+    expect(left?.cursor).toBe("resize");
     const right = handles.find((h) => h.id === "right");
     expect(right?.px.x).toBe(50);
     expect(right?.cursor).toBe("resize");

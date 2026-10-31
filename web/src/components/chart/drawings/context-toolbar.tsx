@@ -73,7 +73,7 @@ export function ContextToolbar({
         }
         className={cn(
           "focus-ring grid size-6 place-items-center rounded-md hover:bg-white/5",
-          drawing.style.lineStyle === "dashed" ? "text-accent" : "text-fg-muted",
+          drawing.style.lineStyle === "dashed" ? "text-fg" : "text-fg-muted",
         )}
       >
         <Minus className={cn("size-4", drawing.style.lineStyle === "dashed" && "opacity-60")} />
@@ -88,7 +88,7 @@ export function ContextToolbar({
             onClick={() => onStyleChange({ lineWidth: w })}
             className={cn(
               "grid size-6 place-items-center rounded-md hover:bg-white/5",
-              drawing.style.lineWidth === w ? "text-accent" : "text-fg-subtle",
+              drawing.style.lineWidth === w ? "text-fg" : "text-fg-subtle",
             )}
           >
             <span className="w-3 rounded-full bg-current" style={{ height: Math.max(1, w) }} />
@@ -105,7 +105,7 @@ export function ContextToolbar({
             onClick={() => setEditingLabel((v) => !v)}
             className={cn(
               "focus-ring grid size-6 place-items-center rounded-md hover:bg-white/5",
-              editingLabel ? "text-accent" : "text-fg-muted",
+              editingLabel ? "text-fg" : "text-fg-muted",
             )}
           >
             <GearSix className="size-4" />

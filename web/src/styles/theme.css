@@ -1,24 +1,32 @@
 @import "tailwindcss";
 
 /*
- * ARGUS design system v2: a trading-intelligence terminal, not a branded
- * consumer app. Two colour languages, kept strictly apart:
- *   - market data (candles, prices, watchlist) speaks green up / red down.
- *   - ARGUS's own intelligence (POI, order block, plan, bias, structure,
- *     plus interactive state: focus/active/selection) speaks the indigo
- *     accent. It never competes with green/red -- different hue entirely.
- * Surfaces are flat segmented cards (solid fill + hairline border), not
- * glassmorphism. Tokens live here and generate Tailwind utilities
- * (bg-*, text-*, border-*, rounded-*).
+ * ARGUS design system v3: a trading-intelligence terminal, not a branded
+ * consumer app. Three colour languages, kept strictly apart:
+ *   - market data (candles, prices, watchlist, performance, the bias
+ *     gauge's needle/state) speaks green up / red down.
+ *   - ARGUS's own marks drawn ON the chart (POI, order block, plan lines,
+ *     equilibrium, structure labels, fib/trendline default colour,
+ *     selection handles) speak the indigo accent -- and only those.
+ *   - generic interactive UI chrome (active tool, selected tab, focus
+ *     ring, avatar, command-palette selection) is neutral monochrome
+ *     (--color-chrome-active), not indigo -- v2 let the accent bleed into
+ *     ordinary chrome; v3 pulls it back out so indigo reads unambiguously
+ *     as "this is ARGUS speaking on the chart."
+ * The base is genuinely black (not colour-tinted), and surfaces are flat
+ * segmented cards (solid fill + hairline border), not glassmorphism.
+ * Tokens live here and generate Tailwind utilities (bg-*, text-*,
+ * border-*, rounded-*).
  */
 
 @theme {
-  /* Surfaces: cool near-black, layered by small lightness steps for depth,
-     not shadow. */
-  --color-base: #0a0b0d;
-  --color-surface: #101216;
-  --color-surface-2: #15181e;
-  --color-elevated: #1c2027;
+  /* Surfaces: genuinely black, not colour-tinted -- the base, chart
+     background and card fills all sit close to #000, with only faint
+     lightness steps between them, no blue/cool cast. */
+  --color-base: #000000;
+  --color-surface: #0a0a0a;
+  --color-surface-2: #111111;
+  --color-elevated: #171717;
 
   /* Hairlines: texture, not hard dividers. */
   --color-line: #ffffff0f;
@@ -32,11 +40,25 @@
   --color-fg-muted: #9aa1ab;
   --color-fg-subtle: #626873;
 
-  /* Intelligence accent: electric indigo. ARGUS's marks + interactive
-     state -- focus, active, selection -- never the market itself. */
+  /* Intelligence accent: electric indigo. ARGUS's own marks drawn ON the
+     chart ONLY (order block, POI, plan lines, equilibrium, structure
+     labels, fib/trendline default colour, drawing selection handles) --
+     never generic UI chrome. Generic interactive state (active tool,
+     selected tab, focus ring, avatar, command-palette selection) uses
+     --color-chrome-active instead, so the indigo accent stays legible as
+     "this is ARGUS speaking on the chart" and does not get diluted into
+     ordinary button/tab highlighting. */
   --color-accent: #6d7bff;
   --color-accent-strong: #5561e6;
   --color-accent-foreground: #0a0b0d;
+
+  /* Neutral active/selected chrome: the tool rail's active tool, the
+     right panel's selected tab, focus rings, the command palette's
+     selected row, the avatar chip -- all generic interactive state that
+     should read as monochrome, not compete with either the market's
+     red/green or ARGUS's indigo marks. */
+  --color-chrome-active: #f3f5f7;
+  --color-chrome-active-foreground: #000000;
 
   /* Market semantics: emerald up, coral-red down. The only strong colour
      that represents the market, not ARGUS. */
@@ -50,14 +72,14 @@
   --color-prov-r: #f5b461;
   --color-prov-u: #f0616d;
 
-  /* Type: IBM Plex Sans for UI text, IBM Plex Mono for every number. */
-  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Type: Montserrat for UI text, IBM Plex Mono for every number. */
+  --font-sans: "Montserrat", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
   /* Astron Valley: display face for the ARGUS logo mark and wordmark only
      (landing/auth) -- the analysis workspace itself carries no brand
-     header. Falls back to IBM Plex Sans until the file is added to
+     header. Falls back to Montserrat until the file is added to
      public/fonts/. */
-  --font-display: "Astron Valley", "IBM Plex Sans", system-ui, sans-serif;
+  --font-display: "Astron Valley", "Montserrat", system-ui, sans-serif;
 
   /* Radii: tight, engineered. */
   --radius-sm: 4px;
@@ -96,12 +118,13 @@
   body {
     margin: 0;
     background-color: var(--color-base);
-    /* cool depth glow, layered with a faint dot-matrix for the reference's
-       textured look -- both subtle, neither competing with content. */
+    /* A neutral (not blue-tinted) depth glow, layered with a faint
+       dot-matrix for texture -- both subtle, neither competing with
+       content. Pure grey, so the page still reads as black, not navy. */
     background-image:
-      radial-gradient(120% 80% at 50% -10%, #14161d 0%, transparent 55%),
-      radial-gradient(90% 60% at 100% 0%, #0f1016 0%, transparent 50%),
-      radial-gradient(rgb(255 255 255 / 0.02) 1px, transparent 1px);
+      radial-gradient(120% 80% at 50% -10%, #0d0d0d 0%, transparent 55%),
+      radial-gradient(90% 60% at 100% 0%, #0a0a0a 0%, transparent 50%),
+      radial-gradient(rgb(255 255 255 / 0.03) 1px, transparent 1px);
     background-size:
       auto,
       auto,
@@ -120,8 +143,8 @@
   }
 
   ::selection {
-    background: var(--color-accent);
-    color: var(--color-accent-foreground);
+    background: var(--color-chrome-active);
+    color: var(--color-chrome-active-foreground);
   }
 
   /* Invisible scrollbars app-wide: scrolling still works, no visible bar. */
@@ -160,9 +183,11 @@
 
   /* Dot-matrix texture for the chart's plot area -- a touch stronger than
      the body's own, since it sits behind active content, not just the
-     page background. */
+     page background. Bumped from v2's 0.045 now that the base is true
+     black (#000 vs the old #0a0b0d) -- the same alpha read noticeably
+     fainter against pure black. */
   .dot-grid {
-    background-image: radial-gradient(rgb(255 255 255 / 0.045) 1px, transparent 1px);
+    background-image: radial-gradient(rgb(255 255 255 / 0.06) 1px, transparent 1px);
     background-size: 22px 22px;
   }
 
@@ -176,11 +201,13 @@
     letter-spacing: -0.01em;
   }
 
+  /* Neutral, not the ARGUS accent -- a focus ring is generic interactive
+     chrome, not one of ARGUS's own marks. */
   .focus-ring {
     outline: none;
   }
   .focus-ring:focus-visible {
-    outline: 2px solid var(--color-accent);
+    outline: 2px solid var(--color-chrome-active);
     outline-offset: 2px;
   }
 

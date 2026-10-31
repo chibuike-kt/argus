@@ -100,13 +100,16 @@ export function getHandles(d: Drawing, acc: ChartAccessors): Handle[] {
           handles.push({ id: `target-${i}`, px: { x, y }, cursor: "resize" });
         }
       });
-      // The box's right edge: bounds the forward width, draggable like a
-      // rectangle's edge handle. Sits at the box's vertical midpoint so it
-      // never overlaps the entry/stop/target handles at x itself.
+      // The box's left and right edges, both draggable like a rectangle's
+      // own edge handles -- the width resizes from either side, not just
+      // the right, and not only while first drawing it. Both sit at the
+      // box's vertical midpoint so neither overlaps the entry/stop/target
+      // handles at x itself.
+      const ys = [yEntry, yStop, ...targetYs].filter((v): v is Coordinate => v != null);
+      const midY = ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : (yEntry ?? 0);
+      handles.push({ id: "left", px: { x, y: midY }, cursor: "resize" });
       const xRight = acc.chart.timeScale().timeToCoordinate(d.rightTime);
       if (xRight != null) {
-        const ys = [yEntry, yStop, ...targetYs].filter((v): v is Coordinate => v != null);
-        const midY = ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : (yEntry ?? 0);
         handles.push({ id: "right", px: { x: xRight, y: midY }, cursor: "resize" });
       }
       return handles;

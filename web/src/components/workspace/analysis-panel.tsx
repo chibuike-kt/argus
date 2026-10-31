@@ -110,7 +110,7 @@ function ReviewControls() {
         Dismissed
         <button
           onClick={() => setDismissed(false)}
-          className="focus-ring font-medium text-accent hover:underline"
+          className="focus-ring font-medium text-fg hover:underline"
         >
           Undo
         </button>

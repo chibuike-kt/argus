@@ -52,7 +52,7 @@ export function Setups() {
               className={cn(
                 "focus-ring h-8 rounded-full px-4 text-[13px] font-medium transition-colors",
                 f.value === filter
-                  ? "bg-accent text-accent-foreground"
+                  ? "bg-chrome-active text-chrome-active-foreground"
                   : "text-fg-muted hover:text-fg",
               )}
             >
@@ -106,7 +106,7 @@ export function Setups() {
               <span className="text-fg-muted">{s.timeframe}</span>
               <span className="tnum text-right">{n(s.entry)}</span>
               <span className="tnum text-right text-down">{n(s.stop)}</span>
-              <span className="tnum text-right font-medium text-accent">{s.rr.toFixed(1)}</span>
+              <span className="tnum text-right font-medium text-fg">{s.rr.toFixed(1)}</span>
               <span>
                 <SetupStateBadge state={s.state} />
               </span>

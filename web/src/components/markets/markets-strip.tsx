@@ -13,7 +13,7 @@ export function MarketsStrip() {
             key={m.symbol}
             className={cn(
               "glass flex shrink-0 items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4",
-              active && "border-accent/50",
+              active && "border-white/40",
             )}
           >
             <CoinIcon symbol={m.symbol} size={28} />

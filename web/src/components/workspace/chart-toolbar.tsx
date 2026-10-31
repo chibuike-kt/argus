@@ -99,7 +99,7 @@ function IntervalMenu({ tf, onSelect }: { tf: string; onSelect: (v: string) => v
                   className={cn(
                     "flex cursor-pointer items-center justify-between rounded-md px-2.5 py-1.5 text-[13px] outline-none transition-colors",
                     "data-[highlighted]:bg-white/5",
-                    value === tf ? "text-accent" : "text-fg-muted data-[highlighted]:text-fg",
+                    value === tf ? "text-fg" : "text-fg-muted data-[highlighted]:text-fg",
                   )}
                 >
                   <span className="flex items-center gap-2">
