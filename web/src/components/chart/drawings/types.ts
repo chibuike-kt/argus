@@ -106,11 +106,11 @@ export type DrawKind = Drawing["kind"];
 // Two-point tools: first click sets p1, the mouse previews, second click (or
 // release, for click-drag-release) commits p2. One-click tools place and
 // commit immediately. Kinds not listed here are not yet drawing tools.
-// Positions are two-point too -- entry at p1, stop at p2 -- so the risk
-// (and therefore the reward target, a multiple of it) is sized by the
-// trader while drawing, not fixed to a default distance; the box's
-// forward width (rightTime) and all three levels still stay adjustable
-// afterward via their own handles, same as always.
+// Positions are one-click (see oneClickDrawing's own default risk/reward
+// span) -- a single click should place the box immediately, not require
+// a drag or second click before anything shows; all three levels plus the
+// box's own forward width still stay adjustable afterward via their own
+// handles, same as always.
 export const TWO_POINT_KINDS: DrawKind[] = [
   "trendline",
   "ray",
@@ -118,8 +118,6 @@ export const TWO_POINT_KINDS: DrawKind[] = [
   "rectangle",
   "fib",
   "measure",
-  "position-long",
-  "position-short",
 ];
 
 // Which rail tool id maps to which drawing kind. Tools not listed here select

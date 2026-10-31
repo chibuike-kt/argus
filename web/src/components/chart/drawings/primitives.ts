@@ -2,6 +2,7 @@ import type {
   ISeriesPrimitive,
   IChartApi,
   ISeriesApi,
+  IPriceLine,
   SeriesType,
   Time,
   SeriesAttachedParameter,
@@ -67,18 +68,21 @@ function label(
   y: number,
   bg: string,
   fg: string,
+  align: "left" | "center" = "left",
 ) {
   // Price/pct chips -- every number in the app renders in the mono face.
   ctx.font = "600 11px IBM Plex Mono, ui-monospace, monospace";
   const padX = 5;
   const w = ctx.measureText(text).width + padX * 2;
   const h = 16;
+  const left = align === "center" ? x - w / 2 : x;
   ctx.fillStyle = bg;
-  roundRect(ctx, x, y - h / 2, w, h, 3);
+  roundRect(ctx, left, y - h / 2, w, h, 3);
   ctx.fill();
   ctx.fillStyle = fg;
   ctx.textBaseline = "middle";
-  ctx.fillText(text, x + padX, y);
+  ctx.textAlign = "left";
+  ctx.fillText(text, left + padX, y);
 }
 
 function applyLine(ctx: CanvasRenderingContext2D, style: DrawingStyle) {
@@ -120,12 +124,24 @@ abstract class BasePrimitive implements ISeriesPrimitive<Time> {
   protected series?: ISeriesApi<SeriesType, Time>;
   protected requestUpdate?: () => void;
 
+  // Every tool's price level(s) show on the price axis itself -- "beside
+  // the chart where prices are" -- via native price lines, not as chips
+  // drawn on the chart on top of the drawing. lineVisible is always false:
+  // each primitive's own draw() still draws its bounded line/box, these
+  // price lines exist only for their axis label, in white text on the
+  // tool's own colour. Subclasses override priceLineSpecs() with their own
+  // levels (the default is none) and call syncAxisPriceLines() from their
+  // own update(), after assigning the new data.
+  private axisPriceLines: IPriceLine[] = [];
+
   attached(param: SeriesAttachedParameter<Time, SeriesType>) {
     this.chart = param.chart;
     this.series = param.series;
     this.requestUpdate = param.requestUpdate;
+    this.syncAxisPriceLines();
   }
   detached() {
+    this.clearAxisPriceLines();
     this.chart = undefined;
     this.series = undefined;
     this.requestUpdate = undefined;
@@ -142,6 +158,30 @@ abstract class BasePrimitive implements ISeriesPrimitive<Time> {
   repaint() {
     this.requestUpdate?.();
   }
+  // Default: no price levels of its own (vline, text, system/selection
+  // overlays). Override in any primitive that has real price levels.
+  protected priceLineSpecs(): { price: number; color: string }[] {
+    return [];
+  }
+  protected syncAxisPriceLines() {
+    if (!this.series) return;
+    this.clearAxisPriceLines();
+    this.axisPriceLines = this.priceLineSpecs().map((s) =>
+      this.series!.createPriceLine({
+        price: s.price,
+        lineVisible: false,
+        axisLabelVisible: true,
+        color: s.color,
+        axisLabelColor: s.color,
+        axisLabelTextColor: "#fff",
+      }),
+    );
+  }
+  private clearAxisPriceLines() {
+    if (!this.series) return;
+    this.axisPriceLines.forEach((l) => this.series!.removePriceLine(l));
+    this.axisPriceLines = [];
+  }
   abstract paneViews(): readonly { renderer(): { draw(t: RenderTarget): void } | null }[];
 }
 
@@ -152,7 +192,15 @@ export class LinePrimitive extends BasePrimitive {
   }
   update(d: Pick<TrendLineDrawing, "kind" | "p1" | "p2" | "style">) {
     this.d = d;
+    this.syncAxisPriceLines();
     this.repaint();
+  }
+  protected priceLineSpecs() {
+    const color = this.d.style.color;
+    return [
+      { price: this.d.p1.price, color },
+      { price: this.d.p2.price, color },
+    ];
   }
   paneViews() {
     return [
@@ -193,7 +241,15 @@ export class RectanglePrimitive extends BasePrimitive {
   }
   update(d: Pick<RectangleDrawing, "p1" | "p2" | "style" | "label">) {
     this.d = d;
+    this.syncAxisPriceLines();
     this.repaint();
+  }
+  protected priceLineSpecs() {
+    const color = this.d.style.color;
+    return [
+      { price: this.d.p1.price, color },
+      { price: this.d.p2.price, color },
+    ];
   }
   paneViews() {
     return [
@@ -216,9 +272,11 @@ export class RectanglePrimitive extends BasePrimitive {
               ctx.fillRect(left, top, w, h);
               if (this.d.label) {
                 ctx.font = "600 10px Montserrat, sans-serif";
-                ctx.fillStyle = this.d.style.color;
-                ctx.textBaseline = "top";
-                ctx.fillText(this.d.label.toUpperCase(), left + 6, top + 5);
+                ctx.fillStyle = "#fff";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(this.d.label.toUpperCase(), left + w / 2, top + h / 2);
+                ctx.textAlign = "left";
               }
             });
           },
@@ -235,7 +293,15 @@ export class FibPrimitive extends BasePrimitive {
   }
   update(d: Pick<FibDrawing, "p1" | "p2" | "style">) {
     this.d = d;
+    this.syncAxisPriceLines();
     this.repaint();
+  }
+  protected priceLineSpecs() {
+    const { p1, p2, style } = this.d;
+    return FIB_LEVELS.map((level) => ({
+      price: p1.price + (p2.price - p1.price) * level,
+      color: style.color,
+    }));
   }
   paneViews() {
     return [
@@ -255,6 +321,7 @@ export class FibPrimitive extends BasePrimitive {
               // edge; no third anchor needed, unlike the position tool.
               const left = Math.min(x1, x2);
               const right = Math.max(x1, x2);
+              const mid = (left + right) / 2;
               for (const level of FIB_LEVELS) {
                 const price = p1.price + (p2.price - p1.price) * level;
                 const y = this.y(price);
@@ -271,14 +338,17 @@ export class FibPrimitive extends BasePrimitive {
                 ctx.moveTo(left, y + 0.5);
                 ctx.lineTo(right, y + 0.5);
                 ctx.stroke();
+                // Ratio only -- the price itself reads on the axis label
+                // (see priceLineSpecs), not repeated on the chart too.
                 const ratio = level.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
                 label(
                   ctx,
-                  `${ratio}  ${fmt(price)}`,
-                  left + 6,
+                  ratio,
+                  mid,
                   y,
-                  emphasised ? this.d.style.color : withAlpha(this.d.style.color, 0.25),
-                  emphasised ? INK : this.d.style.color,
+                  emphasised ? this.d.style.color : withAlpha(this.d.style.color, 0.55),
+                  "#fff",
+                  "center",
                 );
               }
               ctx.setLineDash([]);
@@ -297,7 +367,11 @@ export class HLinePrimitive extends BasePrimitive {
   }
   update(d: Pick<HLineDrawing, "price" | "style">) {
     this.d = d;
+    this.syncAxisPriceLines();
     this.repaint();
+  }
+  protected priceLineSpecs() {
+    return [{ price: this.d.price, color: this.d.style.color }];
   }
   paneViews() {
     return [
@@ -313,7 +387,8 @@ export class HLinePrimitive extends BasePrimitive {
               ctx.lineTo(mediaSize.width, y + 0.5);
               ctx.stroke();
               ctx.setLineDash([]);
-              label(ctx, fmt(this.d.price), 6, y, this.d.style.color, INK);
+              // No on-chart chip -- the price already reads on the axis
+              // (see priceLineSpecs), which is the whole point of an hline.
             });
           },
         }),
@@ -390,7 +465,16 @@ export class MeasurePrimitive extends BasePrimitive {
   }
   update(d: Pick<MeasureDrawing, "p1" | "p2" | "style">) {
     this.d = d;
+    this.syncAxisPriceLines();
     this.repaint();
+  }
+  protected priceLineSpecs() {
+    const { p1, p2 } = this.d;
+    const color = p2.price >= p1.price ? UP : DOWN;
+    return [
+      { price: p1.price, color },
+      { price: p2.price, color },
+    ];
   }
   paneViews() {
     return [
@@ -423,7 +507,7 @@ export class MeasurePrimitive extends BasePrimitive {
               const seconds = Math.abs(timeSeconds(p2.time) - timeSeconds(p1.time));
               const elapsed = formatElapsed(seconds);
               const text = `${delta >= 0 ? "+" : ""}${fmt(delta)}  (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)  ${bars} bars  ${elapsed}`;
-              label(ctx, text, left + 6, top - 10, color, INK);
+              label(ctx, text, left + w / 2, top - 10, color, "#fff", "center");
             });
           },
         }),
@@ -449,7 +533,16 @@ export class PositionPrimitive extends BasePrimitive {
     >,
   ) {
     this.d = d;
+    this.syncAxisPriceLines();
     this.repaint();
+  }
+  protected priceLineSpecs() {
+    const { entry, stop, targets } = this.d;
+    return [
+      { price: entry, color: ACCENT },
+      { price: stop, color: DOWN },
+      ...targets.map((t) => ({ price: t, color: UP })),
+    ];
   }
   paneViews() {
     return [
@@ -491,8 +584,14 @@ export class PositionPrimitive extends BasePrimitive {
               // end up past the right one, which is what let the box fill
               // backwards before.
               const { x0, width: w } = forwardSpan(xe, xRight);
-              const x1 = x0 + w;
 
+              // No on-chart lines or chip labels for entry/stop/target --
+              // only the fill zones themselves, plus their price-axis
+              // labels (see priceLineSpecs). The right edge is still fully
+              // interactive (its resize handle draws separately, only
+              // while selected), bounding these fills to the box's own
+              // width without needing a drawn line to mark it.
+              //
               // Reward above risk for a long (targets sit above entry, stop
               // below); the mirror holds automatically for a short, since
               // yStop/yEntry/target pixel order flips with price order.
@@ -502,48 +601,6 @@ export class PositionPrimitive extends BasePrimitive {
               }
               ctx.fillStyle = "rgba(240,97,109,0.12)";
               ctx.fillRect(x0, Math.min(yEntry, yStop), w, Math.abs(yStop - yEntry));
-
-              const line = (y: number, color: string, dashed: boolean) => {
-                ctx.strokeStyle = color;
-                ctx.lineWidth = 1;
-                ctx.setLineDash(dashed ? [4, 3] : []);
-                ctx.beginPath();
-                ctx.moveTo(x0, y + 0.5);
-                ctx.lineTo(x1, y + 0.5);
-                ctx.stroke();
-                ctx.setLineDash([]);
-              };
-
-              // Borderless -- the box's bound is implied by where the fill
-              // and the entry/stop/target lines stop, not an outlined edge.
-              // The right edge is still fully interactive (its resize handle
-              // draws separately, only while selected).
-              line(yEntry, ACCENT, false);
-              line(yStop, DOWN, true);
-              tps.forEach((o) => line(o.y, ACCENT, true));
-
-              const rrOf = (t: number) => Math.abs((t - entry) / (entry - stop));
-              label(ctx, `Entry  ${fmt(entry)}`, x0 + 6, yEntry, ACCENT, INK);
-              const stopPct = Math.abs((stop - entry) / entry) * 100;
-              label(
-                ctx,
-                `Stop  ${fmt(stop)}  -${stopPct.toFixed(2)}%`,
-                x0 + 6,
-                yStop,
-                DOWN,
-                "#fff",
-              );
-              tps.forEach((o, i) => {
-                const pct = Math.abs((o.t - entry) / entry) * 100;
-                label(
-                  ctx,
-                  `TP${i + 1}  ${fmt(o.t)}  +${pct.toFixed(2)}%  ${rrOf(o.t).toFixed(2)}R`,
-                  x0 + 6,
-                  o.y,
-                  "rgba(109,123,255,0.18)",
-                  ACCENT,
-                );
-              });
             });
           },
         }),
@@ -552,12 +609,14 @@ export class PositionPrimitive extends BasePrimitive {
   }
 }
 
-// ---- System label: a small background-chip label at a point, for ARGUS's
-// own structure markers (swings, BOS/CHOCH, sweeps). Deliberately a chip
-// (reuses the same label() helper hline/fib/position use for their own
-// levels), not bare text, so a system marker never looks like a plain user
-// "text" drawing (TextPrimitive), which draws unstyled fillText. Never
-// constructed from a Drawing, never attached to the user store. ----
+// ---- System label: a short dotted trendline-style tick at a point, for
+// ARGUS's own structure markers (swing highs/lows, CHOCH, sweeps,
+// equilibrium) -- just a dotted line and plain text centered on it, no
+// chip/background behind the text, the same way a trader marks a swing by
+// hand. Never constructed from a Drawing, never attached to the user
+// store. ----
+const SYSTEM_TICK_HALF_WIDTH = 28;
+
 export class SystemLabelPrimitive extends BasePrimitive {
   constructor(
     private p: { time: Time; price: number },
@@ -575,7 +634,28 @@ export class SystemLabelPrimitive extends BasePrimitive {
             const y = this.y(this.p.price);
             if (x == null || y == null) return;
             target.useMediaCoordinateSpace(({ context: ctx }) => {
-              label(ctx, this.text, x, y, this.color, INK);
+              const x0 = x - SYSTEM_TICK_HALF_WIDTH;
+              const x1 = x + SYSTEM_TICK_HALF_WIDTH;
+              ctx.strokeStyle = this.color;
+              ctx.lineWidth = 1.5;
+              ctx.lineCap = "round";
+              ctx.setLineDash([1, 4]);
+              ctx.beginPath();
+              ctx.moveTo(x0, y + 0.5);
+              ctx.lineTo(x1, y + 0.5);
+              ctx.stroke();
+              ctx.setLineDash([]);
+              ctx.lineCap = "butt";
+
+              // Plain text, no chip -- sits just above the line rather
+              // than on top of it, so neither the dots nor the label
+              // compete with each other.
+              ctx.font = "600 11px IBM Plex Mono, ui-monospace, monospace";
+              ctx.fillStyle = this.color;
+              ctx.textAlign = "center";
+              ctx.textBaseline = "bottom";
+              ctx.fillText(this.text, x, y - 4);
+              ctx.textAlign = "left";
             });
           },
         }),

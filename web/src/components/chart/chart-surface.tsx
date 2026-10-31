@@ -15,6 +15,7 @@ import { GearSix } from "@phosphor-icons/react";
 import { candles, annotations, instrument } from "@/mocks/fixtures";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { cn } from "@/lib/cn";
+import { useFlash } from "@/lib/use-flash";
 import { useDrawing } from "./drawing-context";
 import { cloneDrawing } from "./drawings/types";
 import {
@@ -318,6 +319,13 @@ export function ChartSurface({ className }: { className?: string }) {
   const up = instrument.changePct >= 0;
   const chg = (instrument.last * instrument.changePct) / 100;
 
+  // A brief flash on whichever OHLC value just changed under the
+  // crosshair, instead of the legend just snapping to new numbers.
+  const openFlash = useFlash(bar.open);
+  const highFlash = useFlash(bar.high);
+  const lowFlash = useFlash(bar.low);
+  const closeFlash = useFlash(bar.close);
+
   return (
     <div className={cn("flex h-full w-full flex-col overflow-hidden", className)}>
       <div className="relative min-h-0 flex-1">
@@ -372,17 +380,51 @@ export function ChartSurface({ className }: { className?: string }) {
           </span>
           <div className="tnum flex items-center gap-2.5 text-fg-subtle">
             <span>
-              O <span className="text-fg-muted">{fmt1(bar.open)}</span>
+              O{" "}
+              <span
+                className={cn(
+                  "transition-base rounded px-0.5 text-fg-muted",
+                  openFlash === "up" && "flash-up",
+                  openFlash === "down" && "flash-down",
+                )}
+              >
+                {fmt1(bar.open)}
+              </span>
             </span>
             <span>
-              H <span className="text-fg-muted">{fmt1(bar.high)}</span>
+              H{" "}
+              <span
+                className={cn(
+                  "transition-base rounded px-0.5 text-fg-muted",
+                  highFlash === "up" && "flash-up",
+                  highFlash === "down" && "flash-down",
+                )}
+              >
+                {fmt1(bar.high)}
+              </span>
             </span>
             <span>
-              L <span className="text-fg-muted">{fmt1(bar.low)}</span>
+              L{" "}
+              <span
+                className={cn(
+                  "transition-base rounded px-0.5 text-fg-muted",
+                  lowFlash === "up" && "flash-up",
+                  lowFlash === "down" && "flash-down",
+                )}
+              >
+                {fmt1(bar.low)}
+              </span>
             </span>
             <span>
               C{" "}
-              <span className={bar.close >= bar.open ? "text-up" : "text-down"}>
+              <span
+                className={cn(
+                  "transition-base rounded px-0.5",
+                  bar.close >= bar.open ? "text-up" : "text-down",
+                  closeFlash === "up" && "flash-up",
+                  closeFlash === "down" && "flash-down",
+                )}
+              >
                 {fmt1(bar.close)}
               </span>
             </span>

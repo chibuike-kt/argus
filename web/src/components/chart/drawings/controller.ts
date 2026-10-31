@@ -72,6 +72,13 @@ export class DrawingController {
   private drag: DragSession | null = null;
   private pointerDownPx: Px | null = null;
   private selectionOverlay: ISeriesPrimitive<Time> | null = null;
+  // Tracks a vertical pan on empty chart space (cursor mode, nothing hit).
+  // The library's own pressedMouseMove already pans the time axis
+  // horizontally on the same drag; this runs alongside it (never calls
+  // setPointerCapture, so that native handling is untouched) and shifts
+  // the price scale's visible range by the same gesture, so dragging
+  // anywhere empty pans both axes at once, not just left/right.
+  private verticalPan: { lastY: number } | null = null;
 
   constructor(
     private chart: IChartApi,
@@ -101,9 +108,10 @@ export class DrawingController {
     this.candles = c;
   }
   // The position tool's default forward width, in bars -- used only to
-  // seed rightTime on creation; dragging the right handle afterwards is
-  // unaffected by this constant.
-  private static readonly DEFAULT_FORWARD_BARS = 20;
+  // seed rightTime on creation; dragging the left/right handles afterwards
+  // is unaffected by this constant. Kept modest (not a wide default box)
+  // since it is trivially widened by hand if a trader wants more room.
+  private static readonly DEFAULT_FORWARD_BARS = 10;
   private static readonly FALLBACK_BAR_SECONDS = 300; // 5m, matching the fixtures
   private barIntervalSeconds(): number {
     if (this.candles.length < 2) return DrawingController.FALLBACK_BAR_SECONDS;
@@ -218,7 +226,7 @@ export class DrawingController {
       p1: p,
       p2: p,
       awaitingSecondClick: false,
-      preview: primitiveFor(draftDrawing(kind, p, p, this.forwardSeconds())),
+      preview: primitiveFor(draftDrawing(kind, p, p)),
     };
     this.series.attachPrimitive(draft.preview);
     this.draft = draft;
@@ -227,10 +235,7 @@ export class DrawingController {
   private updateDraft(p2: DPoint) {
     if (!this.draft) return;
     this.draft.p2 = p2;
-    updatePrimitive(
-      this.draft.preview,
-      draftDrawing(this.draft.kind, this.draft.p1, p2, this.forwardSeconds()),
-    );
+    updatePrimitive(this.draft.preview, draftDrawing(this.draft.kind, this.draft.p1, p2));
   }
 
   private commitDraft(p2: DPoint) {
@@ -238,7 +243,7 @@ export class DrawingController {
     const { kind, p1 } = this.draft;
     this.series.detachPrimitive(this.draft.preview);
     this.draft = null;
-    this.store.add(draftDrawing(kind, p1, p2, this.forwardSeconds(), nextId()));
+    this.store.add(draftDrawing(kind, p1, p2, nextId()));
     this.finishCreation();
   }
 
@@ -281,7 +286,7 @@ export class DrawingController {
         return;
       }
       // One-click tools commit immediately.
-      this.store.add(oneClickDrawing(kind, point));
+      this.store.add(oneClickDrawing(kind, point, this.forwardSeconds()));
       this.finishCreation();
       return;
     }
@@ -320,6 +325,19 @@ export class DrawingController {
     } else {
       this.store.select(null);
       this.cb.onSelectionChange(null);
+      // Empty space: arm vertical panning (see the field's own comment).
+      // Disabling autoScale is what lets the visible range move away from
+      // "fit the data" at all; the axis's own default double-click-reset
+      // still lets the trader snap back to it. Captured (like every other
+      // drag here) so move/up keep firing even if the cursor leaves the
+      // host mid-drag -- capture does not stop the library's own
+      // pan/zoom listeners on the same element from also firing (proved
+      // by beginDrag needing its own separate handleScroll/handleScale
+      // suspension above), which is exactly why this can run alongside
+      // the native horizontal pan instead of fighting it.
+      this.series.priceScale().setAutoScale(false);
+      this.verticalPan = { lastY: px.y };
+      this.host.setPointerCapture(e.pointerId);
     }
   };
 
@@ -360,6 +378,19 @@ export class DrawingController {
       const point = this.resolvePoint(px);
       if (!point) return;
       this.applyDrag(point);
+      return;
+    }
+
+    if (this.verticalPan) {
+      const p0 = this.series.coordinateToPrice(this.verticalPan.lastY);
+      const p1 = this.series.coordinateToPrice(px.y);
+      const scale = this.series.priceScale();
+      const range = scale.getVisibleRange();
+      if (p0 != null && p1 != null && range) {
+        const delta = p0 - p1;
+        scale.setVisibleRange({ from: range.from + delta, to: range.to + delta });
+      }
+      this.verticalPan.lastY = px.y;
       return;
     }
 
@@ -404,6 +435,11 @@ export class DrawingController {
       if (this.host.hasPointerCapture(e.pointerId)) this.host.releasePointerCapture(e.pointerId);
       this.drag = null;
       this.applyCursorAndPan(); // restores pan/zoom now the drag is over
+    }
+
+    if (this.verticalPan) {
+      if (this.host.hasPointerCapture(e.pointerId)) this.host.releasePointerCapture(e.pointerId);
+      this.verticalPan = null;
     }
   };
 
@@ -494,13 +530,7 @@ function getHandlesSafe(d: Drawing, acc: ChartAccessors): Handle[] {
   }
 }
 
-function draftDrawing(
-  kind: DrawKind,
-  p1: DPoint,
-  p2: DPoint,
-  forwardSeconds: number,
-  id = "__draft__",
-): Drawing {
+function draftDrawing(kind: DrawKind, p1: DPoint, p2: DPoint, id = "__draft__"): Drawing {
   const now = Date.now();
   switch (kind) {
     case "trendline":
@@ -513,38 +543,12 @@ function draftDrawing(
       return { id, kind, p1, p2, style: DEFAULT_STYLE, createdAt: now, updatedAt: now };
     case "measure":
       return { id, kind, p1, p2, style: DEFAULT_STYLE, createdAt: now, updatedAt: now };
-    case "position-long":
-    case "position-short": {
-      // Entry at p1, stop at p2 -- the trader sizes the risk while drawing,
-      // same as every other two-point tool, rather than getting a fixed
-      // default distance. The target mirrors that risk at a 2:1
-      // reward:ratio (oneClickDrawing's own default ratio, kept here for
-      // consistency); all three, plus the box's own forward width, stay
-      // adjustable afterward via their own handles.
-      const long = kind === "position-long";
-      const entry = p1.price;
-      const stop = p2.price;
-      const risk = Math.abs(entry - stop);
-      const target = long ? entry + risk * 2 : entry - risk * 2;
-      return {
-        id,
-        kind,
-        time: p1.time,
-        rightTime: (timeSecondsOf(p1.time) + forwardSeconds) as Time,
-        entry,
-        stop,
-        targets: [target],
-        style: DEFAULT_STYLE,
-        createdAt: now,
-        updatedAt: now,
-      };
-    }
     default:
       throw new Error(`draftDrawing: ${kind} is not a two-point kind`);
   }
 }
 
-function oneClickDrawing(kind: DrawKind, p: DPoint): Drawing {
+function oneClickDrawing(kind: DrawKind, p: DPoint, forwardSeconds: number): Drawing {
   const now = Date.now();
   const id = nextId();
   switch (kind) {
@@ -554,6 +558,29 @@ function oneClickDrawing(kind: DrawKind, p: DPoint): Drawing {
       return { id, kind, time: p.time, style: DEFAULT_STYLE, createdAt: now, updatedAt: now };
     case "text":
       return { id, kind, p, text: "Text", style: DEFAULT_STYLE, createdAt: now, updatedAt: now };
+    case "position-long":
+    case "position-short": {
+      // A single click places the box immediately with a default
+      // risk/reward span -- it should never take a drag or second click
+      // before anything shows. All three levels, plus the box's own
+      // forward width, stay fully adjustable afterward via their own
+      // handles (including a left one, so the width resizes from either
+      // side, any time -- not just while first drawing it).
+      const span = p.price * 0.004;
+      const long = kind === "position-long";
+      return {
+        id,
+        kind,
+        time: p.time,
+        rightTime: (timeSecondsOf(p.time) + forwardSeconds) as Time,
+        entry: p.price,
+        stop: long ? p.price - span : p.price + span,
+        targets: [long ? p.price + span * 2 : p.price - span * 2],
+        style: DEFAULT_STYLE,
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
     default:
       throw new Error(`oneClickDrawing: ${kind} is not a one-click kind`);
   }
