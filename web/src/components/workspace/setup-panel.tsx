@@ -29,7 +29,7 @@ export function SetupPanel() {
       <div className="grid grid-cols-3 gap-2">
         <Stat label="Entry" value={n(setup.entry)} />
         <Stat label="Stop" value={n(setup.stop)} tone="down" />
-        <Stat label="R:R" value={setup.rr.toFixed(1)} tone="accent" />
+        <Stat label="R:R" value={setup.rr.toFixed(1)} />
       </div>
 
       <div>
@@ -52,7 +52,7 @@ export function SetupPanel() {
             <Pill key={t} variant="glass" size="md" className="gap-1.5">
               <span className="text-fg-subtle">TP{i + 1}</span>
               {n(t)}
-              <span className="text-accent">{(Math.abs(t - setup.entry) / risk).toFixed(1)}R</span>
+              <span className="text-fg">{(Math.abs(t - setup.entry) / risk).toFixed(1)}R</span>
             </Pill>
           ))}
         </div>

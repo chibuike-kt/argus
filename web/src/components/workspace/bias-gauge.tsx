@@ -1,10 +1,13 @@
 // A semicircle bias gauge, TradingView's "Strong Sell -> Strong Buy" pattern
-// recast in ARGUS's own terms (bearish -> bullish). The needle and its active
-// arc render in the intelligence accent, not the market's up/down colours --
-// this is ARGUS's own read on structure, the same voice as its plan and POI
-// marks, not a raw price tick. Purely presentational: it derives its needle
-// position from the setup's existing direction + rr (no new data field), so
-// it reads a stronger offered R:R as a more convicted bias.
+// recast in ARGUS's own terms (bearish -> bullish). Unlike ARGUS's marks
+// drawn on the chart (plan, POI, structure labels), this reads a *direction*
+// -- the same kind of quantity as the market's own up/down colours -- so
+// the needle and state word speak green/red by direction, not the ARGUS
+// accent; the arc itself stays neutral grey, only brighter where it has
+// swept, so colour appears only on the two things that actually carry
+// meaning. Purely presentational: it derives its needle position from the
+// setup's existing direction + rr (no new data field), so it reads a
+// stronger offered R:R as a more convicted bias.
 function polarPoint(cx: number, cy: number, r: number, angleDeg: number) {
   const a = (angleDeg * Math.PI) / 180;
   return { x: cx + r * Math.cos(a), y: cy - r * Math.sin(a) };
@@ -36,6 +39,10 @@ export function BiasGauge({ direction, rr }: { direction: "bullish" | "bearish";
         ? "Bullish"
         : "Bearish";
 
+  // Market semantics, not the ARGUS accent -- this is a directional read,
+  // the same kind of quantity as an up/down price move.
+  const marketColor = direction === "bullish" ? "var(--color-up)" : "var(--color-down)";
+
   return (
     <div className="flex flex-col items-center">
       <svg viewBox="0 0 200 100" className="w-full max-w-[220px]">
@@ -49,7 +56,7 @@ export function BiasGauge({ direction, rr }: { direction: "bullish" | "bearish";
         <path
           d={describeArc(CX, CY, R, 90, needleAngle)}
           fill="none"
-          stroke="var(--color-accent)"
+          stroke="var(--color-fg-muted)"
           strokeWidth={10}
           strokeLinecap="round"
         />
@@ -58,11 +65,11 @@ export function BiasGauge({ direction, rr }: { direction: "bullish" | "bearish";
           y1={CY}
           x2={tip.x}
           y2={tip.y}
-          stroke="var(--color-accent)"
+          stroke={marketColor}
           strokeWidth={2.5}
           strokeLinecap="round"
         />
-        <circle cx={CX} cy={CY} r={5} fill="var(--color-accent)" />
+        <circle cx={CX} cy={CY} r={5} fill={marketColor} />
         <text
           x={CX - R - 2}
           y={CY + 16}
@@ -80,7 +87,9 @@ export function BiasGauge({ direction, rr }: { direction: "bullish" | "bearish";
           Bullish
         </text>
       </svg>
-      <p className="-mt-2 text-[13px] font-semibold text-accent">{label}</p>
+      <p className="-mt-2 text-[13px] font-semibold" style={{ color: marketColor }}>
+        {label}
+      </p>
     </div>
   );
 }

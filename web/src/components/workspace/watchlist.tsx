@@ -34,7 +34,7 @@ function Row({ symbol, last, changePct }: { symbol: string; last: number; change
     <button
       className={cn(
         "focus-ring w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/5",
-        active && "bg-accent/[0.06] ring-1 ring-accent/60",
+        active && "bg-white/[0.06] ring-1 ring-white/30",
         COLS,
       )}
     >

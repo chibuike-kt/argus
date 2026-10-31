@@ -18,7 +18,7 @@ export function TabsTrigger({ className, ...props }: ComponentProps<typeof Tabs.
   return (
     <Tabs.Trigger
       className={cn(
-        "focus-ring inline-flex h-8 items-center rounded-full px-4 text-[13px] font-medium text-fg-muted transition-colors hover:text-fg data-[state=active]:bg-accent data-[state=active]:text-accent-foreground",
+        "focus-ring inline-flex h-8 items-center rounded-full px-4 text-[13px] font-medium text-fg-muted transition-colors hover:text-fg data-[state=active]:bg-chrome-active data-[state=active]:text-chrome-active-foreground",
         className,
       )}
       {...props}

@@ -11,13 +11,12 @@ export function Stat({
   label: string;
   value: string;
   delta?: string;
-  tone?: "default" | "accent" | "up" | "down";
+  tone?: "default" | "up" | "down";
   size?: "sm" | "md" | "lg";
   className?: string;
 }) {
   const valueTone = {
     default: "text-fg",
-    accent: "text-accent",
     up: "text-up",
     down: "text-down",
   }[tone];

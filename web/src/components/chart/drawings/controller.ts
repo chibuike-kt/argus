@@ -218,7 +218,7 @@ export class DrawingController {
       p1: p,
       p2: p,
       awaitingSecondClick: false,
-      preview: primitiveFor(draftDrawing(kind, p, p)),
+      preview: primitiveFor(draftDrawing(kind, p, p, this.forwardSeconds())),
     };
     this.series.attachPrimitive(draft.preview);
     this.draft = draft;
@@ -227,7 +227,10 @@ export class DrawingController {
   private updateDraft(p2: DPoint) {
     if (!this.draft) return;
     this.draft.p2 = p2;
-    updatePrimitive(this.draft.preview, draftDrawing(this.draft.kind, this.draft.p1, p2));
+    updatePrimitive(
+      this.draft.preview,
+      draftDrawing(this.draft.kind, this.draft.p1, p2, this.forwardSeconds()),
+    );
   }
 
   private commitDraft(p2: DPoint) {
@@ -235,8 +238,15 @@ export class DrawingController {
     const { kind, p1 } = this.draft;
     this.series.detachPrimitive(this.draft.preview);
     this.draft = null;
-    this.store.add(draftDrawing(kind, p1, p2, nextId()));
+    this.store.add(draftDrawing(kind, p1, p2, this.forwardSeconds(), nextId()));
     this.finishCreation();
+  }
+
+  // The position box's default forward width (rightTime - time), the same
+  // for a freshly two-point-drawn position as for the system's own plan --
+  // only the right handle changes it afterward.
+  private forwardSeconds(): number {
+    return this.barIntervalSeconds() * DrawingController.DEFAULT_FORWARD_BARS;
   }
 
   cancelDraft() {
@@ -271,13 +281,7 @@ export class DrawingController {
         return;
       }
       // One-click tools commit immediately.
-      this.store.add(
-        oneClickDrawing(
-          kind,
-          point,
-          this.barIntervalSeconds() * DrawingController.DEFAULT_FORWARD_BARS,
-        ),
-      );
+      this.store.add(oneClickDrawing(kind, point));
       this.finishCreation();
       return;
     }
@@ -490,7 +494,13 @@ function getHandlesSafe(d: Drawing, acc: ChartAccessors): Handle[] {
   }
 }
 
-function draftDrawing(kind: DrawKind, p1: DPoint, p2: DPoint, id = "__draft__"): Drawing {
+function draftDrawing(
+  kind: DrawKind,
+  p1: DPoint,
+  p2: DPoint,
+  forwardSeconds: number,
+  id = "__draft__",
+): Drawing {
   const now = Date.now();
   switch (kind) {
     case "trendline":
@@ -503,12 +513,38 @@ function draftDrawing(kind: DrawKind, p1: DPoint, p2: DPoint, id = "__draft__"):
       return { id, kind, p1, p2, style: DEFAULT_STYLE, createdAt: now, updatedAt: now };
     case "measure":
       return { id, kind, p1, p2, style: DEFAULT_STYLE, createdAt: now, updatedAt: now };
+    case "position-long":
+    case "position-short": {
+      // Entry at p1, stop at p2 -- the trader sizes the risk while drawing,
+      // same as every other two-point tool, rather than getting a fixed
+      // default distance. The target mirrors that risk at a 2:1
+      // reward:ratio (oneClickDrawing's own default ratio, kept here for
+      // consistency); all three, plus the box's own forward width, stay
+      // adjustable afterward via their own handles.
+      const long = kind === "position-long";
+      const entry = p1.price;
+      const stop = p2.price;
+      const risk = Math.abs(entry - stop);
+      const target = long ? entry + risk * 2 : entry - risk * 2;
+      return {
+        id,
+        kind,
+        time: p1.time,
+        rightTime: (timeSecondsOf(p1.time) + forwardSeconds) as Time,
+        entry,
+        stop,
+        targets: [target],
+        style: DEFAULT_STYLE,
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
     default:
       throw new Error(`draftDrawing: ${kind} is not a two-point kind`);
   }
 }
 
-function oneClickDrawing(kind: DrawKind, p: DPoint, forwardSeconds: number): Drawing {
+function oneClickDrawing(kind: DrawKind, p: DPoint): Drawing {
   const now = Date.now();
   const id = nextId();
   switch (kind) {
@@ -518,23 +554,6 @@ function oneClickDrawing(kind: DrawKind, p: DPoint, forwardSeconds: number): Dra
       return { id, kind, time: p.time, style: DEFAULT_STYLE, createdAt: now, updatedAt: now };
     case "text":
       return { id, kind, p, text: "Text", style: DEFAULT_STYLE, createdAt: now, updatedAt: now };
-    case "position-long":
-    case "position-short": {
-      const span = p.price * 0.004;
-      const long = kind === "position-long";
-      return {
-        id,
-        kind,
-        time: p.time,
-        rightTime: (timeSecondsOf(p.time) + forwardSeconds) as Time,
-        entry: p.price,
-        stop: long ? p.price - span : p.price + span,
-        targets: [long ? p.price + span * 2 : p.price - span * 2],
-        style: DEFAULT_STYLE,
-        createdAt: now,
-        updatedAt: now,
-      };
-    }
     default:
       throw new Error(`oneClickDrawing: ${kind} is not a one-click kind`);
   }

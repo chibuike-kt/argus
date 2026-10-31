@@ -139,6 +139,7 @@ export function reshapeDrawing(
     case "position-short": {
       if (handleId === "entry") return { entry: newPoint.price };
       if (handleId === "stop") return { stop: newPoint.price };
+      if (handleId === "left") return { time: newPoint.time };
       if (handleId === "right") return { rightTime: newPoint.time };
       if (handleId.startsWith("target-")) {
         const i = Number(handleId.slice("target-".length));

@@ -32,11 +32,33 @@ import {
   EyeSlash,
   Trash,
   Star,
+  SidebarSimple,
   type Icon,
 } from "@phosphor-icons/react";
 import { cn } from "@/lib/cn";
 import { useDrawing } from "@/components/chart/drawing-context";
 import { TOOL_TO_KIND } from "@/components/chart/drawings/types";
+
+const COLLAPSE_STORAGE_KEY = "argus:tool-rail-collapsed";
+
+// A per-viewer convenience (not data), so read/write is wrapped -- a
+// private window, cleared site data or a blocked store should degrade to
+// "expanded" rather than throw.
+function readCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(COLLAPSE_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeCollapsed(v: boolean) {
+  try {
+    window.localStorage.setItem(COLLAPSE_STORAGE_KEY, v ? "1" : "0");
+  } catch {
+    // Not persisted this session; the rail still toggles in memory.
+  }
+}
 
 type Variant = { id: string; label: string; icon: Icon; fav?: boolean; disabled?: boolean };
 type Group = { id: string; variants: Variant[] };
@@ -140,7 +162,7 @@ function ToolGroup({
         className={cn(
           "focus-ring grid size-9 place-items-center rounded-md transition-colors [&_svg]:size-[19px]",
           isActiveGroup
-            ? "bg-accent text-accent-foreground"
+            ? "bg-chrome-active text-chrome-active-foreground"
             : "text-fg-muted hover:bg-white/5 hover:text-fg",
         )}
       >
@@ -157,7 +179,7 @@ function ToolGroup({
               <span
                 className={cn(
                   "h-0 w-0 border-b-[5px] border-l-[5px] border-l-transparent",
-                  isActiveGroup ? "border-b-accent-foreground/80" : "border-b-fg-subtle",
+                  isActiveGroup ? "border-b-chrome-active-foreground/80" : "border-b-fg-subtle",
                 )}
               />
             </button>
@@ -181,7 +203,7 @@ function ToolGroup({
                       variant.disabled
                         ? "cursor-not-allowed text-fg-subtle/40"
                         : i === activeVariantIndex
-                          ? "text-accent"
+                          ? "text-fg"
                           : "text-fg-muted data-[highlighted]:text-fg",
                     )}
                   >
@@ -191,7 +213,7 @@ function ToolGroup({
                         className={cn(
                           "size-4",
                           i === activeVariantIndex && !variant.disabled
-                            ? "text-accent"
+                            ? "text-fg"
                             : "text-fg-subtle",
                         )}
                       />
@@ -199,7 +221,7 @@ function ToolGroup({
                     </span>
                     <Star
                       weight={variant.fav ? "fill" : "regular"}
-                      className={cn("size-3.5", variant.fav ? "text-accent" : "text-fg-subtle/30")}
+                      className={cn("size-3.5", variant.fav ? "text-fg" : "text-fg-subtle/30")}
                     />
                   </DropdownMenu.Item>
                 );
@@ -228,6 +250,15 @@ export function ToolRail() {
   // truth for what's active (that is always TOOL_INDEX[activeTool]).
   const [lastPicked, setLastPicked] = useState<Record<string, number>>({});
   const [confirmingClear, setConfirmingClear] = useState(false);
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+
+  const toggleCollapsed = () => {
+    setCollapsed((c) => {
+      const next = !c;
+      writeCollapsed(next);
+      return next;
+    });
+  };
 
   const activeEntry = TOOL_INDEX[activeTool];
 
@@ -239,11 +270,39 @@ export function ToolRail() {
 
   const count = drawings.drawings.length;
 
+  // Collapsed: the rail gives the chart its width back, leaving only the
+  // toggle itself pinned where the rail started -- not buried in a menu.
+  if (collapsed) {
+    return (
+      <div className="argus-in flex w-9 shrink-0 flex-col items-center">
+        <button
+          onClick={toggleCollapsed}
+          aria-label="Show tool rail"
+          title="Show tool rail"
+          className="focus-ring glass grid size-9 place-items-center rounded-xl text-fg-muted transition-colors hover:text-fg [&_svg]:size-[18px]"
+        >
+          <SidebarSimple />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div
       className="argus-in glass flex w-12 shrink-0 flex-col items-center gap-0.5 rounded-xl py-1.5"
       style={{ "--argus-in-delay": "40ms" } as React.CSSProperties}
     >
+      <button
+        onClick={toggleCollapsed}
+        aria-label="Hide tool rail"
+        title="Hide tool rail"
+        className="focus-ring grid size-9 place-items-center rounded-md text-fg-muted transition-colors hover:bg-white/5 hover:text-fg [&_svg]:size-[18px]"
+      >
+        <SidebarSimple />
+      </button>
+
+      <span className="my-0.5 h-px w-6 bg-line" />
+
       {GROUPS.map((g) => {
         const isActiveGroup = activeEntry?.groupId === g.id;
         const variantIndex = isActiveGroup ? activeEntry.index : (lastPicked[g.id] ?? 0);
@@ -267,7 +326,7 @@ export function ToolRail() {
         title="Magnet: snap to candle O/H/L/C"
         className={cn(
           "focus-ring grid size-9 place-items-center rounded-md transition-colors [&_svg]:size-[18px]",
-          magnetOn ? "bg-accent/15 text-accent" : "text-fg-muted hover:bg-white/5 hover:text-fg",
+          magnetOn ? "bg-white/10 text-fg" : "text-fg-muted hover:bg-white/5 hover:text-fg",
         )}
       >
         <MagnetStraight weight={magnetOn ? "fill" : "regular"} />
@@ -278,7 +337,7 @@ export function ToolRail() {
         title="Lock existing drawings"
         className={cn(
           "focus-ring grid size-9 place-items-center rounded-md transition-colors [&_svg]:size-[18px]",
-          locked ? "bg-accent/15 text-accent" : "text-fg-muted hover:bg-white/5 hover:text-fg",
+          locked ? "bg-white/10 text-fg" : "text-fg-muted hover:bg-white/5 hover:text-fg",
         )}
       >
         <Lock weight={locked ? "fill" : "regular"} />
@@ -289,7 +348,7 @@ export function ToolRail() {
         title="Hide drawings"
         className={cn(
           "focus-ring grid size-9 place-items-center rounded-md transition-colors [&_svg]:size-[18px]",
-          hidden ? "bg-accent/15 text-accent" : "text-fg-muted hover:bg-white/5 hover:text-fg",
+          hidden ? "bg-white/10 text-fg" : "text-fg-muted hover:bg-white/5 hover:text-fg",
         )}
       >
         {hidden ? <EyeSlash weight="fill" /> : <Eye />}

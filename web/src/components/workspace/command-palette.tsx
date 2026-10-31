@@ -161,7 +161,7 @@ export function CommandPaletteProvider({ children }: { children: ReactNode }) {
                   onMouseEnter={() => setIndex(i)}
                   className={cn(
                     "flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors",
-                    i === index ? "bg-accent/10 text-fg" : "text-fg-muted hover:bg-white/5",
+                    i === index ? "bg-white/10 text-fg" : "text-fg-muted hover:bg-white/5",
                   )}
                 >
                   {c.symbol ? (
@@ -171,7 +171,7 @@ export function CommandPaletteProvider({ children }: { children: ReactNode }) {
                   )}
                   <span className="flex-1 font-medium">{c.label}</span>
                   <span className="text-[11px] text-fg-subtle">{c.hint}</span>
-                  {i === index && <ArrowBendDownLeft className="size-3.5 text-accent" />}
+                  {i === index && <ArrowBendDownLeft className="size-3.5 text-fg" />}
                 </button>
               ))}
             </div>

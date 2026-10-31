@@ -50,21 +50,21 @@ export function StyleGuide() {
       <header className="space-y-2">
         <h1 className="text-3xl font-semibold tracking-tight">ARGUS design system</h1>
         <p className="max-w-2xl text-fg-muted">
-          A trading-intelligence terminal: a calm neutral canvas, flat segmented cards, and two
-          colour languages kept strictly apart -- the market speaks green/red, ARGUS's own marks
-          speak the indigo accent. Typeface is IBM Plex Sans with IBM Plex Mono for every number,
-          and Astron Valley reserved for the ARGUS logo mark and wordmark.
+          A trading-intelligence terminal: true black, flat segmented cards, and colour that only
+          ever means something -- the market speaks green/red, ARGUS's own marks on the chart speak
+          the indigo accent, and generic chrome (tabs, the active tool, focus) stays neutral.
+          Typeface is Montserrat with IBM Plex Mono for every number, and Astron Valley reserved for
+          the ARGUS logo mark and wordmark.
         </p>
       </header>
 
       <Section
         title="Typography"
-        desc="IBM Plex Sans across the interface. Every number -- prices, times, deltas -- renders in IBM Plex Mono via the .tnum class, with tabular figures so they stay aligned under live updates."
+        desc="Montserrat across the interface. Every number -- prices, times, deltas -- renders in IBM Plex Mono via the .tnum class, with tabular figures so they stay aligned under live updates."
       >
         <Panel variant="strong" pad="lg" className="space-y-6">
-          <div className="text-6xl font-semibold tracking-tight">Plex Sans</div>
+          <div className="text-6xl font-semibold tracking-tight">Montserrat</div>
           <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
-            <span className="text-2xl font-light">Light 300</span>
             <span className="text-2xl font-normal">Regular 400</span>
             <span className="text-2xl font-medium">Medium 500</span>
             <span className="text-2xl font-semibold">Semibold 600</span>
@@ -89,10 +89,10 @@ export function StyleGuide() {
       >
         <div className="space-y-6">
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-            <Swatch name="Base" hex="#0A0B0D" cls="bg-base" />
-            <Swatch name="Surface" hex="#101216" cls="bg-surface" />
-            <Swatch name="Surface 2" hex="#15181E" cls="bg-surface-2" />
-            <Swatch name="Elevated" hex="#1C2027" cls="bg-elevated" />
+            <Swatch name="Base" hex="#000000" cls="bg-base" />
+            <Swatch name="Surface" hex="#0A0A0A" cls="bg-surface" />
+            <Swatch name="Surface 2" hex="#111111" cls="bg-surface-2" />
+            <Swatch name="Elevated" hex="#171717" cls="bg-elevated" />
             <Swatch name="Grey" hex="#3A3F47" cls="bg-grey" />
           </div>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
@@ -197,7 +197,7 @@ export function StyleGuide() {
         <Panel variant="strong" pad="lg" className="flex flex-wrap gap-x-10 gap-y-4">
           <Stat label="Entry" value="67,740" size="lg" />
           <Stat label="Stop" value="67,600" tone="down" size="lg" />
-          <Stat label="R:R" value="3.1" tone="accent" size="lg" />
+          <Stat label="R:R" value="3.1" size="lg" />
           <Stat label="Last" value="68,142.5" delta="+0.84%" size="lg" />
         </Panel>
       </Section>

@@ -153,4 +153,21 @@ describe("reshapeDrawing (drag a handle)", () => {
     const patch = reshapeDrawing(d, "right", { time: t(500), price: 999 });
     expect(patch).toEqual({ rightTime: t(500) });
   });
+
+  it("drags a position's left handle to change only its own time-anchor, never its forward width or price levels", () => {
+    const d: Parameters<typeof translateDrawing>[0] = {
+      id: "p",
+      kind: "position-long",
+      time: t(100),
+      rightTime: t(300),
+      entry: 100,
+      stop: 90,
+      targets: [110],
+      style: DEFAULT_STYLE,
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const patch = reshapeDrawing(d, "left", { time: t(50), price: 999 });
+    expect(patch).toEqual({ time: t(50) });
+  });
 });

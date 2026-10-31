@@ -319,7 +319,7 @@ export function ChartSurface({ className }: { className?: string }) {
   const chg = (instrument.last * instrument.changePct) / 100;
 
   return (
-    <div className={cn("flex h-full w-full flex-col overflow-hidden rounded-xl", className)}>
+    <div className={cn("flex h-full w-full flex-col overflow-hidden", className)}>
       <div className="relative min-h-0 flex-1">
         <div className="dot-grid pointer-events-none absolute inset-0" />
         <div ref={hostRef} className="absolute inset-0" />
@@ -398,7 +398,7 @@ export function ChartSurface({ className }: { className?: string }) {
               onClick={() => chartRef.current?.timeScale().fitContent()}
               className={cn(
                 "focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors",
-                r === "1D" ? "text-accent" : "text-fg-subtle hover:text-fg",
+                r === "1D" ? "text-fg" : "text-fg-subtle hover:text-fg",
               )}
             >
               {r}
@@ -410,7 +410,7 @@ export function ChartSurface({ className }: { className?: string }) {
           <button className="focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium hover:text-fg">
             A
           </button>
-          <button className="focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium text-accent">
+          <button className="focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium text-fg">
             L
           </button>
           <button className="focus-ring grid size-6 place-items-center rounded hover:text-fg">
