@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Plus, Columns3, MoreHorizontal, ChevronDown } from "lucide-react";
+import { Plus, Columns, DotsThree, CaretDown } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { markets, instrument } from "@/mocks/fixtures";
 import { cn } from "@/lib/cn";
@@ -63,7 +63,7 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
         onClick={() => setOpen(!open)}
         className="focus-ring flex w-full items-center gap-1 px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-fg-subtle transition-colors hover:text-fg-muted"
       >
-        <ChevronDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
+        <CaretDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
         {title}
       </button>
       {open && <div className="space-y-0.5">{children}</div>}
@@ -77,17 +77,17 @@ export function Watchlist() {
       {/* title row: pinned */}
       <div className="flex shrink-0 items-center justify-between border-b border-line px-3 py-2.5">
         <button className="focus-ring flex items-center gap-1 text-sm font-semibold">
-          Watchlist <ChevronDown className="size-3.5 text-fg-subtle" />
+          Watchlist <CaretDown className="size-3.5 text-fg-subtle" />
         </button>
         <div className="flex items-center gap-0.5 text-fg-subtle">
           <IconBtn>
             <Plus className="size-4" />
           </IconBtn>
           <IconBtn>
-            <Columns3 className="size-4" />
+            <Columns className="size-4" />
           </IconBtn>
           <IconBtn>
-            <MoreHorizontal className="size-4" />
+            <DotsThree className="size-4" />
           </IconBtn>
         </div>
       </div>

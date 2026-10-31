@@ -61,7 +61,11 @@ export function insideRect(p: Px, a: Px, b: Px): boolean {
 // extrapolates smoothly (using that pair's own interval) for a logical
 // position before the first or after the last candle too, rather than
 // needing a separate case for it.
-export function coordinateToSmoothTimeSeconds(acc: ChartAccessors, x: number, candles: Candle[]): number | null {
+export function coordinateToSmoothTimeSeconds(
+  acc: ChartAccessors,
+  x: number,
+  candles: Candle[],
+): number | null {
   if (candles.length < 2) return null;
   const logical = acc.chart.timeScale().coordinateToLogical(x);
   if (logical == null) return null;
@@ -83,7 +87,11 @@ export function coordinateToSmoothTimeSeconds(acc: ChartAccessors, x: number, ca
 // coordinate for a logical position beyond the data (extrapolating along
 // the same scale), which is what lets an out-of-range anchor still resolve
 // to a real, finite x instead of being unresolvable.
-export function timeSecondsToSmoothCoordinate(acc: ChartAccessors, seconds: number, candles: Candle[]): number | null {
+export function timeSecondsToSmoothCoordinate(
+  acc: ChartAccessors,
+  seconds: number,
+  candles: Candle[],
+): number | null {
   if (candles.length < 2) return null;
   const times = candles.map((c) => unix(c.openTime));
   const lastIdx = times.length - 1;

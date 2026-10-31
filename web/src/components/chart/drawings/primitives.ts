@@ -7,7 +7,13 @@ import type {
   SeriesAttachedParameter,
 } from "lightweight-charts";
 import { candles as fixtureCandles } from "@/mocks/fixtures";
-import { barsBetween, forwardSpan, timeSeconds, timeSecondsToSmoothCoordinate, type ChartAccessors } from "./geometry";
+import {
+  barsBetween,
+  forwardSpan,
+  timeSeconds,
+  timeSecondsToSmoothCoordinate,
+  type ChartAccessors,
+} from "./geometry";
 import { extendPoint, getHandles, type Handle } from "./hit-test";
 import {
   FIB_LEVELS,
@@ -34,17 +40,36 @@ interface RenderTarget {
   useMediaCoordinateSpace(f: (scope: MediaScope) => void): void;
 }
 
-const ACCENT = "#d7fe62";
-const DOWN = "#ff5b5b";
-const INK = "#0a0a0a";
+// ACCENT is ARGUS's own voice -- plan/POI/fib lines, labels, the default
+// drawing colour -- kept a different hue from UP/DOWN deliberately, so
+// ARGUS's marks never compete with or get mistaken for the market itself.
+const ACCENT = "#6d7bff";
+const UP = "#2ebd85";
+const DOWN = "#f0616d";
+const INK = "#0a0b0d";
 
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+function roundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+) {
   ctx.beginPath();
   ctx.roundRect(x, y, w, h, r);
 }
 
-function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, bg: string, fg: string) {
-  ctx.font = "600 11px Poppins, sans-serif";
+function label(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  bg: string,
+  fg: string,
+) {
+  // Price/pct chips -- every number in the app renders in the mono face.
+  ctx.font = "600 11px IBM Plex Mono, ui-monospace, monospace";
   const padX = 5;
   const w = ctx.measureText(text).width + padX * 2;
   const h = 16;
@@ -191,7 +216,7 @@ export class RectanglePrimitive extends BasePrimitive {
               ctx.strokeRect(left + 0.5, top + 0.5, w, h);
               ctx.setLineDash([]);
               if (this.d.label) {
-                ctx.font = "600 10px Poppins, sans-serif";
+                ctx.font = "600 10px IBM Plex Sans, sans-serif";
                 ctx.fillStyle = this.d.style.color;
                 ctx.textBaseline = "top";
                 ctx.fillText(this.d.label.toUpperCase(), left + 6, top + 5);
@@ -236,9 +261,13 @@ export class FibPrimitive extends BasePrimitive {
                 const y = this.y(price);
                 if (y == null) continue;
                 const emphasised = level === 0.5;
-                ctx.strokeStyle = emphasised ? this.d.style.color : withAlpha(this.d.style.color, 0.55);
+                ctx.strokeStyle = emphasised
+                  ? this.d.style.color
+                  : withAlpha(this.d.style.color, 0.55);
                 ctx.lineWidth = emphasised ? 1.5 : 1;
-                ctx.setLineDash(emphasised ? [] : this.d.style.lineStyle === "dashed" ? [5, 4] : []);
+                ctx.setLineDash(
+                  emphasised ? [] : this.d.style.lineStyle === "dashed" ? [5, 4] : [],
+                );
                 ctx.beginPath();
                 ctx.moveTo(left, y + 0.5);
                 ctx.lineTo(right, y + 0.5);
@@ -343,7 +372,7 @@ export class TextPrimitive extends BasePrimitive {
             const y = this.y(this.d.p.price);
             if (x == null || y == null) return;
             target.useMediaCoordinateSpace(({ context: ctx }) => {
-              ctx.font = "500 12px Poppins, sans-serif";
+              ctx.font = "500 12px IBM Plex Sans, sans-serif";
               ctx.fillStyle = this.d.style.color;
               ctx.textBaseline = "middle";
               ctx.fillText(this.d.text || "Text", x, y);
@@ -376,7 +405,10 @@ export class MeasurePrimitive extends BasePrimitive {
             const y2 = this.y(p2.price);
             if (x1 == null || x2 == null || y1 == null || y2 == null) return;
             const up = p2.price >= p1.price;
-            const color = up ? ACCENT : DOWN;
+            // The measure tool reports a price move, not an ARGUS judgment,
+            // so it speaks the market's own up/down colours, not the
+            // intelligence accent.
+            const color = up ? UP : DOWN;
             target.useMediaCoordinateSpace(({ context: ctx }) => {
               const left = Math.min(x1, x2);
               const top = Math.min(y1, y2);
@@ -407,10 +439,20 @@ export class MeasurePrimitive extends BasePrimitive {
 
 // ---- Position tool (long / short): entry/stop/target lines + reward/risk boxes ----
 export class PositionPrimitive extends BasePrimitive {
-  constructor(private d: Pick<PositionDrawing, "kind" | "time" | "rightTime" | "entry" | "stop" | "targets" | "style">) {
+  constructor(
+    private d: Pick<
+      PositionDrawing,
+      "kind" | "time" | "rightTime" | "entry" | "stop" | "targets" | "style"
+    >,
+  ) {
     super();
   }
-  update(d: Pick<PositionDrawing, "kind" | "time" | "rightTime" | "entry" | "stop" | "targets" | "style">) {
+  update(
+    d: Pick<
+      PositionDrawing,
+      "kind" | "time" | "rightTime" | "entry" | "stop" | "targets" | "style"
+    >,
+  ) {
     this.d = d;
     this.repaint();
   }
@@ -428,7 +470,9 @@ export class PositionPrimitive extends BasePrimitive {
             // an edge case) is not a reason to skip it. Only a genuinely
             // unresolved price (the series not sized yet) bails.
             if (yEntry == null || yStop == null) return;
-            const tps = targets.map((t) => ({ t, y: this.y(t) })).filter((o): o is { t: number; y: number } => o.y != null);
+            const tps = targets
+              .map((t) => ({ t, y: this.y(t) }))
+              .filter((o): o is { t: number; y: number } => o.y != null);
             const far = tps.length ? tps[tps.length - 1] : null;
             const acc = this.accessors();
             if (!acc) return;
@@ -442,7 +486,9 @@ export class PositionPrimitive extends BasePrimitive {
               // snapped to the pane edge. The edge itself is only the
               // absolute last resort, if even that fails to resolve.
               const resolveX = (t: Time, fallback: number) =>
-                this.x(t) ?? timeSecondsToSmoothCoordinate(acc, timeSeconds(t), fixtureCandles) ?? fallback;
+                this.x(t) ??
+                timeSecondsToSmoothCoordinate(acc, timeSeconds(t), fixtureCandles) ??
+                fallback;
               const xe = resolveX(time, 0);
               const xRight = resolveX(rightTime, mediaSize.width);
 
@@ -456,10 +502,10 @@ export class PositionPrimitive extends BasePrimitive {
               // below); the mirror holds automatically for a short, since
               // yStop/yEntry/target pixel order flips with price order.
               if (far) {
-                ctx.fillStyle = "rgba(215,254,98,0.10)";
+                ctx.fillStyle = "rgba(46,189,133,0.12)";
                 ctx.fillRect(x0, Math.min(yEntry, far.y), w, Math.abs(far.y - yEntry));
               }
-              ctx.fillStyle = "rgba(255,91,91,0.12)";
+              ctx.fillStyle = "rgba(240,97,109,0.12)";
               ctx.fillRect(x0, Math.min(yEntry, yStop), w, Math.abs(yStop - yEntry));
 
               const line = (y: number, color: string, dashed: boolean) => {
@@ -494,10 +540,24 @@ export class PositionPrimitive extends BasePrimitive {
               const rrOf = (t: number) => Math.abs((t - entry) / (entry - stop));
               label(ctx, `Entry  ${fmt(entry)}`, x0 + 6, yEntry, ACCENT, INK);
               const stopPct = Math.abs((stop - entry) / entry) * 100;
-              label(ctx, `Stop  ${fmt(stop)}  -${stopPct.toFixed(2)}%`, x0 + 6, yStop, DOWN, "#fff");
+              label(
+                ctx,
+                `Stop  ${fmt(stop)}  -${stopPct.toFixed(2)}%`,
+                x0 + 6,
+                yStop,
+                DOWN,
+                "#fff",
+              );
               tps.forEach((o, i) => {
                 const pct = Math.abs((o.t - entry) / entry) * 100;
-                label(ctx, `TP${i + 1}  ${fmt(o.t)}  +${pct.toFixed(2)}%  ${rrOf(o.t).toFixed(2)}R`, x0 + 6, o.y, "rgba(215,254,98,0.18)", ACCENT);
+                label(
+                  ctx,
+                  `TP${i + 1}  ${fmt(o.t)}  +${pct.toFixed(2)}%  ${rrOf(o.t).toFixed(2)}R`,
+                  x0 + 6,
+                  o.y,
+                  "rgba(109,123,255,0.18)",
+                  ACCENT,
+                );
               });
             });
           },
@@ -558,7 +618,7 @@ export class SelectionOverlayPrimitive extends BasePrimitive {
               for (const h of handles) {
                 ctx.beginPath();
                 ctx.arc(h.px.x, h.px.y, 4.5, 0, Math.PI * 2);
-                ctx.fillStyle = "#0a0a0a";
+                ctx.fillStyle = INK;
                 ctx.fill();
                 ctx.lineWidth = 1.5;
                 ctx.strokeStyle = ACCENT;
@@ -604,7 +664,10 @@ export function primitiveFor(d: Drawing): ISeriesPrimitive<Time> {
 // caller can fall back to rebuilding it (should not happen in practice --
 // a drawing's kind never changes after creation).
 export function updatePrimitive(p: ISeriesPrimitive<Time>, d: Drawing): boolean {
-  if ((d.kind === "trendline" || d.kind === "ray" || d.kind === "extended") && p instanceof LinePrimitive) {
+  if (
+    (d.kind === "trendline" || d.kind === "ray" || d.kind === "extended") &&
+    p instanceof LinePrimitive
+  ) {
     p.update(d);
     return true;
   }
@@ -632,7 +695,10 @@ export function updatePrimitive(p: ISeriesPrimitive<Time>, d: Drawing): boolean 
     p.update(d);
     return true;
   }
-  if ((d.kind === "position-long" || d.kind === "position-short") && p instanceof PositionPrimitive) {
+  if (
+    (d.kind === "position-long" || d.kind === "position-short") &&
+    p instanceof PositionPrimitive
+  ) {
     p.update(d);
     return true;
   }

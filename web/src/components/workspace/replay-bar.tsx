@@ -1,5 +1,5 @@
 import * as Slider from "@radix-ui/react-slider";
-import { Clock, SkipBack, Play, SkipForward, Radio } from "lucide-react";
+import { Clock, SkipBack, Play, SkipForward, Broadcast } from "@phosphor-icons/react";
 import { IconButton } from "@/components/ui/icon-button";
 
 // The as-of time machine, framed as TradingView's Replay: step through history
@@ -39,11 +39,11 @@ export function ReplayBar() {
         <Slider.Track className="relative h-1 w-full grow rounded-full bg-white/10">
           <Slider.Range className="absolute h-full rounded-full bg-accent" />
         </Slider.Track>
-        <Slider.Thumb className="focus-ring block size-3.5 rounded-full bg-accent shadow-[0_0_0_4px_rgba(215,254,98,0.2)]" />
+        <Slider.Thumb className="focus-ring block size-3.5 rounded-full bg-accent shadow-[0_0_0_4px_rgba(109,123,255,0.25)]" />
       </Slider.Root>
 
       <button className="focus-ring inline-flex items-center gap-1.5 rounded-full bg-up/15 px-3 py-1 text-[12px] font-medium text-up">
-        <Radio className="size-3.5" /> Live
+        <Broadcast weight="fill" className="size-3.5" /> Live
       </button>
     </div>
   );

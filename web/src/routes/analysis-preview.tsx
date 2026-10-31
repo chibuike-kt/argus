@@ -13,13 +13,18 @@ import { DrawingProvider } from "@/components/chart/drawing-context";
 export function AnalysisPreview() {
   return (
     <DrawingProvider>
-      <div className="flex h-full flex-col gap-2.5 p-3">
+      <div className="flex h-full flex-col gap-1.5 p-1.5">
         <ChartToolbar />
 
-        <div className="flex min-h-0 flex-1 gap-2.5">
+        <div className="flex min-h-0 flex-1 gap-1.5">
           <ToolRail />
 
-          <Panel variant="strong" pad="none" className="flex min-w-0 flex-1 flex-col rounded-2xl">
+          <Panel
+            variant="strong"
+            pad="none"
+            className="argus-in flex min-w-0 flex-1 flex-col rounded-2xl"
+            style={{ "--argus-in-delay": "80ms" } as React.CSSProperties}
+          >
             <ChartSurface />
           </Panel>
 

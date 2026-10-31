@@ -11,7 +11,7 @@ import {
   type CandlestickData,
   type Time,
 } from "lightweight-charts";
-import { Settings2 } from "lucide-react";
+import { GearSix } from "@phosphor-icons/react";
 import { candles, annotations, instrument } from "@/mocks/fixtures";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { cn } from "@/lib/cn";
@@ -34,19 +34,20 @@ const { orderBlock, plan } = annotations;
 const RANGES = ["1D", "5D", "1M", "3M", "6M", "YTD", "1Y", "5Y", "All"];
 
 const C = {
-  up: "#d7fe62",
-  down: "#ff5b5b",
-  grid: "rgba(255,255,255,0.04)",
+  up: "#2ebd85",
+  down: "#f0616d",
+  grid: "rgba(255,255,255,0.035)",
   axis: "rgba(255,255,255,0.08)",
-  text: "#6e6e6e",
-  label: "#282828",
+  text: "#626873",
+  label: "#1c2027",
 };
 
 // System annotations (order block, trade plan) are read-only ARGUS output,
 // not user drawings -- rendered through the same primitive classes for
-// visual consistency, but in a provenance-blue tone so they read as
-// distinct, and never part of the user drawing store or its hit testing.
-const SYSTEM_COLOR = "#8ab4ff";
+// visual consistency, but in the indigo intelligence accent so they read as
+// ARGUS's own voice, distinct from the market's green/red, and never part
+// of the user drawing store or its hit testing.
+const SYSTEM_COLOR = "#6d7bff";
 
 const unix = (iso: string) => Math.floor(Date.parse(iso) / 1000) as Time;
 const lastTime = unix(candles[candles.length - 1].openTime);
@@ -86,8 +87,19 @@ export function ChartSurface({ className }: { className?: string }) {
   // the series identity changes, regardless of whether the data did.
   const [chartGeneration, setChartGeneration] = useState(0);
 
-  const { activeTool, setActiveTool, magnetOn, stayInDrawingMode, locked, hidden, drawings } = useDrawing();
-  const { drawings: list, selectedId, selected, add, update, remove, select, bringToFront, store } = drawings;
+  const { activeTool, setActiveTool, magnetOn, stayInDrawingMode, locked, hidden, drawings } =
+    useDrawing();
+  const {
+    drawings: list,
+    selectedId,
+    selected,
+    add,
+    update,
+    remove,
+    select,
+    bringToFront,
+    store,
+  } = drawings;
 
   // chart init (once)
   useEffect(() => {
@@ -98,7 +110,7 @@ export function ChartSurface({ className }: { className?: string }) {
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
         textColor: C.text,
-        fontFamily: "Poppins, system-ui, sans-serif",
+        fontFamily: "IBM Plex Mono, ui-monospace, monospace",
         attributionLogo: false,
       },
       grid: { vertLines: { color: C.grid }, horzLines: { color: C.grid } },
@@ -115,7 +127,14 @@ export function ChartSurface({ className }: { className?: string }) {
     createTextWatermark(chart.panes()[0], {
       horzAlign: "center",
       vertAlign: "center",
-      lines: [{ text: instrument.symbol, color: "rgba(255,255,255,0.035)", fontSize: 64, fontStyle: "bold" }],
+      lines: [
+        {
+          text: instrument.symbol,
+          color: "rgba(255,255,255,0.035)",
+          fontSize: 64,
+          fontStyle: "bold",
+        },
+      ],
     });
 
     const series = chart.addSeries(CandlestickSeries, {
@@ -167,7 +186,11 @@ export function ChartSurface({ className }: { className?: string }) {
     }
     for (const e of annotations.events) {
       series.attachPrimitive(
-        new SystemLabelPrimitive({ time: unix(candles[e.index].openTime), price: e.price }, e.label, SYSTEM_COLOR),
+        new SystemLabelPrimitive(
+          { time: unix(candles[e.index].openTime), price: e.price },
+          e.label,
+          SYSTEM_COLOR,
+        ),
       );
     }
 
@@ -180,7 +203,11 @@ export function ChartSurface({ className }: { className?: string }) {
       }),
     );
     series.attachPrimitive(
-      new SystemLabelPrimitive({ time: lastTime, price: annotations.range.equilibrium }, "Equilibrium", SYSTEM_COLOR),
+      new SystemLabelPrimitive(
+        { time: lastTime, price: annotations.range.equilibrium },
+        "Equilibrium",
+        SYSTEM_COLOR,
+      ),
     );
 
     chart.timeScale().fitContent();
@@ -220,7 +247,10 @@ export function ChartSurface({ className }: { className?: string }) {
   // re-running chart init
   useEffect(() => controllerRef.current?.setTool(activeTool), [activeTool]);
   useEffect(() => controllerRef.current?.setMagnet(magnetOn), [magnetOn]);
-  useEffect(() => controllerRef.current?.setStayInDrawingMode(stayInDrawingMode), [stayInDrawingMode]);
+  useEffect(
+    () => controllerRef.current?.setStayInDrawingMode(stayInDrawingMode),
+    [stayInDrawingMode],
+  );
   useEffect(() => controllerRef.current?.setLocked(locked), [locked]);
   useEffect(() => controllerRef.current?.setHidden(hidden), [hidden]);
 
@@ -291,6 +321,7 @@ export function ChartSurface({ className }: { className?: string }) {
   return (
     <div className={cn("flex h-full w-full flex-col overflow-hidden rounded-xl", className)}>
       <div className="relative min-h-0 flex-1">
+        <div className="dot-grid pointer-events-none absolute inset-0" />
         <div ref={hostRef} className="absolute inset-0" />
 
         {selected && toolbarPos && (
@@ -298,7 +329,9 @@ export function ChartSurface({ className }: { className?: string }) {
             drawing={selected}
             x={toolbarPos.x}
             y={toolbarPos.y}
-            onStyleChange={(patch) => update(selected.id, { style: { ...selected.style, ...patch } })}
+            onStyleChange={(patch) =>
+              update(selected.id, { style: { ...selected.style, ...patch } })
+            }
             onLabelChange={
               selected.kind === "text"
                 ? (text) => update(selected.id, { text })
@@ -349,7 +382,9 @@ export function ChartSurface({ className }: { className?: string }) {
             </span>
             <span>
               C{" "}
-              <span className={bar.close >= bar.open ? "text-up" : "text-down"}>{fmt1(bar.close)}</span>
+              <span className={bar.close >= bar.open ? "text-up" : "text-down"}>
+                {fmt1(bar.close)}
+              </span>
             </span>
           </div>
         </div>
@@ -372,10 +407,14 @@ export function ChartSurface({ className }: { className?: string }) {
         </div>
         <div className="flex items-center gap-1 text-fg-subtle">
           <span className="tnum mr-1 text-[11px]">{fmtLast(instrument.last)} · UTC+1</span>
-          <button className="focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium hover:text-fg">A</button>
-          <button className="focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium text-accent">L</button>
+          <button className="focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium hover:text-fg">
+            A
+          </button>
+          <button className="focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium text-accent">
+            L
+          </button>
           <button className="focus-ring grid size-6 place-items-center rounded hover:text-fg">
-            <Settings2 className="size-3.5" />
+            <GearSix className="size-3.5" />
           </button>
         </div>
       </div>

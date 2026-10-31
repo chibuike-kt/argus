@@ -10,7 +10,13 @@ import {
   type Drawing,
   type DrawKind,
 } from "./types";
-import { coordinateToSmoothTimeSeconds, distance, snapToCandle, type ChartAccessors, type Px } from "./geometry";
+import {
+  coordinateToSmoothTimeSeconds,
+  distance,
+  snapToCandle,
+  type ChartAccessors,
+  type Px,
+} from "./geometry";
 import { getHandles, hitTest, type Handle, type HitResult } from "./hit-test";
 import { primitiveFor, updatePrimitive, SelectionOverlayPrimitive } from "./primitives";
 import { rectAnchorsOf, reshapeDrawing, translateDrawing, type RectAnchors } from "./transform";
@@ -265,7 +271,13 @@ export class DrawingController {
         return;
       }
       // One-click tools commit immediately.
-      this.store.add(oneClickDrawing(kind, point, this.barIntervalSeconds() * DrawingController.DEFAULT_FORWARD_BARS));
+      this.store.add(
+        oneClickDrawing(
+          kind,
+          point,
+          this.barIntervalSeconds() * DrawingController.DEFAULT_FORWARD_BARS,
+        ),
+      );
       this.finishCreation();
       return;
     }
@@ -307,7 +319,11 @@ export class DrawingController {
     }
   };
 
-  private beginDrag(d: Drawing, origin: DPoint, opts: { mode: "move" | "handle"; handle?: Handle }) {
+  private beginDrag(
+    d: Drawing,
+    origin: DPoint,
+    opts: { mode: "move" | "handle"; handle?: Handle },
+  ) {
     this.drag = {
       id: d.id,
       mode: opts.mode,
@@ -401,7 +417,8 @@ export class DrawingController {
   private onKeyDown = (e: KeyboardEvent) => {
     const target = e.target as HTMLElement | null;
     const editing =
-      target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      target &&
+      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
     if (editing) return;
 
     const mod = e.ctrlKey || e.metaKey;

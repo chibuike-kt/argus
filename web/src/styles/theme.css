@@ -1,57 +1,85 @@
 @import "tailwindcss";
 
 /*
- * ARGUS design system. Pure black base, lime accent, liquid-glass surfaces.
- * Tokens live here and generate Tailwind utilities (bg-*, text-*, border-*,
- * rounded-*). The glass recipe is centralised as component classes so every
- * frosted surface reads the same.
+ * ARGUS design system v2: a trading-intelligence terminal, not a branded
+ * consumer app. Two colour languages, kept strictly apart:
+ *   - market data (candles, prices, watchlist) speaks green up / red down.
+ *   - ARGUS's own intelligence (POI, order block, plan, bias, structure,
+ *     plus interactive state: focus/active/selection) speaks the indigo
+ *     accent. It never competes with green/red -- different hue entirely.
+ * Surfaces are flat segmented cards (solid fill + hairline border), not
+ * glassmorphism. Tokens live here and generate Tailwind utilities
+ * (bg-*, text-*, border-*, rounded-*).
  */
 
 @theme {
-  /* Surfaces: pure black base, near-black elevations */
-  --color-base: #000000;
-  --color-surface: #141414;
-  --color-surface-2: #1b1b1d;
-  --color-elevated: #282828;
+  /* Surfaces: cool near-black, layered by small lightness steps for depth,
+     not shadow. */
+  --color-base: #0a0b0d;
+  --color-surface: #101216;
+  --color-surface-2: #15181e;
+  --color-elevated: #1c2027;
 
-  /* Lines and greys from the reference palette */
-  --color-line: #ffffff14; /* hairline edge, ~8% white */
-  --color-line-strong: #ffffff24;
-  --color-grey: #474747;
+  /* Hairlines: texture, not hard dividers. */
+  --color-line: #ffffff0f;
+  --color-line-strong: #ffffff1f;
+  --color-grey: #3a3f47;
 
-  /* Foreground */
-  --color-fg: #ffffff;
-  --color-fg-muted: #a6a6a6;
-  --color-fg-subtle: #6e6e6e;
+  /* Foreground, four tiers. --color-fg-subtle fails WCAG AA for body text --
+     non-essential labels only (timestamps, helper text), never anything
+     that must be read. Use --color-fg-muted for that. */
+  --color-fg: #f3f5f7;
+  --color-fg-muted: #9aa1ab;
+  --color-fg-subtle: #626873;
 
-  /* Brand accent: lime */
-  --color-accent: #d7fe62;
-  --color-accent-strong: #c6f24e;
-  --color-accent-foreground: #0a0a0a;
+  /* Intelligence accent: electric indigo. ARGUS's marks + interactive
+     state -- focus, active, selection -- never the market itself. */
+  --color-accent: #6d7bff;
+  --color-accent-strong: #5561e6;
+  --color-accent-foreground: #0a0b0d;
 
-  /* Market semantics (bullish uses the brand lime, matching the reference) */
-  --color-up: #d7fe62;
-  --color-down: #ff5b5b;
+  /* Market semantics: emerald up, coral-red down. The only strong colour
+     that represents the market, not ARGUS. */
+  --color-up: #2ebd85;
+  --color-down: #f0616d;
 
-  /* Provenance tags: [S] confirmed, [A] architectural, [R] recommendation, [U] unresolved */
-  --color-prov-s: #d7fe62;
-  --color-prov-a: #8ab4ff;
-  --color-prov-r: #ffc470;
-  --color-prov-u: #ff6b6b;
+  /* Provenance tags: [S] confirmed, [A] architectural, [R] recommendation,
+     [U] unresolved. */
+  --color-prov-s: #2ebd85;
+  --color-prov-a: #6d7bff;
+  --color-prov-r: #f5b461;
+  --color-prov-u: #f0616d;
 
-  /* Type */
-  --font-sans: "Poppins", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", monospace;
-  /* Astron Valley: display face for the ARGUS logo mark and wordmark only.
-     Falls back to Poppins until the file is added to public/fonts/. */
-  --font-display: "Astron Valley", "Poppins", system-ui, sans-serif;
+  /* Type: IBM Plex Sans for UI text, IBM Plex Mono for every number. */
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+  /* Astron Valley: display face for the ARGUS logo mark and wordmark only
+     (landing/auth) -- the analysis workspace itself carries no brand
+     header. Falls back to IBM Plex Sans until the file is added to
+     public/fonts/. */
+  --font-display: "Astron Valley", "IBM Plex Sans", system-ui, sans-serif;
 
-  /* Radii: tight and crisp, closer to a terminal than a glass app */
-  --radius-sm: 3px;
-  --radius-md: 5px;
-  --radius-lg: 7px;
-  --radius-xl: 9px;
-  --radius-2xl: 11px;
+  /* Radii: tight, engineered. */
+  --radius-sm: 4px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+  --radius-xl: 13px;
+  --radius-2xl: 16px;
+
+  /* Tailwind's own transition-* utilities (transition-colors, etc., used
+     throughout the app already) read these two defaults, so every existing
+     hover/active/tab/input transition picks up the same smooth, consistent
+     easing app-wide without touching each call site. */
+  --default-transition-duration: 170ms;
+  --default-transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Motion tokens: not part of Tailwind's @theme (they do not generate
+   utilities ARGUS uses directly), kept as plain custom properties so
+   components reference them the same way in inline styles or CSS. */
+:root {
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur: 170ms;
 }
 
 @layer base {
@@ -68,14 +96,24 @@
   body {
     margin: 0;
     background-color: var(--color-base);
-    /* faint lift so pure black still has depth under the glass */
+    /* cool depth glow, layered with a faint dot-matrix for the reference's
+       textured look -- both subtle, neither competing with content. */
     background-image:
-      radial-gradient(120% 80% at 50% -10%, #17171a 0%, transparent 55%),
-      radial-gradient(90% 60% at 100% 0%, #121214 0%, transparent 50%);
+      radial-gradient(120% 80% at 50% -10%, #14161d 0%, transparent 55%),
+      radial-gradient(90% 60% at 100% 0%, #0f1016 0%, transparent 50%),
+      radial-gradient(rgb(255 255 255 / 0.02) 1px, transparent 1px);
+    background-size:
+      auto,
+      auto,
+      24px 24px;
     background-attachment: fixed;
     color: var(--color-fg);
     font-family: var(--font-sans);
-    font-feature-settings: "ss01" on, "cv01" on;
+    font-size: 13px;
+    line-height: 1.4;
+    font-feature-settings:
+      "ss01" on,
+      "cv01" on;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
@@ -99,55 +137,43 @@
 }
 
 @layer components {
-  /* Liquid glass: frosted translucent surface with an edge highlight */
+  /* Flat segmented card: solid fill + hairline border. Names kept from
+     the v1 glass recipe so components did not need to change, but these
+     are no longer translucent/blurred -- v2 is flat, not glass. */
   .glass {
-    background-image: linear-gradient(
-      to bottom,
-      rgb(255 255 255 / 0.06),
-      rgb(255 255 255 / 0.02)
-    );
-    backdrop-filter: blur(22px) saturate(140%);
-    -webkit-backdrop-filter: blur(22px) saturate(140%);
+    background-color: var(--color-surface);
     border: 1px solid var(--color-line);
-    box-shadow:
-      inset 0 1px 0 0 rgb(255 255 255 / 0.08),
-      0 10px 30px rgb(0 0 0 / 0.45);
   }
 
-  /* Stronger fill for primary reading surfaces over busy backgrounds */
+  /* Stronger fill for primary reading surfaces over busy backgrounds. */
   .glass-strong {
-    background-image: linear-gradient(
-      to bottom,
-      rgb(28 28 30 / 0.82),
-      rgb(16 16 18 / 0.72)
-    );
-    backdrop-filter: blur(26px) saturate(135%);
-    -webkit-backdrop-filter: blur(26px) saturate(135%);
+    background-color: var(--color-surface-2);
     border: 1px solid var(--color-line);
-    box-shadow:
-      inset 0 1px 0 0 rgb(255 255 255 / 0.06),
-      0 16px 40px rgb(0 0 0 / 0.5);
   }
 
-  /* Lime-tinted glass for highlighted/active surfaces */
+  /* Indigo-tinted fill for highlighted/active surfaces -- ARGUS's own
+     voice on a card, the same accent as its chart marks. */
   .glass-accent {
-    background-image: linear-gradient(
-      to bottom,
-      rgb(215 254 98 / 0.14),
-      rgb(215 254 98 / 0.05)
-    );
-    backdrop-filter: blur(22px) saturate(150%);
-    -webkit-backdrop-filter: blur(22px) saturate(150%);
-    border: 1px solid rgb(215 254 98 / 0.3);
-    box-shadow:
-      inset 0 1px 0 0 rgb(215 254 98 / 0.18),
-      0 10px 30px rgb(0 0 0 / 0.4);
+    background-color: color-mix(in oklab, var(--color-accent) 12%, var(--color-surface));
+    border: 1px solid color-mix(in oklab, var(--color-accent) 34%, transparent);
   }
 
-  /* Tabular figures for prices, times and any aligned numerics */
+  /* Dot-matrix texture for the chart's plot area -- a touch stronger than
+     the body's own, since it sits behind active content, not just the
+     page background. */
+  .dot-grid {
+    background-image: radial-gradient(rgb(255 255 255 / 0.045) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+
+  /* Tabular figures for prices, times and any aligned numerics -- mono,
+     not just tabular-nums on the sans face, so every number in the app
+     reads as engineered/technical. */
   .tnum {
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum" 1;
+    letter-spacing: -0.01em;
   }
 
   .focus-ring {
@@ -156,5 +182,54 @@
   .focus-ring:focus-visible {
     outline: 2px solid var(--color-accent);
     outline-offset: 2px;
+  }
+
+  /* Base interactive transition -- hover/active/selection state on
+     buttons, links, tabs, inputs. Transform/opacity/colour only, so it
+     never causes layout thrash (e.g. during chart pan/zoom nearby). */
+  .transition-base {
+    transition-property: color, background-color, border-color, opacity, transform, box-shadow;
+    transition-duration: var(--dur);
+    transition-timing-function: var(--ease-out);
+  }
+
+  /* Entrance animation for panels/cards: fade + a small rise. Staggered
+     across sibling panels via the --argus-in-delay custom property. */
+  .argus-in {
+    animation: argus-in 0.42s var(--ease-out) both;
+    animation-delay: var(--argus-in-delay, 0ms);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .argus-in {
+      animation: none;
+    }
+    .transition-base {
+      transition: none;
+    }
+  }
+}
+
+@keyframes argus-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes argus-in {
+    from {
+      opacity: 1;
+      transform: none;
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
 }

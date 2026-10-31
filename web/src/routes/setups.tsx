@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronRight } from "lucide-react";
+import { CaretRight } from "@phosphor-icons/react";
 import { Panel } from "@/components/ui/panel";
 import { Pill } from "@/components/ui/pill";
 import { SetupStateBadge } from "@/components/ui/setup-state-badge";
@@ -51,7 +51,9 @@ export function Setups() {
               onClick={() => setFilter(f.value)}
               className={cn(
                 "focus-ring h-8 rounded-full px-4 text-[13px] font-medium transition-colors",
-                f.value === filter ? "bg-accent text-accent-foreground" : "text-fg-muted hover:text-fg",
+                f.value === filter
+                  ? "bg-accent text-accent-foreground"
+                  : "text-fg-muted hover:text-fg",
               )}
             >
               {f.label}
@@ -60,7 +62,7 @@ export function Setups() {
         </div>
       </div>
 
-      <Panel variant="glass" pad="none" className="overflow-hidden">
+      <Panel variant="glass" pad="none" className="argus-in overflow-hidden">
         <div
           className={cn(
             COLS,
@@ -109,7 +111,7 @@ export function Setups() {
                 <SetupStateBadge state={s.state} />
               </span>
               <span className="tnum text-right text-fg-subtle">{age(s.createdAt)} ago</span>
-              <ChevronRight className="size-4 justify-self-end text-fg-subtle" />
+              <CaretRight className="size-4 justify-self-end text-fg-subtle" />
             </Link>
           );
         })}
