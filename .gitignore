@@ -25,3 +25,12 @@ web/.vite/
 # Build artifacts
 /tmp/
 dist/
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# TypeScript build cache
+*.tsbuildinfo
