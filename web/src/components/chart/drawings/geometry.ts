@@ -30,7 +30,11 @@ export function toPixel({ chart, series }: ChartAccessors, p: DPoint): Px | null
 // scale cannot resolve the pixel to a bar (e.g. past the last candle) --
 // callers pass the chart's own last known time rather than silently
 // dropping the point, matching how the chart's own crosshair clamps.
-export function toPoint({ chart, series }: ChartAccessors, px: Px, fallbackTime: Time): DPoint | null {
+export function toPoint(
+  { chart, series }: ChartAccessors,
+  px: Px,
+  fallbackTime: Time,
+): DPoint | null {
   const price = series.coordinateToPrice(px.y);
   if (price == null) return null;
   const time = chart.timeScale().coordinateToTime(px.x);

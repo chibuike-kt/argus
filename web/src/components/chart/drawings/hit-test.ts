@@ -1,6 +1,13 @@
 import type { Coordinate } from "lightweight-charts";
 import type { Drawing } from "./types";
-import { type ChartAccessors, type Px, distance, distanceToSegment, insideRect, toPixel } from "./geometry";
+import {
+  type ChartAccessors,
+  type Px,
+  distance,
+  distanceToSegment,
+  insideRect,
+  toPixel,
+} from "./geometry";
 
 export interface Handle {
   id: string;

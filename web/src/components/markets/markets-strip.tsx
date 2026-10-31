@@ -18,7 +18,9 @@ export function MarketsStrip() {
           >
             <CoinIcon symbol={m.symbol} size={28} />
             <div className="flex flex-col leading-tight">
-              <span className="text-[13px] font-semibold">{baseTicker(m.symbol).toUpperCase()}</span>
+              <span className="text-[13px] font-semibold">
+                {baseTicker(m.symbol).toUpperCase()}
+              </span>
               <span className="tnum text-[11px] text-fg-subtle">
                 {m.last.toLocaleString("en-US", { maximumFractionDigits: 4 })}
               </span>

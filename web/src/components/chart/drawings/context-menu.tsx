@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Copy, Trash2, BringToFront, Settings2 } from "lucide-react";
+import { Copy, Trash, StackSimple, GearSix } from "@phosphor-icons/react";
 
 export interface DrawingContextMenuProps {
   x: number;
@@ -13,7 +13,15 @@ export interface DrawingContextMenuProps {
 
 // Right-click menu for a selected drawing: delete, clone, bring to front,
 // settings. Closes on outside click or Escape.
-export function DrawingContextMenu({ x, y, onClone, onDelete, onBringToFront, onSettings, onClose }: DrawingContextMenuProps) {
+export function DrawingContextMenu({
+  x,
+  y,
+  onClone,
+  onDelete,
+  onBringToFront,
+  onSettings,
+  onClose,
+}: DrawingContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -48,11 +56,15 @@ export function DrawingContextMenu({ x, y, onClone, onDelete, onBringToFront, on
   );
 
   return (
-    <div ref={ref} className="glass-strong fixed z-50 min-w-[170px] rounded-lg p-1 shadow-xl" style={{ left: x, top: y }}>
-      {item(<BringToFront className="size-4" />, "Bring to front", onBringToFront)}
+    <div
+      ref={ref}
+      className="glass-strong fixed z-50 min-w-[170px] rounded-lg p-1 shadow-xl"
+      style={{ left: x, top: y }}
+    >
+      {item(<StackSimple className="size-4" />, "Bring to front", onBringToFront)}
       {item(<Copy className="size-4" />, "Clone", onClone)}
-      {item(<Settings2 className="size-4" />, "Settings", onSettings)}
-      {item(<Trash2 className="size-4" />, "Delete", onDelete, true)}
+      {item(<GearSix className="size-4" />, "Settings", onSettings)}
+      {item(<Trash className="size-4" />, "Delete", onDelete, true)}
     </div>
   );
 }

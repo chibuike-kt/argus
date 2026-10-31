@@ -1,4 +1,4 @@
-import { Clock } from "lucide-react";
+import { Clock } from "@phosphor-icons/react";
 import { asOf } from "@/mocks/fixtures";
 import { formatUTC } from "@/lib/format";
 

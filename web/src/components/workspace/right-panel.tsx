@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Columns3, SquarePen, MoreHorizontal, ExternalLink } from "lucide-react";
+import { Columns, PencilSimple, DotsThree, ArrowSquareOut } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { TabsRoot, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { instrument } from "@/mocks/fixtures";
@@ -27,7 +27,10 @@ function IconBtn({ children }: { children: ReactNode }) {
 // panel used to open on the watchlist.
 export function RightPanel() {
   return (
-    <div className="glass flex w-[340px] shrink-0 flex-col overflow-hidden rounded-2xl">
+    <div
+      className="argus-in glass flex w-[340px] shrink-0 flex-col overflow-hidden rounded-2xl"
+      style={{ "--argus-in-delay": "120ms" } as React.CSSProperties}
+    >
       <TabsRoot defaultValue="analysis" className="flex min-h-0 flex-1 flex-col">
         <div className="flex shrink-0 justify-center border-b border-line px-3 py-2">
           <TabsList>
@@ -40,7 +43,10 @@ export function RightPanel() {
           <AnalysisPanel />
         </TabsContent>
 
-        <TabsContent value="watchlist" className="flex min-h-0 flex-1 flex-col overflow-hidden focus-ring">
+        <TabsContent
+          value="watchlist"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden focus-ring"
+        >
           <div className="min-h-0 flex-1 overflow-hidden">
             <Watchlist />
           </div>
@@ -54,26 +60,28 @@ export function RightPanel() {
                 </div>
                 <div className="flex items-center gap-0.5 text-fg-subtle">
                   <IconBtn>
-                    <Columns3 className="size-4" />
+                    <Columns className="size-4" />
                   </IconBtn>
                   <IconBtn>
-                    <SquarePen className="size-4" />
+                    <PencilSimple className="size-4" />
                   </IconBtn>
                   <IconBtn>
-                    <MoreHorizontal className="size-4" />
+                    <DotsThree className="size-4" />
                   </IconBtn>
                 </div>
               </div>
 
               <div className="mt-2 flex items-center gap-1 text-[12px] text-fg-muted">
                 {instrument.name} Contract
-                <ExternalLink className="size-3 text-fg-subtle" />
+                <ArrowSquareOut className="size-3 text-fg-subtle" />
                 <span className="text-fg-subtle">· {instrument.venue}</span>
               </div>
               <div className="text-[11px] text-fg-subtle">Swap · Crypto</div>
 
               <div className="mt-3 flex items-end gap-2">
-                <span className="tnum text-3xl font-semibold leading-none">{n(instrument.last)}</span>
+                <span className="tnum text-3xl font-semibold leading-none">
+                  {n(instrument.last)}
+                </span>
                 <span className="text-xs text-fg-subtle">USDT</span>
                 <span
                   className={cn(
@@ -82,7 +90,8 @@ export function RightPanel() {
                   )}
                 >
                   {instrument.changePct >= 0 ? "+" : ""}
-                  {n((instrument.last * instrument.changePct) / 100)} {instrument.changePct >= 0 ? "+" : ""}
+                  {n((instrument.last * instrument.changePct) / 100)}{" "}
+                  {instrument.changePct >= 0 ? "+" : ""}
                   {instrument.changePct.toFixed(2)}%
                 </span>
               </div>

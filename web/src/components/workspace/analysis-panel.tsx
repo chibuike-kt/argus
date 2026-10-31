@@ -1,11 +1,21 @@
 import { useState } from "react";
-import { Eye, EyeOff, Bell, BellOff, Send, Radio, AlertTriangle, CircleOff } from "lucide-react";
+import {
+  Eye,
+  EyeSlash,
+  Bell,
+  BellSlash,
+  PaperPlaneTilt,
+  Broadcast,
+  Warning,
+  Prohibit,
+} from "@phosphor-icons/react";
 import { ProvenanceChip } from "@/components/ui/provenance-chip";
 import { Button } from "@/components/ui/button";
-import { setup, annotations, dataQuality } from "@/mocks/fixtures";
+import { setup, annotations, dataQuality, instrument } from "@/mocks/fixtures";
 import { formatUTC } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { SetupPanel } from "./setup-panel";
+import { BiasGauge } from "./bias-gauge";
 
 const choch = annotations.events.find((e) => e.label === "CHOCH");
 
@@ -13,32 +23,60 @@ function fmt(p: number) {
   return p.toLocaleString("en-US", { maximumFractionDigits: 1 });
 }
 
-// Bias and structure state, one line: what direction ARGUS currently reads
-// the market as, and the event that established it. Source-confirmed [S]
-// because it reports the engine's own BOS/CHOCH classification, not a guess.
+// %-over-timeframe tiles, tinted by direction -- the reference dashboard's
+// performance-at-a-glance pattern. Market data, so it speaks the market's
+// own up/down colours, not the ARGUS accent.
+function PerformanceTiles() {
+  const perf = instrument.performance;
+  if (!perf) return null;
+  return (
+    <div className="grid grid-cols-3 gap-2">
+      {Object.entries(perf).map(([tf, pct]) => {
+        const up = pct >= 0;
+        return (
+          <div key={tf} className={cn("rounded-lg px-2.5 py-2", up ? "bg-up/10" : "bg-down/10")}>
+            <div className="text-[10px] font-medium uppercase tracking-wide text-fg-subtle">
+              {tf}
+            </div>
+            <div
+              className={cn("tnum mt-0.5 text-[13px] font-semibold", up ? "text-up" : "text-down")}
+            >
+              {up ? "+" : ""}
+              {pct.toFixed(2)}%
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Bias and structure state: ARGUS's own read on current direction, as a
+// semicircle gauge (the reference dashboard's "Strong Sell -> Strong Buy"
+// pattern, recast bearish -> bullish) rather than a plain line -- the
+// gauge speaks the intelligence accent, since this is ARGUS's structural
+// judgment, not a raw price tick. Source-confirmed [S] because it reports
+// the engine's own BOS/CHOCH classification, not a guess.
 function BiasLine() {
-  const bull = setup.direction === "bullish";
   return (
     <div className="flex items-start gap-2.5">
       <ProvenanceChip p="S" className="mt-0.5" />
-      <p className="text-[13px] leading-snug">
-        <span className={cn("font-semibold", bull ? "text-up" : "text-down")}>
-          {bull ? "Bullish" : "Bearish"}
-        </span>
+      <div className="flex-1">
+        <BiasGauge direction={setup.direction} rr={setup.rr} />
         {choch && (
-          <span className="text-fg-muted">
-            , {choch.label} confirmed at {fmt(choch.price)}
-          </span>
+          <p className="-mt-1 text-center text-[12px] text-fg-muted">
+            {choch.label} confirmed at {fmt(choch.price)}
+          </p>
         )}
-      </p>
+      </div>
     </div>
   );
 }
 
 const QUALITY_META = {
-  live: { icon: Radio, cls: "text-up", label: "Live" },
-  degraded: { icon: AlertTriangle, cls: "text-prov-r", label: "Degraded" },
-  stale: { icon: CircleOff, cls: "text-down", label: "Stale" },
+  live: { icon: Broadcast, cls: "text-up", label: "Live" },
+  degraded: { icon: Warning, cls: "text-prov-r", label: "Degraded" },
+  stale: { icon: Prohibit, cls: "text-down", label: "Stale" },
 } as const;
 
 // Data quality is first class, not a footnote: ARGUS only acts on trusted
@@ -70,7 +108,10 @@ function ReviewControls() {
     return (
       <div className="flex items-center justify-between rounded-lg border border-line px-3 py-2 text-[12px] text-fg-subtle">
         Dismissed
-        <button onClick={() => setDismissed(false)} className="focus-ring font-medium text-accent hover:underline">
+        <button
+          onClick={() => setDismissed(false)}
+          className="focus-ring font-medium text-accent hover:underline"
+        >
           Undo
         </button>
       </div>
@@ -85,11 +126,11 @@ function ReviewControls() {
         className="gap-1.5"
         onClick={() => setWatching((w) => !w)}
       >
-        {watching ? <Eye className="size-4" /> : <EyeOff className="size-4" />}
+        {watching ? <Eye className="size-4" weight="fill" /> : <EyeSlash className="size-4" />}
         {watching ? "Watching" : "Watch"}
       </Button>
       <Button variant="glass" size="sm" className="gap-1.5" onClick={() => setDismissed(true)}>
-        <BellOff className="size-4" />
+        <BellSlash className="size-4" />
         Dismiss
       </Button>
       <Button variant="outline" size="sm" className="gap-1.5">
@@ -97,7 +138,7 @@ function ReviewControls() {
         Alert me
       </Button>
       <Button variant="outline" size="sm" className="gap-1.5">
-        <Send className="size-4" />
+        <PaperPlaneTilt className="size-4" />
         Send to paper
       </Button>
     </div>
@@ -113,6 +154,7 @@ export function AnalysisPanel() {
   return (
     <div className="space-y-4">
       <BiasLine />
+      <PerformanceTiles />
       <div className="border-t border-line pt-4">
         <SetupPanel />
       </div>

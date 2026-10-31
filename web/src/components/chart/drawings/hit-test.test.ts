@@ -31,7 +31,10 @@ function fakeAccessors(): ChartAccessors {
 const acc = fakeAccessors();
 const PANE_WIDTH = 1000;
 
-function trendline(p1: { time: number; price: number }, p2: { time: number; price: number }): TrendLineDrawing {
+function trendline(
+  p1: { time: number; price: number },
+  p2: { time: number; price: number },
+): TrendLineDrawing {
   return {
     id: "t1",
     kind: "trendline",
@@ -43,7 +46,10 @@ function trendline(p1: { time: number; price: number }, p2: { time: number; pric
   };
 }
 
-function rectangle(p1: { time: number; price: number }, p2: { time: number; price: number }): RectangleDrawing {
+function rectangle(
+  p1: { time: number; price: number },
+  p2: { time: number; price: number },
+): RectangleDrawing {
   return {
     id: "r1",
     kind: "rectangle",
@@ -109,7 +115,10 @@ describe("hitTest", () => {
   it("hits a trend line's p1 handle within tolerance, not exactly on it", () => {
     const d = trendline({ time: 10, price: 100 }, { time: 50, price: 200 });
     const r = hitTest(d, acc, { x: 13, y: 103 }, PANE_WIDTH);
-    expect(r).toEqual({ kind: "handle", handle: { id: "p1", px: { x: 10, y: 100 }, cursor: "resize" } });
+    expect(r).toEqual({
+      kind: "handle",
+      handle: { id: "p1", px: { x: 10, y: 100 }, cursor: "resize" },
+    });
   });
 
   it("hits a trend line's body when near the segment but far from either endpoint", () => {

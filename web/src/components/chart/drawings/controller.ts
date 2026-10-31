@@ -279,7 +279,11 @@ export class DrawingController {
     }
   };
 
-  private beginDrag(d: Drawing, origin: DPoint, opts: { mode: "move" | "handle"; handle?: Handle }) {
+  private beginDrag(
+    d: Drawing,
+    origin: DPoint,
+    opts: { mode: "move" | "handle"; handle?: Handle },
+  ) {
     this.drag = {
       id: d.id,
       mode: opts.mode,
@@ -373,7 +377,8 @@ export class DrawingController {
   private onKeyDown = (e: KeyboardEvent) => {
     const target = e.target as HTMLElement | null;
     const editing =
-      target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      target &&
+      (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
     if (editing) return;
 
     const mod = e.ctrlKey || e.metaKey;

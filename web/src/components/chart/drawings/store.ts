@@ -78,7 +78,11 @@ export class DrawingsStore {
     if (scopeKey === this.scopeKey) return;
     this.scopeKey = scopeKey;
     const loaded = this.persistence.load(scopeKey) ?? [];
-    this.state = { order: loaded.map((d) => d.id), byId: Object.fromEntries(loaded.map((d) => [d.id, d])), selectedId: null };
+    this.state = {
+      order: loaded.map((d) => d.id),
+      byId: Object.fromEntries(loaded.map((d) => [d.id, d])),
+      selectedId: null,
+    };
     this.undoStack = [];
     this.redoStack = [];
     this.emit();

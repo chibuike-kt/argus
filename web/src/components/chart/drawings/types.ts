@@ -18,7 +18,7 @@ export interface DrawingStyle {
 }
 
 export const DEFAULT_STYLE: DrawingStyle = {
-  color: "#d7fe62",
+  color: "#6d7bff",
   lineWidth: 1.5,
   lineStyle: "solid",
 };
@@ -96,7 +96,14 @@ export type DrawKind = Drawing["kind"];
 // Two-point tools: first click sets p1, the mouse previews, second click (or
 // release, for click-drag-release) commits p2. One-click tools place and
 // commit immediately. Kinds not listed here are not yet drawing tools.
-export const TWO_POINT_KINDS: DrawKind[] = ["trendline", "ray", "extended", "rectangle", "fib", "measure"];
+export const TWO_POINT_KINDS: DrawKind[] = [
+  "trendline",
+  "ray",
+  "extended",
+  "rectangle",
+  "fib",
+  "measure",
+];
 
 // Which rail tool id maps to which drawing kind. Tools not listed here select
 // but do not yet draw (patterns, elliott, gann, ... -- out of V1 per the brief).

@@ -12,7 +12,11 @@ function shift(p: DPoint, deltaPrice: number, deltaTimeSec: number): DPoint {
 // Moves the whole drawing by a price/time delta, preserving its shape --
 // the "drag the body" behaviour. hline only has a price axis to move on;
 // vline only a time axis; everything else moves on both.
-export function translateDrawing(d: Drawing, deltaPrice: number, deltaTimeSec: number): Partial<Drawing> {
+export function translateDrawing(
+  d: Drawing,
+  deltaPrice: number,
+  deltaTimeSec: number,
+): Partial<Drawing> {
   switch (d.kind) {
     case "trendline":
     case "ray":
@@ -20,7 +24,10 @@ export function translateDrawing(d: Drawing, deltaPrice: number, deltaTimeSec: n
     case "fib":
     case "measure":
     case "rectangle":
-      return { p1: shift(d.p1, deltaPrice, deltaTimeSec), p2: shift(d.p2, deltaPrice, deltaTimeSec) };
+      return {
+        p1: shift(d.p1, deltaPrice, deltaTimeSec),
+        p2: shift(d.p2, deltaPrice, deltaTimeSec),
+      };
     case "hline":
       return { price: d.price + deltaPrice };
     case "vline":
@@ -107,7 +114,12 @@ function resizeRectangle(
 // Adjusts a single handle -- the "drag a handle to reshape/resize" behaviour.
 // anchors is only consulted for rectangle corner/edge handles; pass the
 // RectAnchors captured at drag start (see rectAnchorsOf).
-export function reshapeDrawing(d: Drawing, handleId: string, newPoint: DPoint, anchors?: RectAnchors): Partial<Drawing> {
+export function reshapeDrawing(
+  d: Drawing,
+  handleId: string,
+  newPoint: DPoint,
+  anchors?: RectAnchors,
+): Partial<Drawing> {
   switch (d.kind) {
     case "trendline":
     case "ray":
