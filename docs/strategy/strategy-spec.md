@@ -1,7 +1,7 @@
 # ARGUS Strategy Specification
 
-- Version: 0.10.0
-- Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure)
+- Version: 0.11.0
+- Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure; batch 7: setup lifecycle persistence)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
 
@@ -580,6 +580,96 @@ Evidence and scope:
   finalized candles up to asOf, so triggered and invalidated flip as asOf advances. A candle
   correction recomputes the plan deterministically.
 
+## 15. Setup lifecycle, identity, and persistence
+
+Sections 1–14 are pure, stateless, derived-as-of-any-time classifications (explicitly, no
+persistence — see each section's scope note). This section adds the one thing ADR-010 and
+ADR-011 require that a pure function cannot provide: a persisted record of a setup's life, with
+an identity, and an append-only history of what it was and when it changed.
+
+### 15.1 What gets persisted, and when [A]
+
+A setup is created the first time `ResolveTradePlan` (section 14) returns a `TradePlan` with
+`Status != PlanNone` for a given (instrument, timeframe) at a given evaluation step. Nothing is
+persisted while `Status == PlanNone` — there is no setup yet, only the absence of one, exactly as
+section 14 already defines it.
+
+### 15.2 Lifecycle states, v1 [R]
+
+`PlanStatus` (section 14) already defines the complete, already-decided precedence for the part
+of the lifecycle this spec can currently compute: `PlanInvalidated` outranks `PlanTriggered`,
+which outranks `PlanActionable`, evaluated within the same candle window
+(`resolvePlanStatus`). The setup lifecycle is a persisted shadow of that same value's
+transitions over time, plus the one state `PlanStatus` has no reason to represent (there being no
+plan yet):
+
+- **Detected** — first step where `TradePlan.Status` is no longer `PlanNone` for this setup's
+  identity (§15.3). Equivalent to ADR-010's "Detected" and "Awaiting confirmation" collapsed into
+  one state, because section 14 does not currently distinguish a plan that exists but has
+  unresolved mandatory conditions from one that is already actionable — that distinction belongs
+  to confluence/condition grouping, explicitly out of scope (see "Not yet decided" below).
+- **Actionable** — `TradePlan.Status == PlanActionable`. ADR-010's "Confirmed," renamed to match
+  the vocabulary section 14 and the frontend already use, so one concept keeps one name end to
+  end.
+- **Triggered** — `TradePlan.Status == PlanTriggered`.
+- **Invalidated** — `TradePlan.Status == PlanInvalidated`. Terminal.
+
+A setup transitions between these exactly when `TradePlan.Status` changes on a later evaluation
+step for the same identity. No new precedence rule is introduced here — section 14's existing
+precedence is reused unchanged, because it already resolves the one ADR-010 called out
+("confirmation, expiry and invalidation... in the same evaluation window") for the part of that
+collision this codebase can currently detect (invalidation vs. triggered vs. actionable).
+
+**Not implemented in v1, by design, not oversight:** `Expired` and `Cancelled`. ADR-010 ties
+expiry to "POI expiry," but no POI or order-block structure in sections 12–13 currently has a
+time-based or any other expiry concept — invalidation there is purely structural (a sweep failure
+or a protected-level break), never a timeout. Inventing an expiry window now would be exactly the
+kind of undocumented numeric threshold this spec's own provenance discipline exists to prevent
+(see appendix-c, which doesn't yet even list an expiry window as a tracked open item). `Cancelled`
+has no trigger anywhere in the current engine either (nothing today cancels a setup). Both remain
+`[U]`, unresolved, explicitly deferred to a later batch, same as "confirmation entry type" and
+"mandatory condition grouping" already were.
+
+### 15.3 Candidate identity and deduplication [R]
+
+Per ADR-010: instrument, source POI, direction, and strategy version. Concretely:
+
+```
+(instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version)
+```
+
+where `poi_source_candle_id` is `POI.OrderBlockCandleID` when `POI.Type == POIOrderBlock`, or
+`POI.QMRFailCandleID` when `POI.Type == POIQMR` (section 13's own two source-candle fields —
+nothing new). Candle **revision** is deliberately excluded from identity: a corrected candle
+(ADR-011) must amend the existing setup's record, not spawn a new one under a different identity.
+When the current evaluation step's POI's source-candle revision differs from the setup's
+last-recorded revision, that is an amendment event (§15.4), not a new setup.
+
+**Re-entry** falls out of this identity scheme with no separate rule needed: once a setup reaches
+`Invalidated`, any later step whose POI resolves to a *different* source candle (a new order
+block or a new QMR instance) naturally gets a new identity and a new setup — no cooldown timer,
+no magic window. A later step that resolves back to the *same* source candle and direction after
+invalidation does not create a second setup; that identity is already Invalidated and stays
+Invalidated (terminal). This is deterministic and requires no unresolved numeric constant, unlike
+a cooldown-based scheme would.
+
+### 15.4 Immutable events [A]
+
+Per ADR-011, every creation and every state transition is appended, never rewritten, as its own
+event row carrying: the setup identity, the evaluation time (`asOf`), the `TradePlan` snapshot
+that produced it (status, entry, stop, targets, POI), the candle/revision it was computed from,
+and the strategy version. A correction that changes the POI's source-candle revision without
+changing identity appends an **amendment** event on the same setup, preserving the original
+decision and evidence per ADR-011 — it does not rewrite the original event.
+
+### 15.5 What this does not decide
+
+Mandatory-condition grouping, the confirmation entry type, expiry, and cancellation remain
+exactly as undecided as the existing "Not yet decided" paragraph already states — this section
+does not quietly resolve them by implication. `Detected` and `Actionable` are collapsed into
+fewer states than ADR-010's proposed vocabulary precisely because splitting them further would
+require deciding confluence/condition grouping first.
+
 ## Scope of this version
 
 In scope: single instrument, single timeframe. Batch 1: swing detection, structural
@@ -594,15 +684,20 @@ derived classifications with no persistence, completing the liquidity layer. Bat
 order block (section 12) and the QMR with POI selection (section 13), both derived classifications
 with no persistence. Batch 6: the trade plan (section 14), the risk entry derived from the POI with
 entry, stop, ordered targets, per-target R:R and a minimal status, also with no persistence; the
-confirmation entry and the multi-timeframe top-down flow follow as later batches.
+confirmation entry and the multi-timeframe top-down flow follow as later batches. Batch 7: setup
+lifecycle persistence (section 15) — candidate identity, deduplication, re-entry, and immutable
+lifecycle events for the `Detected`, `Actionable`, `Triggered`, and `Invalidated` states, reusing
+section 14's existing precedence unchanged. Expiry and cancellation remain future batches (see
+section 15.2).
 
 Not yet decided, do not implement: supply/demand and support/resistance zones; equal highs and lows;
 fair value gaps; displacement and ATR; retests; higher-timeframe context and multi-timeframe
 alignment; the confirmation entry type; position sizing and the volatility stop buffer; mandatory
-condition grouping; the full setup lifecycle (candidates, expiry, cancellation, re-entry) and event
-precedence on collision; and trading-cost estimation. (The order block is section 12, the QMR and
-POI selection section 13, the risk-entry trade plan section 14.) These are later batches of this
-spec, in roughly that order.
+condition grouping and the resulting distinction between a plan that exists and one with unresolved
+conditions (would refine the collapsed Detected/Actionable boundary in section 15.2 if resolved
+later); setup expiry and cancellation (section 15.2); and trading-cost estimation. (The order block
+is section 12, the QMR and POI selection section 13, the risk-entry trade plan section 14, the setup
+lifecycle section 15.) These are later batches of this spec, in roughly that order.
 
 ## Golden fixtures required
 

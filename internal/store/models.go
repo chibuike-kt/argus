@@ -111,6 +111,36 @@ type LiquiditySweep struct {
 	CreatedAt          time.Time     `json:"created_at"`
 }
 
+type Setup struct {
+	ID                      int64           `json:"id"`
+	InstrumentID            int64           `json:"instrument_id"`
+	Timeframe               string          `json:"timeframe"`
+	PoiType                 string          `json:"poi_type"`
+	PoiSourceCandleID       int64           `json:"poi_source_candle_id"`
+	Direction               string          `json:"direction"`
+	StrategyVersion         string          `json:"strategy_version"`
+	State                   string          `json:"state"`
+	PoiSourceCandleRevision int32           `json:"poi_source_candle_revision"`
+	PlanSnapshot            json.RawMessage `json:"plan_snapshot"`
+	LastEventID             sql.NullInt64   `json:"last_event_id"`
+	EvaluationTime          time.Time       `json:"evaluation_time"`
+	AlgorithmVersion        string          `json:"algorithm_version"`
+	CreatedAt               time.Time       `json:"created_at"`
+	UpdatedAt               time.Time       `json:"updated_at"`
+}
+
+type SetupEvent struct {
+	ID                      int64           `json:"id"`
+	SetupID                 int64           `json:"setup_id"`
+	EventType               string          `json:"event_type"`
+	PlanSnapshot            json.RawMessage `json:"plan_snapshot"`
+	PoiSourceCandleID       int64           `json:"poi_source_candle_id"`
+	PoiSourceCandleRevision int32           `json:"poi_source_candle_revision"`
+	EvaluationTime          time.Time       `json:"evaluation_time"`
+	AlgorithmVersion        string          `json:"algorithm_version"`
+	CreatedAt               time.Time       `json:"created_at"`
+}
+
 type StructureEvent struct {
 	ID                int64         `json:"id"`
 	InstrumentID      int64         `json:"instrument_id"`
