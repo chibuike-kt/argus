@@ -51,13 +51,26 @@ make infra
 # 3. apply migrations
 make migrate-up
 
-# 4. run the API (new terminal) and worker
-make run-api
-make run-worker
+# 4. seed dev/test instruments (DEV/TEST ONLY, never against production)
+make seed-dev
 
-# 5. frontend dev server (new terminal)
+# 5. run the API (new terminal)
+make run-api
+
+# 6. run the worker with the dev dataset replay (new terminal) -- without
+# ARGUS_DEV_FIXTURE_INGEST the worker has nothing to process: nothing else
+# feeds it a candle yet (ADR-007 is still open, see docs/status/project-status.md)
+ARGUS_DEV_FIXTURE_INGEST=true make run-worker
+
+# 7. frontend dev server (new terminal) -- wired to the real API above
+# (web/src/api); set VITE_USE_FIXTURES=true in web/.env instead to force
+# static sample data with no backend running (see web/.env.example)
 make web-dev
 ```
+
+Once all four are running, `/setups` and `/analysis` in the frontend show real
+setups computed from the replayed dev dataset. See `web/README.md` for the
+frontend's own API layer, environment variables, and test commands.
 
 Check the API:
 

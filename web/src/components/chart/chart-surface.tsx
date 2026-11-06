@@ -11,19 +11,19 @@ import {
   type CandlestickData,
   type Time,
 } from "lightweight-charts";
-import { GearSix } from "@phosphor-icons/react";
-import { candles, annotations, instrument } from "@/mocks/fixtures";
+import { GearSix, CircleNotch } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
+import { SampleDataBadge } from "@/components/ui/sample-data-badge";
 import { cn } from "@/lib/cn";
 import { useFlash } from "@/lib/use-flash";
+import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
+import { formatMoney, toPlanOverlay } from "@/api/mappers";
 import { useDrawing } from "./drawing-context";
 import { loadChartView, saveChartView } from "./chart-view-persistence";
 import { cloneDrawing } from "./drawings/types";
 import {
   RectanglePrimitive,
   PositionPrimitive,
-  HLinePrimitive,
-  SystemLabelPrimitive,
   primitiveFor,
   updatePrimitive,
 } from "./drawings/primitives";
@@ -32,7 +32,6 @@ import { DrawingController } from "./drawings/controller";
 import { ContextToolbar } from "./drawings/context-toolbar";
 import { DrawingContextMenu } from "./drawings/context-menu";
 
-const { orderBlock, plan } = annotations;
 const RANGES = ["1D", "5D", "1M", "3M", "6M", "YTD", "1Y", "5Y", "All"];
 // lightweight-charts computes candlestick body width as a fixed, non-
 // configurable function of bar spacing alone (optimalCandlestickWidth) --
@@ -59,23 +58,110 @@ const C = {
 const SYSTEM_COLOR = "#6d7bff";
 
 const unix = (iso: string) => Math.floor(Date.parse(iso) / 1000) as Time;
-const lastTime = unix(candles[candles.length - 1].openTime);
-
-const toData = (): CandlestickData<Time>[] =>
-  candles.map((c) => ({
-    time: unix(c.openTime),
-    open: c.open,
-    high: c.high,
-    low: c.low,
-    close: c.close,
-  }));
 
 const fmt1 = (p: number) => p.toLocaleString("en-US", { maximumFractionDigits: 1 });
 const fmtLast = (p: number) => Math.round(p).toLocaleString("en-US");
 
 type OHLC = { open: number; high: number; low: number; close: number };
 
+export interface ChartCandle {
+  openTime: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export interface ChartPoiZone {
+  low: number;
+  high: number;
+}
+
+export interface ChartPlanOverlay {
+  entry: number;
+  stop: number;
+  targets: number[];
+  fromTime: string;
+}
+
+// ChartSurface is a thin data-loading wrapper: lightweight-charts and
+// the drawing controller are initialised once per mount
+// (ChartSurfaceInner's own effect, unchanged), so this only ever mounts
+// that inner component once real candles exist -- never re-running chart
+// init mid-flight while a fetch is pending, which would fight the
+// controller's own StrictMode-aware remount handling.
 export function ChartSurface({ className }: { className?: string }) {
+  const { setup, instrument, candles, candlesLoading, candlesError, setupLoading } =
+    useAnalysisWorkspace();
+
+  if (setupLoading || candlesLoading) {
+    return (
+      <div className={cn("flex h-full w-full items-center justify-center gap-2 text-fg-subtle", className)}>
+        <CircleNotch className="size-5 animate-spin" />
+        Loading chart…
+      </div>
+    );
+  }
+  if (candlesError) {
+    return (
+      <div className={cn("flex h-full w-full items-center justify-center text-[13px] text-down", className)}>
+        Could not load candles: {candlesError.message}
+      </div>
+    );
+  }
+  if (!setup || !instrument || candles.length === 0) {
+    return (
+      <div className={cn("flex h-full w-full items-center justify-center text-[13px] text-fg-subtle", className)}>
+        No candles in range for this instrument.
+      </div>
+    );
+  }
+
+  const chartCandles: ChartCandle[] = candles.map((c) => ({
+    openTime: c.open_time,
+    open: formatMoney(c.open),
+    high: formatMoney(c.high),
+    low: formatMoney(c.low),
+    close: formatMoney(c.close),
+  }));
+  const overlay = toPlanOverlay(setup, instrument);
+
+  return (
+    <ChartSurfaceInner
+      className={className}
+      symbol={instrument.native_symbol}
+      venue={instrument.provider}
+      candles={chartCandles}
+      poiZone={{ low: overlay.poiLow, high: overlay.poiHigh }}
+      plan={{ entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime }}
+    />
+  );
+}
+
+function ChartSurfaceInner({
+  className,
+  symbol,
+  venue,
+  candles,
+  poiZone,
+  plan,
+}: {
+  className?: string;
+  symbol: string;
+  venue: string;
+  candles: ChartCandle[];
+  poiZone: ChartPoiZone;
+  plan: ChartPlanOverlay;
+}) {
+  const lastTime = unix(candles[candles.length - 1].openTime);
+  const toData = (): CandlestickData<Time>[] =>
+    candles.map((c) => ({
+      time: unix(c.openTime),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -110,7 +196,7 @@ export function ChartSurface({ className }: { className?: string }) {
   // timeframe change after the fact (it still renders the one fixture
   // candle set regardless), so this just needs to match whatever scope
   // the drawings store itself was given at that same moment.
-  const chartViewScopeRef = useRef(`${instrument.symbol}:${timeframe}`);
+  const chartViewScopeRef = useRef(`${symbol}:${timeframe}`);
   const {
     drawings: list,
     selectedId,
@@ -151,7 +237,7 @@ export function ChartSurface({ className }: { className?: string }) {
       vertAlign: "center",
       lines: [
         {
-          text: instrument.symbol,
+          text: symbol,
           color: "rgba(255,255,255,0.035)",
           fontSize: 64,
           fontStyle: "bold",
@@ -173,10 +259,16 @@ export function ChartSurface({ className }: { className?: string }) {
     seriesRef.current = series;
 
     // SMC annotations: ARGUS's own read-only output, in its own layer.
+    // Anchored at the POI's own real formation candle (plan.fromTime),
+    // not a fixture array index. If that candle fell outside the fetched
+    // window (the chart's own candle request is bounded, the setup's
+    // formation candle might predate it), fall back to the first visible
+    // candle rather than throwing.
+    const fromIndex = Math.max(0, candles.findIndex((c) => c.openTime === plan.fromTime));
     series.attachPrimitive(
       new RectanglePrimitive({
-        p1: { time: unix(candles[orderBlock.fromIndex].openTime), price: orderBlock.high },
-        p2: { time: lastTime, price: orderBlock.low },
+        p1: { time: unix(candles[fromIndex].openTime), price: poiZone.high },
+        p2: { time: lastTime, price: poiZone.low },
         style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
         label: "Order block",
       }),
@@ -184,7 +276,7 @@ export function ChartSurface({ className }: { className?: string }) {
     series.attachPrimitive(
       new PositionPrimitive({
         kind: "position-long",
-        time: unix(candles[plan.fromIndex].openTime),
+        time: unix(candles[fromIndex].openTime),
         rightTime: lastTime,
         entry: plan.entry,
         stop: plan.stop,
@@ -193,63 +285,19 @@ export function ChartSurface({ className }: { className?: string }) {
       }),
     );
 
-    // Structure (confirmed swings) and events (BOS/CHOCH/sweep): the
-    // "structure, sweeps" part of ARGUS's read, so the chart opens with
-    // more than just the POI and the plan already drawn. Each one is a
-    // ray anchored at its own origin candle, extending to the latest
-    // candle -- same pattern as Equilibrium below, not a stub centered on
-    // nothing. Two of these can land on the exact same origin candle (a
-    // swept low is almost by definition the same candle as the swing low
-    // it swept) -- STACK_PX staggers same-candle labels vertically so
-    // they read legibly instead of landing on top of each other.
-    const STACK_PX = 18;
-    const seenAtIndex = new Map<number, number>();
-    const stackOffset = (index: number): number => {
-      const n = seenAtIndex.get(index) ?? 0;
-      seenAtIndex.set(index, n + 1);
-      return -n * STACK_PX;
-    };
+    // Structure labels (confirmed swings, BOS/CHOCH, the equilibrium
+    // line) are deliberately NOT drawn here: they come from
+    // structure_events/structure_state, which have no per-setup API
+    // today (see the wiring brief's own report). Overlaying fixture
+    // values for these on top of real candles would misrepresent them as
+    // findings about this real data, which this wiring is specifically
+    // meant not to do -- so this real-data path draws only the POI zone
+    // and the plan box above, both read directly from the setup's own
+    // plan_snapshot.
 
-    for (const s of annotations.swings) {
-      const price = Math.round(s.price).toLocaleString("en-US");
-      series.attachPrimitive(
-        new SystemLabelPrimitive(
-          { time: unix(candles[s.index].openTime), price: s.price },
-          `${s.kind === "high" ? "H" : "L"} ${price}`,
-          SYSTEM_COLOR,
-          lastTime,
-          stackOffset(s.index),
-        ),
-      );
-    }
-    for (const e of annotations.events) {
-      series.attachPrimitive(
-        new SystemLabelPrimitive(
-          { time: unix(candles[e.index].openTime), price: e.price },
-          e.label,
-          SYSTEM_COLOR,
-          lastTime,
-          stackOffset(e.index),
-        ),
-      );
-    }
-
-    // Premium/discount split (spec section 8): the active range's
-    // equilibrium, the SMC buy-zone/sell-zone divider.
-    series.attachPrimitive(
-      new HLinePrimitive({
-        price: annotations.range.equilibrium,
-        style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "dashed" },
-      }),
-    );
-    series.attachPrimitive(
-      new SystemLabelPrimitive(
-        { time: lastTime, price: annotations.range.equilibrium },
-        "Equilibrium",
-        SYSTEM_COLOR,
-        lastTime,
-      ),
-    );
+    // Premium/discount split (spec section 8, the active range's
+    // equilibrium) is likewise not drawn here: no per-setup API field
+    // carries it today. See the comment above this block.
 
     // Restore wherever the trader last left the view (per instrument +
     // timeframe); only fall back to the default fit (and the explicit
@@ -369,8 +417,14 @@ export function ChartSurface({ className }: { className?: string }) {
 
   const contextMenuDrawing = contextMenu ? store.get(contextMenu.id) : null;
 
-  const up = instrument.changePct >= 0;
-  const chg = (instrument.last * instrument.changePct) / 100;
+  // "up" colours the live dot/O-H-L-C legend by the latest candle's own
+  // colour (close vs open) -- real, from the data on screen. There is no
+  // endpoint for a day-level $ / % change (see the wiring brief's own
+  // report), so that cluster is a SampleDataBadge below, not a computed
+  // number dressed up to look real.
+  const lastCandle = candles[candles.length - 1];
+  const up = lastCandle.close >= lastCandle.open;
+  const last = lastCandle.close;
 
   // A brief flash on whichever OHLC value just changed under the
   // crosshair, instead of the legend just snapping to new numbers.
@@ -421,16 +475,12 @@ export function ChartSurface({ className }: { className?: string }) {
 
         <div className="pointer-events-none absolute left-3 top-2.5 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
           <div className="flex items-center gap-1.5">
-            <CoinIcon symbol={instrument.symbol} size={18} />
-            <span className="font-semibold text-fg">{instrument.symbol}</span>
-            <span className="text-fg-subtle">· 5m · {instrument.venue}</span>
+            <CoinIcon symbol={symbol} size={18} />
+            <span className="font-semibold text-fg">{symbol}</span>
+            <span className="text-fg-subtle">· {venue}</span>
             <span className={cn("ml-1 size-1.5 rounded-full", up ? "bg-up" : "bg-down")} />
           </div>
-          <span className={cn("tnum font-medium", up ? "text-up" : "text-down")}>
-            {up ? "+" : ""}
-            {fmt1(chg)} ({up ? "+" : ""}
-            {instrument.changePct.toFixed(2)}%)
-          </span>
+          <SampleDataBadge label="Sample % change" />
           <div className="tnum flex items-center gap-2.5 text-fg-subtle">
             <span>
               O{" "}
@@ -505,7 +555,7 @@ export function ChartSurface({ className }: { className?: string }) {
           ))}
         </div>
         <div className="flex items-center gap-1 text-fg-subtle">
-          <span className="tnum mr-1 text-[11px]">{fmtLast(instrument.last)} · UTC+1</span>
+          <span className="tnum mr-1 text-[11px]">{fmtLast(last)} · UTC</span>
           <button className="focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium hover:text-fg">
             A
           </button>
