@@ -21,12 +21,18 @@ const maxInstrumentCandles = 1000
 // the query parameter entirely.
 const defaultInstrumentCandles = 500
 
+// defaultInstrumentsLimit/maxInstrumentsLimit are ListInstruments' own
+// caps (backend-guards-cleanup brief: the one list endpoint with no
+// cap), matching the OpenAPI spec's documented default/maximum.
+const defaultInstrumentsLimit = 200
+const maxInstrumentsLimit = 500
+
 // instrumentsStore is the boundary apiHandler needs from
 // instruments.Store -- kept small and consumer-defined (guide 4), the
 // same reason setupsStore exists, so the handler tests below can use
 // a handwritten fake instead of a real database.
 type instrumentsStore interface {
-	ListAll(ctx context.Context) ([]instruments.Instrument, error)
+	ListAllFiltered(ctx context.Context, afterID *int64, limit int32) ([]instruments.Instrument, error)
 	GetByID(ctx context.Context, id int64) (instruments.Instrument, error)
 }
 
@@ -41,8 +47,16 @@ type candlesStore interface {
 
 var _ candlesStore = (*marketdata.Store)(nil)
 
-func (h *apiHandler) ListInstruments(ctx context.Context, _ ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error) {
-	rows, err := h.instruments.ListAll(ctx)
+func (h *apiHandler) ListInstruments(ctx context.Context, request ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error) {
+	limit := int32(defaultInstrumentsLimit)
+	if request.Params.Limit != nil {
+		limit = *request.Params.Limit
+	}
+	if limit < 1 || limit > maxInstrumentsLimit {
+		return ListInstruments400JSONResponse(apiError("invalid_argument", fmt.Sprintf("limit must be between 1 and %d", maxInstrumentsLimit))), nil
+	}
+
+	rows, err := h.instruments.ListAllFiltered(ctx, request.Params.AfterId, limit)
 	if err != nil {
 		h.logger.Error("httpapi: list instruments", "error", err)
 		return nil, fmt.Errorf("list instruments: %w", err)

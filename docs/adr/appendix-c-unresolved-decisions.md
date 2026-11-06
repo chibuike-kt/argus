@@ -2,11 +2,29 @@
 
 - Source: ARGUS Master ADR, section 16
 - Version: 0.1.0-draft
-- Last updated: 26 October 2026
+- Last updated: 6 November 2026
 
 ---
 
 These items must remain visible in planning until they are resolved or explicitly accepted as trade-offs.
+
+## Resolved
+
+The rows below are kept in the table that follows (nothing is deleted from
+this register once it is added), but each of these four has since been
+settled elsewhere. This table is the pointer to where; the table below it
+is still the full original list.
+
+| Open item | Resolved by |
+| --- | --- |
+| Charting library and drawing APIs | ADR-008 |
+| Event precedence | Spec sections 14 and 15.2 |
+| Swing tie policy | Spec section 1 (strict inequality) |
+| Re-entry and candidate identity | Spec section 15.3 |
+
+Not included here: ADR-009's POI-category contradiction remains open --
+that is an architect/product-owner decision, not a documentation gap, and
+is unchanged by this update.
 
 | Priority | Open item | Why it matters | Required resolution |
 | --- | --- | --- | --- |

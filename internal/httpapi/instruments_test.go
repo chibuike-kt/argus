@@ -23,11 +23,24 @@ type fakeInstrumentsStore struct {
 	getByIDErr error
 }
 
-func (f *fakeInstrumentsStore) ListAll(_ context.Context) ([]instruments.Instrument, error) {
+func (f *fakeInstrumentsStore) ListAllFiltered(_ context.Context, afterID *int64, limit int32) ([]instruments.Instrument, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.all, nil
+	out := f.all
+	if afterID != nil {
+		filtered := make([]instruments.Instrument, 0, len(out))
+		for _, inst := range out {
+			if inst.ID > *afterID {
+				filtered = append(filtered, inst)
+			}
+		}
+		out = filtered
+	}
+	if int32(len(out)) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (f *fakeInstrumentsStore) GetByID(_ context.Context, id int64) (instruments.Instrument, error) {
@@ -73,6 +86,38 @@ func TestListInstruments_OK(t *testing.T) {
 	}
 	if got[0].Id != 1 || got[0].TickSize != "0.01" {
 		t.Fatalf("got %+v, want id=1 tick_size=0.01", got[0])
+	}
+}
+
+func TestListInstruments_AfterIDAndLimit(t *testing.T) {
+	all := []instruments.Instrument{testInstrumentDomain(1), testInstrumentDomain(2), testInstrumentDomain(3)}
+	h := &apiHandler{instruments: &fakeInstrumentsStore{all: all}, logger: slog.Default()}
+
+	afterID := int64(1)
+	limit := int32(1)
+	resp, err := h.ListInstruments(context.Background(), ListInstrumentsRequestObject{
+		Params: ListInstrumentsParams{AfterId: &afterID, Limit: &limit},
+	})
+	if err != nil {
+		t.Fatalf("ListInstruments: %v", err)
+	}
+	got, ok := resp.(ListInstruments200JSONResponse)
+	if !ok || len(got) != 1 || got[0].Id != 2 {
+		t.Fatalf("got %#v, want one instrument with id=2", resp)
+	}
+}
+
+func TestListInstruments_LimitOutOfRange(t *testing.T) {
+	h := &apiHandler{instruments: &fakeInstrumentsStore{all: []instruments.Instrument{testInstrumentDomain(1)}}, logger: slog.Default()}
+	tooMany := int32(maxInstrumentsLimit + 1)
+	resp, err := h.ListInstruments(context.Background(), ListInstrumentsRequestObject{
+		Params: ListInstrumentsParams{Limit: &tooMany},
+	})
+	if err != nil {
+		t.Fatalf("ListInstruments: %v", err)
+	}
+	if _, ok := resp.(ListInstruments400JSONResponse); !ok {
+		t.Fatalf("got %#v, want 400 for limit=%d", resp, tooMany)
 	}
 }
 

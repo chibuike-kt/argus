@@ -117,9 +117,15 @@ func (p *processor) run(ctx context.Context) {
 		return
 	}
 
-	var totalCandles, totalEvents, totalErrored int
+	var totalCandles, totalEvents, totalErrored, totalSkippedLocked int
 	for _, inst := range enabled {
-		result, err := p.processInstrument(ctx, inst)
+		result, skipped, err := p.processInstrumentLocked(ctx, inst)
+		if skipped {
+			totalSkippedLocked++
+			p.logger.Debug("worker: instrument locked by another worker, skipping this tick",
+				"instrument_id", inst.ID)
+			continue
+		}
 		if err != nil {
 			totalErrored++
 			p.logger.Error("worker: process instrument", "instrument_id", inst.ID, "error", err)
@@ -146,7 +152,35 @@ func (p *processor) run(ctx context.Context) {
 		"candles_processed", totalCandles,
 		"setup_events_written", totalEvents,
 		"instruments_errored", totalErrored,
+		"instruments_skipped_locked", totalSkippedLocked,
 	)
+}
+
+// processInstrumentLocked wraps processInstrument with the advisory
+// lock's own acquire/release lifecycle (lock.go): the lock is held for
+// exactly the duration of processInstrument, acquired before and
+// released via defer immediately after -- whether processInstrument
+// returns an error or not -- so two worker processes can never run
+// processInstrument concurrently for the same (instrument, timeframe).
+// skipped is true only when another session already holds the lock;
+// result and err are both the zero value in that case, matching a
+// cold-start/no-op return from processInstrument itself.
+func (p *processor) processInstrumentLocked(ctx context.Context, inst instruments.Instrument) (result instrumentRunResult, skipped bool, err error) {
+	lock, acquired, err := acquireInstrumentLock(ctx, p.db, inst.ID, timeframe)
+	if err != nil {
+		return instrumentRunResult{}, false, fmt.Errorf("acquire instrument lock: %w", err)
+	}
+	if !acquired {
+		return instrumentRunResult{}, true, nil
+	}
+	defer func() {
+		if releaseErr := lock.release(ctx); releaseErr != nil {
+			p.logger.Error("worker: release instrument lock", "instrument_id", inst.ID, "error", releaseErr)
+		}
+	}()
+
+	result, err = p.processInstrument(ctx, inst)
+	return result, false, err
 }
 
 // processInstrument processes every candle newly closed since this

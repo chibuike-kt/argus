@@ -35,7 +35,13 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	defer srv.Close()
 
 	t.Run("list instruments includes the disabled test instrument", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/instruments", srv.URL))
+		// after_id=instrumentID-1 pages starting exactly at the test
+		// instrument -- GET /instruments now defaults to a page of 200
+		// ordered by id (backend-guards-cleanup brief, item 2), and a
+		// long-lived test database has far more than 200 rows ahead of
+		// this freshly-inserted one, so an unparameterized call would
+		// no longer reliably include it.
+		resp, err := http.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d", srv.URL, instrumentID-1))
 		if err != nil {
 			t.Fatalf("GET /instruments: %v", err)
 		}

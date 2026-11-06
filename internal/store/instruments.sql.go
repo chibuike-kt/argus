@@ -223,6 +223,75 @@ func (q *Queries) ListAllInstruments(ctx context.Context) ([]Instrument, error) 
 	return items, nil
 }
 
+const listAllInstrumentsPaged = `-- name: ListAllInstrumentsPaged :many
+SELECT id, provider, native_symbol, asset_class, base_asset, quote_asset, contract_type, price_precision, quantity_precision, tick_size_deprecated, supported_intervals, enabled, metadata, created_at, updated_at, price_scale, qty_scale, tick_size, qty_step_size, contract_size, pip_size FROM instruments
+WHERE $2::bigint IS NULL OR id > $2::bigint
+ORDER BY id
+LIMIT $1
+`
+
+type ListAllInstrumentsPagedParams struct {
+	Limit   int32         `json:"limit"`
+	AfterID sql.NullInt64 `json:"after_id"`
+}
+
+// ListAllInstrumentsPaged is GET /instruments' own read path as of the
+// backend-guards-cleanup brief (project-status audit, section D: the
+// one list endpoint with no cap). Keyset pagination on id, not on
+// (provider, native_symbol) the way ListAllInstruments above orders --
+// id is a stable, monotonic BIGSERIAL well-suited to "id > after_id",
+// which (provider, native_symbol) is not without a composite cursor no
+// other endpoint in this API needs either. after_id is nullable
+// (sqlc.narg): NULL means "from the start," matching a first page with
+// no cursor yet. This is a new, separate ordering from
+// ListAllInstruments's own -- that query is untouched, still available,
+// still unbounded, in case anything else in this package ever needs
+// the old order.
+func (q *Queries) ListAllInstrumentsPaged(ctx context.Context, arg ListAllInstrumentsPagedParams) ([]Instrument, error) {
+	rows, err := q.db.QueryContext(ctx, listAllInstrumentsPaged, arg.Limit, arg.AfterID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Instrument{}
+	for rows.Next() {
+		var i Instrument
+		if err := rows.Scan(
+			&i.ID,
+			&i.Provider,
+			&i.NativeSymbol,
+			&i.AssetClass,
+			&i.BaseAsset,
+			&i.QuoteAsset,
+			&i.ContractType,
+			&i.PricePrecision,
+			&i.QuantityPrecision,
+			&i.TickSizeDeprecated,
+			pq.Array(&i.SupportedIntervals),
+			&i.Enabled,
+			&i.Metadata,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.PriceScale,
+			&i.QtyScale,
+			&i.TickSize,
+			&i.QtyStepSize,
+			&i.ContractSize,
+			&i.PipSize,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEnabledInstruments = `-- name: ListEnabledInstruments :many
 SELECT id, provider, native_symbol, asset_class, base_asset, quote_asset, contract_type, price_precision, quantity_precision, tick_size_deprecated, supported_intervals, enabled, metadata, created_at, updated_at, price_scale, qty_scale, tick_size, qty_step_size, contract_size, pip_size FROM instruments WHERE enabled = TRUE ORDER BY provider, native_symbol
 `
