@@ -609,19 +609,25 @@ export class PositionPrimitive extends BasePrimitive {
   }
 }
 
-// ---- System label: a short dotted trendline-style tick at a point, for
-// ARGUS's own structure markers (swing highs/lows, CHOCH, sweeps,
-// equilibrium) -- just a dotted line and plain text centered on it, no
-// chip/background behind the text, the same way a trader marks a swing by
-// hand. Never constructed from a Drawing, never attached to the user
-// store. ----
-const SYSTEM_TICK_HALF_WIDTH = 28;
-
+// ---- System label: a dotted ray for ARGUS's own structure markers (swing
+// highs/lows, CHOCH, sweeps) -- anchored AT the origin candle (the edge),
+// extending forward in time, the same pattern Equilibrium already uses
+// (HLinePrimitive spans the chart, its own SystemLabelPrimitive sits at
+// one end) -- not a short stub centered on nothing in particular. The
+// label sits near the origin end, not centered on the ray, as plain text
+// with no chip/background, the same way a trader marks a swing by hand.
+// yOffsetPx is a pure pixel nudge (not baked into the anchor price, so it
+// stays a constant visual gap at any zoom) for the rare case where two
+// labels share the same origin candle and would otherwise land on top of
+// each other -- see chart-surface.tsx's own collision pass. Never
+// constructed from a Drawing, never attached to the user store. ----
 export class SystemLabelPrimitive extends BasePrimitive {
   constructor(
     private p: { time: Time; price: number },
     private text: string,
     private color: string,
+    private rayTo: Time,
+    private yOffsetPx: number = 0,
   ) {
     super();
   }
@@ -630,32 +636,33 @@ export class SystemLabelPrimitive extends BasePrimitive {
       {
         renderer: () => ({
           draw: (target: RenderTarget) => {
-            const x = this.x(this.p.time);
-            const y = this.y(this.p.price);
-            if (x == null || y == null) return;
+            const x0 = this.x(this.p.time);
+            const x1 = this.x(this.rayTo);
+            const yBase = this.y(this.p.price);
+            if (x0 == null || x1 == null || yBase == null) return;
+            const y = yBase + this.yOffsetPx;
             target.useMediaCoordinateSpace(({ context: ctx }) => {
-              const x0 = x - SYSTEM_TICK_HALF_WIDTH;
-              const x1 = x + SYSTEM_TICK_HALF_WIDTH;
+              const left = Math.min(x0, x1);
+              const right = Math.max(x0, x1);
               ctx.strokeStyle = this.color;
               ctx.lineWidth = 1.5;
               ctx.lineCap = "round";
               ctx.setLineDash([1, 4]);
               ctx.beginPath();
-              ctx.moveTo(x0, y + 0.5);
-              ctx.lineTo(x1, y + 0.5);
+              ctx.moveTo(left, y + 0.5);
+              ctx.lineTo(right, y + 0.5);
               ctx.stroke();
               ctx.setLineDash([]);
               ctx.lineCap = "butt";
 
-              // Plain text, no chip -- sits just above the line rather
-              // than on top of it, so neither the dots nor the label
-              // compete with each other.
+              // Plain text, no chip, near the origin end -- sits just
+              // above the ray rather than on top of it or centered along
+              // its length.
               ctx.font = "600 11px IBM Plex Mono, ui-monospace, monospace";
               ctx.fillStyle = this.color;
-              ctx.textAlign = "center";
-              ctx.textBaseline = "bottom";
-              ctx.fillText(this.text, x, y - 4);
               ctx.textAlign = "left";
+              ctx.textBaseline = "bottom";
+              ctx.fillText(this.text, x0 + 4, y - 4);
             });
           },
         }),

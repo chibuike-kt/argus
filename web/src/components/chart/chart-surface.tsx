@@ -17,6 +17,7 @@ import { CoinIcon } from "@/components/ui/coin-icon";
 import { cn } from "@/lib/cn";
 import { useFlash } from "@/lib/use-flash";
 import { useDrawing } from "./drawing-context";
+import { loadChartView, saveChartView } from "./chart-view-persistence";
 import { cloneDrawing } from "./drawings/types";
 import {
   RectanglePrimitive,
@@ -33,6 +34,13 @@ import { DrawingContextMenu } from "./drawings/context-menu";
 
 const { orderBlock, plan } = annotations;
 const RANGES = ["1D", "5D", "1M", "3M", "6M", "YTD", "1Y", "5Y", "All"];
+// lightweight-charts computes candlestick body width as a fixed, non-
+// configurable function of bar spacing alone (optimalCandlestickWidth) --
+// there is no separate "thinness" option. fitContent() on this fixture's
+// ~20 candles stretches that spacing wide (fat candles); applying this
+// explicit, noticeably smaller spacing right after is the only lever,
+// comfortably above the library's own 0.5px zoom-out floor.
+const DEFAULT_BAR_SPACING = 10;
 
 const C = {
   up: "#2ebd85",
@@ -88,8 +96,21 @@ export function ChartSurface({ className }: { className?: string }) {
   // the series identity changes, regardless of whether the data did.
   const [chartGeneration, setChartGeneration] = useState(0);
 
-  const { activeTool, setActiveTool, magnetOn, stayInDrawingMode, locked, hidden, drawings } =
-    useDrawing();
+  const {
+    activeTool,
+    setActiveTool,
+    magnetOn,
+    stayInDrawingMode,
+    locked,
+    hidden,
+    drawings,
+    timeframe,
+  } = useDrawing();
+  // Captured once, at mount -- the chart does not currently react to a
+  // timeframe change after the fact (it still renders the one fixture
+  // candle set regardless), so this just needs to match whatever scope
+  // the drawings store itself was given at that same moment.
+  const chartViewScopeRef = useRef(`${instrument.symbol}:${timeframe}`);
   const {
     drawings: list,
     selectedId,
@@ -174,7 +195,21 @@ export function ChartSurface({ className }: { className?: string }) {
 
     // Structure (confirmed swings) and events (BOS/CHOCH/sweep): the
     // "structure, sweeps" part of ARGUS's read, so the chart opens with
-    // more than just the POI and the plan already drawn.
+    // more than just the POI and the plan already drawn. Each one is a
+    // ray anchored at its own origin candle, extending to the latest
+    // candle -- same pattern as Equilibrium below, not a stub centered on
+    // nothing. Two of these can land on the exact same origin candle (a
+    // swept low is almost by definition the same candle as the swing low
+    // it swept) -- STACK_PX staggers same-candle labels vertically so
+    // they read legibly instead of landing on top of each other.
+    const STACK_PX = 18;
+    const seenAtIndex = new Map<number, number>();
+    const stackOffset = (index: number): number => {
+      const n = seenAtIndex.get(index) ?? 0;
+      seenAtIndex.set(index, n + 1);
+      return -n * STACK_PX;
+    };
+
     for (const s of annotations.swings) {
       const price = Math.round(s.price).toLocaleString("en-US");
       series.attachPrimitive(
@@ -182,6 +217,8 @@ export function ChartSurface({ className }: { className?: string }) {
           { time: unix(candles[s.index].openTime), price: s.price },
           `${s.kind === "high" ? "H" : "L"} ${price}`,
           SYSTEM_COLOR,
+          lastTime,
+          stackOffset(s.index),
         ),
       );
     }
@@ -191,6 +228,8 @@ export function ChartSurface({ className }: { className?: string }) {
           { time: unix(candles[e.index].openTime), price: e.price },
           e.label,
           SYSTEM_COLOR,
+          lastTime,
+          stackOffset(e.index),
         ),
       );
     }
@@ -208,17 +247,31 @@ export function ChartSurface({ className }: { className?: string }) {
         { time: lastTime, price: annotations.range.equilibrium },
         "Equilibrium",
         SYSTEM_COLOR,
+        lastTime,
       ),
     );
 
-    chart.timeScale().fitContent();
+    // Restore wherever the trader last left the view (per instrument +
+    // timeframe); only fall back to the default fit (and the explicit
+    // thinner spacing fitContent's own wide auto-fit would otherwise
+    // leave in place) if nothing was saved yet.
+    const savedView = loadChartView(chartViewScopeRef.current);
+    if (savedView) {
+      chart.timeScale().setVisibleLogicalRange(savedView);
+    } else {
+      chart.timeScale().fitContent();
+      chart.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
+    }
 
     chart.subscribeCrosshairMove((param) => {
       const d = param.seriesData.get(series) as CandlestickData<Time> | undefined;
       if (d) setBar({ open: d.open, high: d.high, low: d.low, close: d.close });
       else setBar(candles[candles.length - 1]);
     });
-    chart.timeScale().subscribeVisibleLogicalRangeChange(() => setToolbarTick((t) => t + 1));
+    chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      setToolbarTick((t) => t + 1);
+      if (range) saveChartView(chartViewScopeRef.current, range);
+    });
 
     const controller = new DrawingController(chart, series, hostRef.current, store, {
       onCommitted: () => setActiveTool("cross"),
@@ -437,7 +490,11 @@ export function ChartSurface({ className }: { className?: string }) {
           {RANGES.map((r) => (
             <button
               key={r}
-              onClick={() => chartRef.current?.timeScale().fitContent()}
+              onClick={() => {
+                const ts = chartRef.current?.timeScale();
+                ts?.fitContent();
+                ts?.applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
+              }}
               className={cn(
                 "focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors",
                 r === "1D" ? "text-fg" : "text-fg-subtle hover:text-fg",
