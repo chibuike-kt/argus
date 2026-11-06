@@ -12,6 +12,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/cursor"
 	"github.com/chibuike-kt/argus/internal/instruments"
+	"github.com/chibuike-kt/argus/internal/quant"
 	"github.com/chibuike-kt/argus/internal/setups"
 )
 
@@ -206,12 +207,28 @@ func (p *processor) processInstrument(ctx context.Context, inst instruments.Inst
 		if wrote {
 			result.eventsWritten++
 		}
-		// Advanced only now, after BOTH the engine step and setups
-		// reconciliation above have committed -- a crash between them
-		// (or at the simulated hook above) leaves the persisted
-		// cursor at the PREVIOUS candle's close_time, so a restart
-		// reprocesses this exact candle. Safe: analysis.Engine and
-		// setups.Reconcile are both idempotent over an
+
+		// Stop-breach invalidation (spec section 15.2, v0.12.1), after
+		// reconcileSetup: section 7's close-through invalidation
+		// (v0.12.0) can clear the live protected anchor on this exact
+		// candle, which turns reconcileSetup's own live plan into
+		// PlanNone -- a no-op Reconcile never acts on. This evaluates
+		// every non-terminal setup directly against its own recorded
+		// stop instead, independent of the live anchor, so a breach is
+		// never lost to that ordering.
+		invalidated, err := setups.InvalidateBreached(ctx, p.db, p.setupsStore, inst.ID, timeframe, c.OpenTime, quant.Price(c.Close), algorithmVersion, c.CloseTime, p.clk.Now())
+		if err != nil {
+			return result, fmt.Errorf("invalidate breached setups open_time=%s: %w", c.OpenTime, err)
+		}
+		result.eventsWritten += invalidated
+
+		// Advanced only now, after the engine step, setups
+		// reconciliation, and stop-breach invalidation above have all
+		// committed -- a crash anywhere among them (or at the
+		// simulated hook above) leaves the persisted cursor at the
+		// PREVIOUS candle's close_time, so a restart reprocesses this
+		// exact candle. Safe: analysis.Engine, setups.Reconcile and
+		// setups.InvalidateBreached are all idempotent over an
 		// already-processed position (worker-hardening brief, Part B).
 		now := p.clk.Now()
 		if err := p.cursorStore.SetAt(ctx, inst.ID, timeframe, c.CloseTime, now); err != nil {

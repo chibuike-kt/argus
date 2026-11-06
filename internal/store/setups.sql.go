@@ -237,6 +237,88 @@ func (q *Queries) ListEventsForSetup(ctx context.Context, setupID int64) ([]Setu
 	return items, nil
 }
 
+const listNonTerminalSetupsForBreachCheck = `-- name: ListNonTerminalSetupsForBreachCheck :many
+SELECT s.id, s.instrument_id, s.timeframe, s.poi_type, s.poi_source_candle_id, s.direction, s.strategy_version, s.state, s.poi_source_candle_revision, s.plan_snapshot, s.last_event_id, s.evaluation_time, s.algorithm_version, s.created_at, s.updated_at, c.open_time AS poi_open_time
+FROM setups s
+JOIN candles c ON c.id = s.poi_source_candle_id
+WHERE s.instrument_id = $1 AND s.timeframe = $2
+  AND s.state IN ('detected', 'actionable', 'triggered')
+ORDER BY s.id
+`
+
+type ListNonTerminalSetupsForBreachCheckParams struct {
+	InstrumentID int64  `json:"instrument_id"`
+	Timeframe    string `json:"timeframe"`
+}
+
+type ListNonTerminalSetupsForBreachCheckRow struct {
+	ID                      int64           `json:"id"`
+	InstrumentID            int64           `json:"instrument_id"`
+	Timeframe               string          `json:"timeframe"`
+	PoiType                 string          `json:"poi_type"`
+	PoiSourceCandleID       int64           `json:"poi_source_candle_id"`
+	Direction               string          `json:"direction"`
+	StrategyVersion         string          `json:"strategy_version"`
+	State                   string          `json:"state"`
+	PoiSourceCandleRevision int32           `json:"poi_source_candle_revision"`
+	PlanSnapshot            json.RawMessage `json:"plan_snapshot"`
+	LastEventID             sql.NullInt64   `json:"last_event_id"`
+	EvaluationTime          time.Time       `json:"evaluation_time"`
+	AlgorithmVersion        string          `json:"algorithm_version"`
+	CreatedAt               time.Time       `json:"created_at"`
+	UpdatedAt               time.Time       `json:"updated_at"`
+	PoiOpenTime             time.Time       `json:"poi_open_time"`
+}
+
+// ListNonTerminalSetupsForBreachCheck is InvalidateBreached's own read
+// path (internal/setups, spec v0.12.1): every non-terminal setup
+// (detected, actionable, triggered -- invalidated is terminal and
+// excluded here, not just guarded again downstream) for (instrument_id,
+// timeframe), joined to its own POI formation candle's open_time so the
+// caller can enforce "the breaching candle must be strictly later than
+// the setup's POI formation candle" without a second round trip per
+// setup. Ordered by id for determinism, matching this package's other
+// per-instrument list queries.
+func (q *Queries) ListNonTerminalSetupsForBreachCheck(ctx context.Context, arg ListNonTerminalSetupsForBreachCheckParams) ([]ListNonTerminalSetupsForBreachCheckRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNonTerminalSetupsForBreachCheck, arg.InstrumentID, arg.Timeframe)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListNonTerminalSetupsForBreachCheckRow{}
+	for rows.Next() {
+		var i ListNonTerminalSetupsForBreachCheckRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstrumentID,
+			&i.Timeframe,
+			&i.PoiType,
+			&i.PoiSourceCandleID,
+			&i.Direction,
+			&i.StrategyVersion,
+			&i.State,
+			&i.PoiSourceCandleRevision,
+			&i.PlanSnapshot,
+			&i.LastEventID,
+			&i.EvaluationTime,
+			&i.AlgorithmVersion,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.PoiOpenTime,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSetupsByInstrument = `-- name: ListSetupsByInstrument :many
 SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at FROM setups
 WHERE instrument_id = $1 AND timeframe = $2

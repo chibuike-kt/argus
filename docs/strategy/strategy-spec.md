@@ -1,7 +1,7 @@
 # ARGUS Strategy Specification
 
-- Version: 0.12.0
-- Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure; batch 7: setup lifecycle persistence; batch 8: anchor invalidation by close-through, setup creation state)
+- Version: 0.12.1
+- Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure; batch 7: setup lifecycle persistence; batch 8: anchor invalidation by close-through, setup creation state; stop-breach invalidation of persisted setups)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
 
@@ -563,7 +563,9 @@ Plan status (minimal, derived, as of asOf):
 
 - none: section 13 returns no POI.
 - invalidated: a finalized candle has closed strictly through the protected level (below the
-  protected low for bullish, above the protected high for bearish). [S]
+  protected low for bullish, above the protected high for bearish). [S] A persisted setup is
+  invalidated against the stop in its own snapshot even after section 7 has cleared the live
+  anchor (see section 15.2).
 - triggered: not invalidated, and a finalized candle after the POI formed has reached the entry
   level (bullish: a candle low at or below the entry; bearish: a candle high at or above the entry). [R]
 - actionable: a POI is present, the setup is not invalidated, and price has not yet reached the
@@ -613,6 +615,18 @@ the event for the mapped state, so the setup is never persisted in a state that 
 the plan it was created from. No state the plan did not pass through at an evaluated step is
 invented: a setup first seen as `PlanTriggered` records `detected` then `triggered`, not an
 intermediate `actionable`. A step with `PlanNone` creates nothing, as before.
+
+Stop-breach invalidation. `[S]` rule from section 14, `[R]` mechanism. A persisted setup is
+invalidated when a finalized candle closes strictly through the stop recorded in its own plan
+snapshot (below the stop for bullish, above it for bearish). This is evaluated on every finalized
+candle for every non-terminal setup of the instrument and timeframe, independently of whether that
+setup's POI is currently the POI section 13 resolves, and independently of whether the live
+protected anchor still exists. The candle must be strictly later than the setup's POI formation
+candle. When it fires, the engine appends the `invalidated` event and moves the setup to
+`invalidated` in the same step, with the same precedence as section 14 (invalidated outranks
+triggered outranks actionable). Because section 7 now clears an anchor on the same close that
+breaches it, the live plan for that structure becomes `PlanNone` on that candle; the persisted
+setup, not the live plan, is therefore the record of the invalidation.
 
 The setup lifecycle is a persisted shadow of that same value's
 transitions over time, plus the one state `PlanStatus` has no reason to represent (there being no
@@ -685,11 +699,11 @@ does not quietly resolve them by implication. `Detected` and `Actionable` are co
 fewer states than ADR-010's proposed vocabulary precisely because splitting them further would
 require deciding confluence/condition grouping first.
 
-Not decided: what happens to a non-terminal setup whose identity stops being the current POI.
-Today an identity is evaluated only while it is the POI `ResolveTradePlan` returns, so a
-superseded setup keeps its last recorded state indefinitely. Reconciling superseded identities
-needs a way to evaluate a plan for a POI that is no longer current, which sections 12 to 14 do
-not define. `[U]` Left open on purpose; do not implement or guess.
+Not decided: the `actionable` and `triggered` transitions of a non-terminal setup whose identity
+stops being the current POI. Invalidation of such a setup is decided (section 15.2, stop-breach).
+Whether it should still be evaluated for `triggered` after its POI is superseded needs a way to
+evaluate a plan for a POI that is no longer current, which sections 12 to 14 do not define. `[U]`
+Left open on purpose; do not implement or guess.
 
 ## Scope of this version
 
