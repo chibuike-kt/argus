@@ -58,7 +58,7 @@ func Reconcile(ctx context.Context, s *Store, instrumentID int64, timeframe stri
 	existing, err := s.GetByIdentity(ctx, instrumentID, timeframe, id)
 	switch {
 	case errors.Is(err, ErrSetupNotFound):
-		return reconcileNew(ctx, s, instrumentID, timeframe, id, poiRevision, snapshot, version, asOf, now)
+		return reconcileNew(ctx, s, instrumentID, timeframe, id, poiRevision, snapshot, plan.Status, version, asOf, now)
 	case err != nil:
 		return Setup{}, nil, fmt.Errorf("setups: reconcile: %w", err)
 	default:
@@ -66,9 +66,19 @@ func Reconcile(ctx context.Context, s *Store, instrumentID int64, timeframe stri
 	}
 }
 
-// reconcileNew creates a brand-new identity in StateDetected (spec
-// section 15.1) and its paired EventDetected row.
-func reconcileNew(ctx context.Context, s *Store, instrumentID int64, timeframe string, id identity, poiRevision int32, snapshot PlanSnapshot, version string, asOf, now time.Time) (Setup, *SetupEvent, error) {
+// reconcileNew creates a brand-new identity, always starting in
+// StateDetected with its paired EventDetected row (spec section 15.1),
+// then -- creation state, spec section 15.2, batch 8 -- if status's own
+// mapped state is not StateDetected, applies that transition in the
+// same step, exactly as reconcileExisting's own "stateChanged" branch
+// does: one further event for the mapped state, never the intermediate
+// states the plan was never actually observed in. A setup is never left
+// persisted in a state that disagrees with the plan it was created
+// from.
+//
+// status is never PlanNone here (Reconcile's own guard); stateFromPlanStatus
+// therefore never fails for it.
+func reconcileNew(ctx context.Context, s *Store, instrumentID int64, timeframe string, id identity, poiRevision int32, snapshot PlanSnapshot, status analysis.PlanStatus, version string, asOf, now time.Time) (Setup, *SetupEvent, error) {
 	created, err := s.Insert(ctx, newSetup{
 		InstrumentID:            instrumentID,
 		Timeframe:               timeframe,
@@ -83,7 +93,7 @@ func reconcileNew(ctx context.Context, s *Store, instrumentID int64, timeframe s
 		return Setup{}, nil, err
 	}
 
-	event, err := s.InsertEvent(ctx, newSetupEvent{
+	detected, err := s.InsertEvent(ctx, newSetupEvent{
 		SetupID:                 created.ID,
 		Type:                    EventDetected,
 		Plan:                    snapshot,
@@ -96,18 +106,42 @@ func reconcileNew(ctx context.Context, s *Store, instrumentID int64, timeframe s
 		return Setup{}, nil, err
 	}
 
+	finalState := StateDetected
+	lastEvent := detected
+
+	targetState, err := stateFromPlanStatus(status)
+	if err != nil {
+		return Setup{}, nil, fmt.Errorf("setups: reconcile new setup: %w", err)
+	}
+	if targetState != StateDetected {
+		ev, err := s.InsertEvent(ctx, newSetupEvent{
+			SetupID:                 created.ID,
+			Type:                    eventTypeFromState(targetState),
+			Plan:                    snapshot,
+			POISourceCandleID:       id.POISourceCandleID,
+			POISourceCandleRevision: poiRevision,
+			EvaluationTime:          asOf,
+			AlgorithmVersion:        version,
+		})
+		if err != nil {
+			return Setup{}, nil, err
+		}
+		finalState = targetState
+		lastEvent = ev
+	}
+
 	updated, err := s.Update(ctx, created.ID, update{
-		State:                   StateDetected,
+		State:                   finalState,
 		POISourceCandleRevision: poiRevision,
 		Plan:                    snapshot,
-		LastEventID:             event.ID,
+		LastEventID:             lastEvent.ID,
 		EvaluationTime:          asOf,
 		AlgorithmVersion:        version,
 	}, now)
 	if err != nil {
 		return Setup{}, nil, err
 	}
-	return updated, &event, nil
+	return updated, &lastEvent, nil
 }
 
 // reconcileExisting reconciles a new evaluation step against an

@@ -104,24 +104,6 @@ func diffSnapshots(t *testing.T, label string, before, after []string) {
 // candles the second time through, not just for the small scenarios
 // the other integration tests use.
 func TestIntegration_IdempotentFullRun_RerunAfterCursorWipeProducesNoChange(t *testing.T) {
-	// Skipped with a reason, not deleted or weakened: this test found a
-	// real divergence (worker-hardening brief, Part E -- reported to
-	// the architect, not fixed here per CLAUDE.md rule 3). Exactly 3 of
-	// 17 setups in the full dev dataset end up at state=detected after
-	// one full run despite their own plan_snapshot already reading
-	// status=triggered, and only reach state=triggered after a SECOND
-	// full replay over the identical, already-populated data -- not
-	// duplicate rows or corruption, a genuine "stuck at detected"
-	// idempotency violation. All 3 affected identities sit in the same
-	// qmr/order_block flapping region Part A's stale-protected-anchor
-	// finding already documents (same underlying order block candle,
-	// a qmr identity and a plain order_block identity for it created
-	// one minute apart), so this is very likely a second symptom of
-	// that same section 7/12-14 defect rather than an unrelated one,
-	// but that connection is not proven here. Un-skip once the
-	// architect resolves that area.
-	t.Skip("worker-hardening brief Part E: real idempotency divergence found and reported, not fixed here (CLAUDE.md rule 3) -- see test's own doc comment")
-
 	db := testWorkerDB(t)
 	logger := quietLogger()
 	ctx := context.Background()

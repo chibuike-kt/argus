@@ -120,8 +120,18 @@ func TestIntegration_SetupsEndpoints_RealStore(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if len(got) != 1 || got[0].EventType != SetupEventEventType("detected") {
-			t.Fatalf("got %+v, want one Detected event", got)
+		// Creation state (spec v0.12.0 section 15.2, batch 8): plan's
+		// own Status is Actionable from the first evaluation, so
+		// Reconcile records detected then, in the same call, actionable
+		// -- two events, not one.
+		wantTypes := []SetupEventEventType{"detected", "actionable"}
+		if len(got) != len(wantTypes) {
+			t.Fatalf("got %+v, want %d events %v", got, len(wantTypes), wantTypes)
+		}
+		for i, want := range wantTypes {
+			if got[i].EventType != want {
+				t.Fatalf("got[%d].EventType = %v, want %v", i, got[i].EventType, want)
+			}
 		}
 	})
 }

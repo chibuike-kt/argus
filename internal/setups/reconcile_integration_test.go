@@ -67,11 +67,12 @@ func TestIntegration_Reconcile_DetectedActionableTriggered(t *testing.T) {
 	}
 
 	// Step 1 (asOf=51, right as the POI exists): TradePlan.Status is
-	// already Actionable on this very first step (spec section 15.2:
-	// Detected and Actionable are the same underlying TradePlan.Status
-	// value, differentiated only by setups' own "is this the first
-	// persisted row" bookkeeping) -- Reconcile must still create it as
-	// Detected, not Actionable, on this first call.
+	// already Actionable on this very first step. Creation state (spec
+	// section 15.2, batch 8): Reconcile records detected then, in the
+	// same call, the mapped state -- here Actionable -- so the setup
+	// is never persisted disagreeing with the plan it was created from.
+	// The returned event is the last one appended (Actionable); the
+	// full two-event history is checked at the end of this test.
 	plan1, ok, err := analysis.ResolveTradePlan(ctx, analysisStore, candles, state, et(51), time.Minute, analysis.DefaultMinLegSpan, quant.Price(1))
 	if err != nil || !ok {
 		t.Fatalf("ResolveTradePlan (asOf=51): ok=%v err=%v", ok, err)
@@ -84,18 +85,17 @@ func TestIntegration_Reconcile_DetectedActionableTriggered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile (step 1): %v", err)
 	}
-	if event1 == nil || event1.Type != EventDetected {
-		t.Fatalf("Reconcile (step 1): event = %+v, want EventDetected", event1)
+	if event1 == nil || event1.Type != EventActionable {
+		t.Fatalf("Reconcile (step 1): event = %+v, want EventActionable", event1)
 	}
-	if setup1.State != StateDetected {
-		t.Fatalf("setup1.State = %v, want StateDetected", setup1.State)
+	if setup1.State != StateActionable {
+		t.Fatalf("setup1.State = %v, want StateActionable", setup1.State)
 	}
 
 	// Step 2 (asOf=52, same underlying Status=Actionable, nothing in
-	// the market changed): the setup's own state must still move
-	// Detected -> Actionable, since that transition depends on
-	// setups' own stored state, not on whether TradePlan.Status itself
-	// changed.
+	// the market changed): the setup is already Actionable as of step
+	// 1's own creation, so this step is a pure no-op -- no event, same
+	// state, same row.
 	plan2, ok, err := analysis.ResolveTradePlan(ctx, analysisStore, candles, state, et(52), time.Minute, analysis.DefaultMinLegSpan, quant.Price(1))
 	if err != nil || !ok {
 		t.Fatalf("ResolveTradePlan (asOf=52): ok=%v err=%v", ok, err)
@@ -107,8 +107,8 @@ func TestIntegration_Reconcile_DetectedActionableTriggered(t *testing.T) {
 	if setup2.ID != setup1.ID {
 		t.Fatalf("setup2.ID = %d, want %d (same identity, same row)", setup2.ID, setup1.ID)
 	}
-	if event2 == nil || event2.Type != EventActionable {
-		t.Fatalf("Reconcile (step 2): event = %+v, want EventActionable", event2)
+	if event2 != nil {
+		t.Fatalf("Reconcile (step 2): event = %+v, want nil (no-op)", event2)
 	}
 	if setup2.State != StateActionable {
 		t.Fatalf("setup2.State = %v, want StateActionable", setup2.State)
@@ -179,6 +179,104 @@ func TestIntegration_Reconcile_DetectedActionableTriggered(t *testing.T) {
 	}
 }
 
+// TestIntegration_Reconcile_CreationState proves spec section 15.2's
+// batch 8 "creation state" rule directly, for each of the three
+// non-Detected statuses a brand-new identity's first evaluation can
+// report: the setup ends in the mapped state, never left at Detected
+// disagreeing with its own plan_snapshot, and its history is exactly
+// two events (detected, then the mapped one) -- never an invented
+// intermediate state the plan was never actually observed in.
+func TestIntegration_Reconcile_CreationState(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    analysis.PlanStatus
+		wantState State
+		wantEvent EventType
+	}{
+		{"first seen actionable", analysis.PlanActionable, StateActionable, EventActionable},
+		{"first seen triggered", analysis.PlanTriggered, StateTriggered, EventTriggered},
+		{"first seen invalidated", analysis.PlanInvalidated, StateInvalidated, EventInvalidated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			instrumentID := testInstrument(t, db)
+			store := NewStore(db)
+			ctx := context.Background()
+			candleID := oneCandle(t, db, instrumentID, 1, 85)
+
+			setup, event, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(tc.status, candleID, 1), testVersion, et(1), time.Now())
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if setup.State != tc.wantState {
+				t.Fatalf("setup.State = %v, want %v", setup.State, tc.wantState)
+			}
+			if event == nil || event.Type != tc.wantEvent {
+				t.Fatalf("event = %+v, want %v", event, tc.wantEvent)
+			}
+
+			events, err := store.ListEvents(ctx, setup.ID)
+			if err != nil {
+				t.Fatalf("ListEvents: %v", err)
+			}
+			wantTypes := []EventType{EventDetected, tc.wantEvent}
+			if len(events) != len(wantTypes) {
+				t.Fatalf("ListEvents = %+v, want types %v", events, wantTypes)
+			}
+			for i, want := range wantTypes {
+				if events[i].Type != want {
+					t.Fatalf("events[%d].Type = %v, want %v", i, events[i].Type, want)
+				}
+			}
+		})
+	}
+}
+
+// TestIntegration_Reconcile_CreationThenTriggeredNextStep proves a
+// setup first seen as Actionable (detected then actionable, two
+// events) that reaches PlanTriggered on a LATER evaluation step ends
+// Triggered with exactly three events -- the ordinary transition path
+// (reconcileExisting), unaffected by creation state, composing
+// correctly with it.
+func TestIntegration_Reconcile_CreationThenTriggeredNextStep(t *testing.T) {
+	db := testDB(t)
+	instrumentID := testInstrument(t, db)
+	store := NewStore(db)
+	ctx := context.Background()
+	candleID := oneCandle(t, db, instrumentID, 1, 85)
+
+	created, event, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanActionable, candleID, 1), testVersion, et(1), time.Now())
+	if err != nil {
+		t.Fatalf("Reconcile (detected+actionable): %v", err)
+	}
+	if created.State != StateActionable || event == nil || event.Type != EventActionable {
+		t.Fatalf("Reconcile (detected+actionable): setup=%+v event=%+v", created, event)
+	}
+
+	updated, event2, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanTriggered, candleID, 1), testVersion, et(2), time.Now())
+	if err != nil {
+		t.Fatalf("Reconcile (triggered): %v", err)
+	}
+	if updated.State != StateTriggered || event2 == nil || event2.Type != EventTriggered {
+		t.Fatalf("Reconcile (triggered): setup=%+v event=%+v", updated, event2)
+	}
+
+	events, err := store.ListEvents(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	wantTypes := []EventType{EventDetected, EventActionable, EventTriggered}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("ListEvents = %+v, want types %v", events, wantTypes)
+	}
+	for i, want := range wantTypes {
+		if events[i].Type != want {
+			t.Fatalf("events[%d].Type = %v, want %v", i, events[i].Type, want)
+		}
+	}
+}
+
 // bullishPlan is a hand-built, minimal but well-formed bullish
 // analysis.TradePlan -- used by the fixtures below that exercise
 // Reconcile's own identity/amendment/terminal-guard logic directly,
@@ -219,12 +317,15 @@ func TestIntegration_Reconcile_InvalidatedStaysTerminal(t *testing.T) {
 
 	candleID := oneCandle(t, db, instrumentID, 1, 85)
 
+	// Creation state (spec section 15.2, batch 8): Status is Actionable
+	// on the first evaluation, so this already lands on StateActionable
+	// (detected then actionable, same call), not StateDetected.
 	setup1, event1, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanActionable, candleID, 1), testVersion, et(1), time.Now())
 	if err != nil {
-		t.Fatalf("Reconcile (detected): %v", err)
+		t.Fatalf("Reconcile (detected+actionable): %v", err)
 	}
-	if event1 == nil || event1.Type != EventDetected || setup1.State != StateDetected {
-		t.Fatalf("Reconcile (detected): setup=%+v event=%+v", setup1, event1)
+	if event1 == nil || event1.Type != EventActionable || setup1.State != StateActionable {
+		t.Fatalf("Reconcile (detected+actionable): setup=%+v event=%+v", setup1, event1)
 	}
 
 	setup2, event2, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanInvalidated, candleID, 1), testVersion, et(2), time.Now())
@@ -287,8 +388,11 @@ func TestIntegration_Reconcile_ReEntry(t *testing.T) {
 	if second.POISourceCandleID != secondCandleID {
 		t.Fatalf("second.POISourceCandleID = %d, want %d", second.POISourceCandleID, secondCandleID)
 	}
-	if event == nil || event.Type != EventDetected || second.State != StateDetected {
-		t.Fatalf("Reconcile (second, detected): setup=%+v event=%+v", second, event)
+	// Creation state (spec section 15.2, batch 8): same as the first
+	// identity, Status is Actionable on this first evaluation, so the
+	// re-entered identity also lands directly on StateActionable.
+	if event == nil || event.Type != EventActionable || second.State != StateActionable {
+		t.Fatalf("Reconcile (second, detected+actionable): setup=%+v event=%+v", second, event)
 	}
 
 	// Both identities independently persist and are listable -- the
@@ -315,35 +419,24 @@ func TestIntegration_Reconcile_Amendment(t *testing.T) {
 
 	candleID := oneCandle(t, db, instrumentID, 1, 85)
 
+	// Creation state (spec section 15.2, batch 8): Status is Actionable
+	// on this first evaluation, so this lands directly on StateActionable
+	// (detected then actionable, same call) -- no separate step is
+	// needed to reach Actionable before the amendment below, unlike
+	// before batch 8.
 	created, event, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanActionable, candleID, 1), testVersion, et(1), time.Now())
 	if err != nil {
-		t.Fatalf("Reconcile (detected, revision=1): %v", err)
+		t.Fatalf("Reconcile (detected+actionable, revision=1): %v", err)
 	}
-	if event == nil || event.Type != EventDetected {
-		t.Fatalf("Reconcile (detected): event = %+v", event)
-	}
-
-	// Move Detected -> Actionable first (same revision, Status
-	// unchanged from the creation step but the setup's OWN stored
-	// state was still Detected, spec section 15.2), so the next step
-	// below changes revision ALONE -- otherwise that step's stateChanged
-	// would also be true (Detected -> Actionable), producing an
-	// amendment AND a transition together, which is a real, correctly
-	// handled case (reconcileExisting fires both), but not the one this
-	// fixture means to isolate.
-	toActionable, event1b, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanActionable, candleID, 1), testVersion, et(2), time.Now())
-	if err != nil {
-		t.Fatalf("Reconcile (actionable, revision=1): %v", err)
-	}
-	if event1b == nil || event1b.Type != EventActionable || toActionable.State != StateActionable {
-		t.Fatalf("Reconcile (actionable): setup=%+v event=%+v", toActionable, event1b)
+	if event == nil || event.Type != EventActionable || created.State != StateActionable {
+		t.Fatalf("Reconcile (detected+actionable): setup=%+v event=%+v", created, event)
 	}
 
 	// The same source candle, corrected (revision 1 -> 2), same
 	// Status: identity is unchanged (revision is deliberately excluded
 	// from it, spec section 15.3), so this must amend the existing row,
 	// not create a second one, and must not change State.
-	amended, event2, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanActionable, candleID, 2), testVersion, et(3), time.Now())
+	amended, event2, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanActionable, candleID, 2), testVersion, et(2), time.Now())
 	if err != nil {
 		t.Fatalf("Reconcile (amendment): %v", err)
 	}
@@ -393,19 +486,25 @@ func TestIntegration_Reconcile_AmendmentAndTransitionTogether(t *testing.T) {
 
 	candleID := oneCandle(t, db, instrumentID, 1, 85)
 
+	// Creation state (spec section 15.2, batch 8) already lands this on
+	// StateActionable (detected then actionable, same call), so the
+	// combined amendment+transition step below must use a DIFFERENT
+	// target status (Triggered) to still exercise reconcileExisting's
+	// "both in the same step" path -- creation absorbed the
+	// Detected->Actionable jump this test used to rely on.
 	created, _, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanActionable, candleID, 1), testVersion, et(1), time.Now())
 	if err != nil {
-		t.Fatalf("Reconcile (detected, revision=1): %v", err)
+		t.Fatalf("Reconcile (detected+actionable, revision=1): %v", err)
 	}
 
-	// Revision 1 -> 2 AND the mapped state Detected -> Actionable, in
+	// Revision 1 -> 2 AND the mapped state Actionable -> Triggered, in
 	// the same call.
-	updated, lastEvent, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanActionable, candleID, 2), testVersion, et(2), time.Now())
+	updated, lastEvent, err := Reconcile(ctx, store, instrumentID, "1m", bullishPlan(analysis.PlanTriggered, candleID, 2), testVersion, et(2), time.Now())
 	if err != nil {
 		t.Fatalf("Reconcile (amendment + transition): %v", err)
 	}
-	if updated.State != StateActionable {
-		t.Fatalf("updated.State = %v, want StateActionable", updated.State)
+	if updated.State != StateTriggered {
+		t.Fatalf("updated.State = %v, want StateTriggered", updated.State)
 	}
 	if updated.POISourceCandleRevision != 2 {
 		t.Fatalf("updated.POISourceCandleRevision = %d, want 2", updated.POISourceCandleRevision)
@@ -414,15 +513,19 @@ func TestIntegration_Reconcile_AmendmentAndTransitionTogether(t *testing.T) {
 	// (reconcileExisting's own documented order: amendment, then
 	// transition) -- the full, ordered history below is what proves
 	// both actually happened, not just the last one.
-	if lastEvent == nil || lastEvent.Type != EventActionable {
-		t.Fatalf("Reconcile (amendment + transition): last event = %+v, want EventActionable", lastEvent)
+	if lastEvent == nil || lastEvent.Type != EventTriggered {
+		t.Fatalf("Reconcile (amendment + transition): last event = %+v, want EventTriggered", lastEvent)
 	}
 
 	events, err := store.ListEvents(ctx, created.ID)
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
-	wantTypes := []EventType{EventDetected, EventAmendment, EventActionable}
+	// Creation's own two events (Detected, Actionable), then the second
+	// call's two (Amendment, Triggered) -- four events total, one
+	// EventType count this brief's own batch 8 change actually grew
+	// (from three before creation state existed).
+	wantTypes := []EventType{EventDetected, EventActionable, EventAmendment, EventTriggered}
 	if len(events) != len(wantTypes) {
 		t.Fatalf("ListEvents = %+v, want types %v", events, wantTypes)
 	}

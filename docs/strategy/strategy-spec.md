@@ -1,7 +1,7 @@
 # ARGUS Strategy Specification
 
-- Version: 0.11.0
-- Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure; batch 7: setup lifecycle persistence)
+- Version: 0.12.1
+- Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure; batch 7: setup lifecycle persistence; batch 8: anchor invalidation by close-through, setup creation state; stop-breach invalidation of persisted setups)
 - Last updated: 27 October 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
 
@@ -185,7 +185,7 @@ break is treated as a sweep-validated swing structure (section 7).
 
 ## 7. Protected structure and sweep-validated breaks
 
-_Provenance: [S] the sweep-then-break sequence (Reading B); [A] two independent anchors; [R] V1 couples anchor invalidation to the mechanical CHOCH, a documented discrepancy from the intended close-through-the-protected-level rule, revisit per open item 2._
+_Provenance: [S] the sweep-then-break sequence (Reading B), and anchor invalidation by a finalized close strictly through the protected level; [A] two independent anchors; [R] the CHOCH-coupled invalidation retained alongside close-through, a documented discrepancy, revisit per open item 2._
 
 This section models a sequence of two distinct events on opposite sides of the market, not
 a property of a single swing. Liquidity is taken on one side (a sweep, section 6), then
@@ -213,20 +213,24 @@ Protected anchors (one per side, independent):
   extends and newer confirmed swings form. It is not "the latest confirmed swing" on that
   side.
 - Invalidation. Keep three concepts distinct. The protected anchor is the designated
-  sweep-origin level (above). The mechanical V1 CHOCH is a close through the latest confirmed
-  opposing swing (section 3). Anchor invalidation, as the strategy intends it, is a close
-  strictly through the protected level itself, and the trader's model points to that one. V1
-  does not implement it. Instead V1 couples invalidation to the mechanical CHOCH: it clears the
-  bullish protected low when a bullish-to-bearish CHOCH fires, and the bearish protected high
-  when a bullish CHOCH fires. The two rules can differ, because the CHOCH reference is the
-  latest confirmed opposing swing and may be an internal higher low above the protected low (or
-  a lower high below the protected high), so V1 may clear an anchor that price never closed
-  through. This coupling is a documented known discrepancy, tagged [R] and revisited with the
-  structure engine (open item 2); it is not a claim that both the mechanical rule and the
-  close-through-the-level rule are enforced. A CHOCH requires a finalized close, so a wick never
-  invalidates. A CHOCH clears only the anchor of the direction being left, never the one its own
-  result validates against. Superseding an anchor with a newer qualifying sweep is supersession,
-  not invalidation.
+  sweep-origin level (above). The mechanical CHOCH is a close through the latest confirmed
+  opposing swing (section 3). Anchor invalidation is a finalized close strictly through the
+  protected level itself. `[S]` The engine enforces both of the following, each independently:
+  - Close-through invalidation. `[S]` A finalized candle whose close is strictly below the
+    protected low's price clears the protected low. A finalized candle whose close is strictly
+    above the protected high's price clears the protected high. A wick through the level never
+    invalidates, only a close. This is evaluated on every finalized candle, before that candle's
+    break decision is made. Each anchor is cleared only by its own close-through, so the two
+    sides stay independent.
+  - CHOCH coupling. `[R]` As in V1, a CHOCH also clears the anchor of the direction being left:
+    the protected low when a bullish-to-bearish CHOCH fires, the protected high when a
+    bearish-to-bullish CHOCH fires, and never the anchor its own result validates against. This
+    coupling is retained unchanged in v0.12.0. It can clear an anchor that price never closed
+    through (the CHOCH reference may be an internal swing nearer than the protected level), so it
+    remains a documented known discrepancy, revisited per open item 2. Whether to retire it now
+    that close-through invalidation exists is not decided here.
+  A CHOCH or a close-through requires a finalized close. Superseding an anchor with a newer
+  qualifying sweep is supersession, not invalidation.
 - Supersession. A protected low is replaced only by a newer swing that itself qualifies as a
   protected low under this section: a new sell-side sweep that reclaims and whose
   reversal-origin low confirms as a fractal. The protected high is superseded only by a newer
@@ -559,7 +563,9 @@ Plan status (minimal, derived, as of asOf):
 
 - none: section 13 returns no POI.
 - invalidated: a finalized candle has closed strictly through the protected level (below the
-  protected low for bullish, above the protected high for bearish). [S]
+  protected low for bullish, above the protected high for bearish). [S] A persisted setup is
+  invalidated against the stop in its own snapshot even after section 7 has cleared the live
+  anchor (see section 15.2).
 - triggered: not invalidated, and a finalized candle after the POI formed has reached the entry
   level (bullish: a candle low at or below the entry; bearish: a candle high at or above the entry). [R]
 - actionable: a POI is present, the setup is not invalidated, and price has not yet reached the
@@ -599,12 +605,35 @@ section 14 already defines it.
 `PlanStatus` (section 14) already defines the complete, already-decided precedence for the part
 of the lifecycle this spec can currently compute: `PlanInvalidated` outranks `PlanTriggered`,
 which outranks `PlanActionable`, evaluated within the same candle window
-(`resolvePlanStatus`). The setup lifecycle is a persisted shadow of that same value's
+(`resolvePlanStatus`).
+
+Creation state. `[R]` The persisted state of a setup always equals the lifecycle state mapped from
+`TradePlan.Status` at the most recent evaluation of that identity. When a setup is created at a
+step whose `TradePlan.Status` is `PlanActionable`, `PlanTriggered` or `PlanInvalidated`, the
+engine records the `detected` event and, in the same transaction and the same evaluation step,
+the event for the mapped state, so the setup is never persisted in a state that disagrees with
+the plan it was created from. No state the plan did not pass through at an evaluated step is
+invented: a setup first seen as `PlanTriggered` records `detected` then `triggered`, not an
+intermediate `actionable`. A step with `PlanNone` creates nothing, as before.
+
+Stop-breach invalidation. `[S]` rule from section 14, `[R]` mechanism. A persisted setup is
+invalidated when a finalized candle closes strictly through the stop recorded in its own plan
+snapshot (below the stop for bullish, above it for bearish). This is evaluated on every finalized
+candle for every non-terminal setup of the instrument and timeframe, independently of whether that
+setup's POI is currently the POI section 13 resolves, and independently of whether the live
+protected anchor still exists. The candle must be strictly later than the setup's POI formation
+candle. When it fires, the engine appends the `invalidated` event and moves the setup to
+`invalidated` in the same step, with the same precedence as section 14 (invalidated outranks
+triggered outranks actionable). Because section 7 now clears an anchor on the same close that
+breaches it, the live plan for that structure becomes `PlanNone` on that candle; the persisted
+setup, not the live plan, is therefore the record of the invalidation.
+
+The setup lifecycle is a persisted shadow of that same value's
 transitions over time, plus the one state `PlanStatus` has no reason to represent (there being no
 plan yet):
 
-- **Detected** — first step where `TradePlan.Status` is no longer `PlanNone` for this setup's
-  identity (§15.3). Equivalent to ADR-010's "Detected" and "Awaiting confirmation" collapsed into
+- **Detected** — `[R]` The persisted state of a setup always equals the lifecycle state mapped from
+  `TradePlan.Status` at the most recent evaluation of that identity. Equivalent to ADR-010's "Detected" and "Awaiting confirmation" collapsed into
   one state, because section 14 does not currently distinguish a plan that exists but has
   unresolved mandatory conditions from one that is already actionable — that distinction belongs
   to confluence/condition grouping, explicitly out of scope (see "Not yet decided" below).
@@ -669,6 +698,12 @@ exactly as undecided as the existing "Not yet decided" paragraph already states 
 does not quietly resolve them by implication. `Detected` and `Actionable` are collapsed into
 fewer states than ADR-010's proposed vocabulary precisely because splitting them further would
 require deciding confluence/condition grouping first.
+
+Not decided: the `actionable` and `triggered` transitions of a non-terminal setup whose identity
+stops being the current POI. Invalidation of such a setup is decided (section 15.2, stop-breach).
+Whether it should still be evaluated for `triggered` after its POI is superseded needs a way to
+evaluate a plan for a POI that is no longer current, which sections 12 to 14 do not define. `[U]`
+Left open on purpose; do not implement or guess.
 
 ## Scope of this version
 

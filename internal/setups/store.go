@@ -239,6 +239,59 @@ func (s *Store) ListEvents(ctx context.Context, setupID int64) ([]SetupEvent, er
 	return out, nil
 }
 
+// SetupWithPOIOpenTime pairs a domain Setup with its own POI formation
+// candle's open_time -- ListNonTerminalForBreachCheck's own result
+// shape (spec section 15.2, v0.12.1's stop-breach invalidation), which
+// needs that time to enforce "the breaching candle must be strictly
+// later than the setup's own POI formation candle" without a second
+// round trip per setup.
+type SetupWithPOIOpenTime struct {
+	Setup
+	POIOpenTime time.Time
+}
+
+// ListNonTerminalForBreachCheck returns every non-terminal setup
+// (detected, actionable, triggered) for (instrument_id, timeframe),
+// each paired with its own POI formation candle's open_time --
+// InvalidateBreached's own read path. Invalidated setups are excluded
+// by the query itself, not filtered here: that exclusion is this
+// function's own terminal guard, the same property
+// ListByInstrumentFiltered(state=invalidated) would need a second
+// check to get right if it tried to do this job instead.
+func (s *Store) ListNonTerminalForBreachCheck(ctx context.Context, instrumentID int64, timeframe string) ([]SetupWithPOIOpenTime, error) {
+	rows, err := s.q.ListNonTerminalSetupsForBreachCheck(ctx, store.ListNonTerminalSetupsForBreachCheckParams{
+		InstrumentID: instrumentID, Timeframe: timeframe,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("setups: list non-terminal for breach check: %w", err)
+	}
+	out := make([]SetupWithPOIOpenTime, 0, len(rows))
+	for _, row := range rows {
+		su, err := fromSetupRow(store.Setup{
+			ID:                      row.ID,
+			InstrumentID:            row.InstrumentID,
+			Timeframe:               row.Timeframe,
+			PoiType:                 row.PoiType,
+			PoiSourceCandleID:       row.PoiSourceCandleID,
+			Direction:               row.Direction,
+			StrategyVersion:         row.StrategyVersion,
+			State:                   row.State,
+			PoiSourceCandleRevision: row.PoiSourceCandleRevision,
+			PlanSnapshot:            row.PlanSnapshot,
+			LastEventID:             row.LastEventID,
+			EvaluationTime:          row.EvaluationTime,
+			AlgorithmVersion:        row.AlgorithmVersion,
+			CreatedAt:               row.CreatedAt,
+			UpdatedAt:               row.UpdatedAt,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, SetupWithPOIOpenTime{Setup: su, POIOpenTime: row.PoiOpenTime})
+	}
+	return out, nil
+}
+
 func fromSetupRow(row store.Setup) (Setup, error) {
 	state, err := parseState(row.State)
 	if err != nil {

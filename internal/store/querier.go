@@ -227,6 +227,16 @@ type Querier interface {
 	// RightBars+1 intervals), and such a swing must never be treated as
 	// "the most recent confirmed swing" as of a historical asOf.
 	ListLatestCurrentSwingsConfirmedBefore(ctx context.Context, arg ListLatestCurrentSwingsConfirmedBeforeParams) ([]ConfirmedSwing, error)
+	// ListNonTerminalSetupsForBreachCheck is InvalidateBreached's own read
+	// path (internal/setups, spec v0.12.1): every non-terminal setup
+	// (detected, actionable, triggered -- invalidated is terminal and
+	// excluded here, not just guarded again downstream) for (instrument_id,
+	// timeframe), joined to its own POI formation candle's open_time so the
+	// caller can enforce "the breaching candle must be strictly later than
+	// the setup's POI formation candle" without a second round trip per
+	// setup. Ordered by id for determinism, matching this package's other
+	// per-instrument list queries.
+	ListNonTerminalSetupsForBreachCheck(ctx context.Context, arg ListNonTerminalSetupsForBreachCheckParams) ([]ListNonTerminalSetupsForBreachCheckRow, error)
 	ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([]CandleGap, error)
 	// ListSetupsByInstrument lists every setup for (instrument_id,
 	// timeframe), most recently updated first -- cmd/argus-worker's own

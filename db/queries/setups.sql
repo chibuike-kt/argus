@@ -71,6 +71,23 @@ WHERE instrument_id = $1 AND timeframe = $2
 ORDER BY updated_at DESC
 LIMIT $3;
 
+-- ListNonTerminalSetupsForBreachCheck is InvalidateBreached's own read
+-- path (internal/setups, spec v0.12.1): every non-terminal setup
+-- (detected, actionable, triggered -- invalidated is terminal and
+-- excluded here, not just guarded again downstream) for (instrument_id,
+-- timeframe), joined to its own POI formation candle's open_time so the
+-- caller can enforce "the breaching candle must be strictly later than
+-- the setup's POI formation candle" without a second round trip per
+-- setup. Ordered by id for determinism, matching this package's other
+-- per-instrument list queries.
+-- name: ListNonTerminalSetupsForBreachCheck :many
+SELECT s.*, c.open_time AS poi_open_time
+FROM setups s
+JOIN candles c ON c.id = s.poi_source_candle_id
+WHERE s.instrument_id = $1 AND s.timeframe = $2
+  AND s.state IN ('detected', 'actionable', 'triggered')
+ORDER BY s.id;
+
 -- ListEventsForSetup returns a setup's full history in creation order
 -- -- reconstructing a setup's story (the frontend's eventual "Evidence"
 -- list is exactly this kind of data).
