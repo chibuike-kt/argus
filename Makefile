@@ -51,6 +51,10 @@ migrate-down: ## Roll back one migration
 migrate-create: ## Create a migration: make migrate-create name=add_x
 	docker run --rm -v $(PWD)/$(MIGRATIONS_DIR):/m migrate/migrate:$(MIGRATE_VERSION) create -ext sql -dir /m -seq $(name)
 
+.PHONY: seed-dev
+seed-dev: ## DEV/TEST ONLY: seed fixture-backed instruments against DB_URL -- never run against production
+	docker run --rm --network host -v $(PWD)/db/seed:/seed postgres:16-alpine psql "$(DB_URL)" -f /seed/dev_fixture_instruments.sql
+
 .PHONY: generate
 generate: ## Run sqlc and oapi-codegen
 	sqlc generate

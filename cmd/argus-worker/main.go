@@ -18,6 +18,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/analysis"
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/config"
+	"github.com/chibuike-kt/argus/internal/ingestion/fixture"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/platform/logging"
@@ -77,6 +78,19 @@ func main() {
 	}
 
 	proc := newProcessor(db, logger, clk, instrumentStore, candleSource, engine, analysisStore, setupsStore)
+
+	if cfg.DevFixtureIngest {
+		logger.Warn("worker: ARGUS_DEV_FIXTURE_INGEST is enabled -- replaying the checked-in dev dataset, never do this against a production database")
+		devData, err := fixture.DevDataset()
+		if err != nil {
+			logger.Error("startup: load dev dataset", "error", err)
+			os.Exit(1)
+		}
+		if err := runDevFixtureIngest(ctx, logger, devData, instrumentStore, marketdataStore); err != nil {
+			logger.Error("startup: dev fixture ingest failed", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	logger.Info("worker started", "env", cfg.Env)
 
