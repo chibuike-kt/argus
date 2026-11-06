@@ -1,0 +1,266 @@
+package setups
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/chibuike-kt/argus/internal/store"
+)
+
+// Store wraps the generated setups queries (setups, setup_events) --
+// the same pattern analysis.Store and instruments.Store use over
+// internal/store.
+type Store struct {
+	q *store.Queries
+}
+
+// NewStore wraps db (a *sql.DB or, inside a transaction, a *sql.Tx).
+func NewStore(db store.DBTX) *Store {
+	return &Store{q: store.New(db)}
+}
+
+// WithTx returns a Store bound to tx, so Reconcile can run its lookup,
+// its setups write, and its setup_events append as one atomic unit, the
+// same pattern analysis.Engine's per-candle step uses.
+func (s *Store) WithTx(tx *sql.Tx) *Store {
+	return &Store{q: s.q.WithTx(tx)}
+}
+
+// GetByIdentity returns the current setup for id, or ErrSetupNotFound.
+func (s *Store) GetByIdentity(ctx context.Context, instrumentID int64, timeframe string, id identity) (Setup, error) {
+	row, err := s.q.GetSetupByIdentity(ctx, store.GetSetupByIdentityParams{
+		InstrumentID:      instrumentID,
+		Timeframe:         timeframe,
+		PoiType:           id.POIType,
+		PoiSourceCandleID: id.POISourceCandleID,
+		Direction:         id.Direction,
+		StrategyVersion:   id.StrategyVersion,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Setup{}, ErrSetupNotFound
+		}
+		return Setup{}, fmt.Errorf("setups: get by identity: %w", err)
+	}
+	return fromSetupRow(row)
+}
+
+// GetByID returns a setup directly by id, or ErrSetupNotFound.
+func (s *Store) GetByID(ctx context.Context, id int64) (Setup, error) {
+	row, err := s.q.GetSetupByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Setup{}, ErrSetupNotFound
+		}
+		return Setup{}, fmt.Errorf("setups: get by id %d: %w", id, err)
+	}
+	return fromSetupRow(row)
+}
+
+// newSetup describes the row to insert for a brand-new identity.
+type newSetup struct {
+	InstrumentID            int64
+	Timeframe               string
+	Identity                identity
+	State                   State
+	POISourceCandleRevision int32
+	Plan                    PlanSnapshot
+	EvaluationTime          time.Time
+	AlgorithmVersion        string
+}
+
+// Insert creates the row for a brand-new identity (spec section 15.1).
+// LastEventID is set afterward by Update, once the paired event row
+// exists -- see Reconcile.
+func (s *Store) Insert(ctx context.Context, n newSetup, now time.Time) (Setup, error) {
+	snapshot, err := marshalPlanSnapshot(n.Plan)
+	if err != nil {
+		return Setup{}, err
+	}
+	row, err := s.q.InsertSetup(ctx, store.InsertSetupParams{
+		InstrumentID:            n.InstrumentID,
+		Timeframe:               n.Timeframe,
+		PoiType:                 n.Identity.POIType,
+		PoiSourceCandleID:       n.Identity.POISourceCandleID,
+		Direction:               n.Identity.Direction,
+		StrategyVersion:         n.Identity.StrategyVersion,
+		State:                   n.State.String(),
+		PoiSourceCandleRevision: n.POISourceCandleRevision,
+		PlanSnapshot:            snapshot,
+		EvaluationTime:          n.EvaluationTime,
+		AlgorithmVersion:        n.AlgorithmVersion,
+		UpdatedAt:               now,
+	})
+	if err != nil {
+		return Setup{}, fmt.Errorf("setups: insert: %w", err)
+	}
+	return fromSetupRow(row)
+}
+
+// update describes the fields a reconciliation step writes back to an
+// existing setups row -- always the full projection, since setups is
+// written in place (000008's comment on the table), never through a
+// supersede handshake.
+type update struct {
+	State                   State
+	POISourceCandleRevision int32
+	Plan                    PlanSnapshot
+	LastEventID             int64
+	EvaluationTime          time.Time
+	AlgorithmVersion        string
+}
+
+// Update writes u back to setup id. This is setups' one and only write
+// path once a row exists, for both a lifecycle transition and an
+// amendment -- callers set State unchanged for an amendment.
+func (s *Store) Update(ctx context.Context, id int64, u update, now time.Time) (Setup, error) {
+	snapshot, err := marshalPlanSnapshot(u.Plan)
+	if err != nil {
+		return Setup{}, err
+	}
+	row, err := s.q.UpdateSetup(ctx, store.UpdateSetupParams{
+		ID:                      id,
+		State:                   u.State.String(),
+		PoiSourceCandleRevision: u.POISourceCandleRevision,
+		PlanSnapshot:            snapshot,
+		LastEventID:             sql.NullInt64{Int64: u.LastEventID, Valid: true},
+		EvaluationTime:          u.EvaluationTime,
+		AlgorithmVersion:        u.AlgorithmVersion,
+		UpdatedAt:               now,
+	})
+	if err != nil {
+		return Setup{}, fmt.Errorf("setups: update %d: %w", id, err)
+	}
+	return fromSetupRow(row)
+}
+
+// newSetupEvent describes an immutable event row to append (spec
+// section 15.4).
+type newSetupEvent struct {
+	SetupID                 int64
+	Type                    EventType
+	Plan                    PlanSnapshot
+	POISourceCandleID       int64
+	POISourceCandleRevision int32
+	EvaluationTime          time.Time
+	AlgorithmVersion        string
+}
+
+// InsertEvent appends a new setup_events row. There is no supersede or
+// retraction here (000008's comment on the table): every call to this
+// is a pure append.
+func (s *Store) InsertEvent(ctx context.Context, n newSetupEvent) (SetupEvent, error) {
+	snapshot, err := marshalPlanSnapshot(n.Plan)
+	if err != nil {
+		return SetupEvent{}, err
+	}
+	row, err := s.q.InsertSetupEvent(ctx, store.InsertSetupEventParams{
+		SetupID:                 n.SetupID,
+		EventType:               n.Type.String(),
+		PlanSnapshot:            snapshot,
+		PoiSourceCandleID:       n.POISourceCandleID,
+		PoiSourceCandleRevision: n.POISourceCandleRevision,
+		EvaluationTime:          n.EvaluationTime,
+		AlgorithmVersion:        n.AlgorithmVersion,
+	})
+	if err != nil {
+		return SetupEvent{}, fmt.Errorf("setups: insert event: %w", err)
+	}
+	return fromSetupEventRow(row)
+}
+
+// ListByInstrument lists every setup for (instrumentID, timeframe),
+// most recently updated first.
+func (s *Store) ListByInstrument(ctx context.Context, instrumentID int64, timeframe string) ([]Setup, error) {
+	rows, err := s.q.ListSetupsByInstrument(ctx, store.ListSetupsByInstrumentParams{
+		InstrumentID: instrumentID,
+		Timeframe:    timeframe,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("setups: list by instrument: %w", err)
+	}
+	out := make([]Setup, 0, len(rows))
+	for _, row := range rows {
+		su, err := fromSetupRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, su)
+	}
+	return out, nil
+}
+
+// ListEvents returns setupID's full history in creation order (spec
+// section 15.4: reconstructing a setup's story).
+func (s *Store) ListEvents(ctx context.Context, setupID int64) ([]SetupEvent, error) {
+	rows, err := s.q.ListEventsForSetup(ctx, setupID)
+	if err != nil {
+		return nil, fmt.Errorf("setups: list events for setup %d: %w", setupID, err)
+	}
+	out := make([]SetupEvent, 0, len(rows))
+	for _, row := range rows {
+		ev, err := fromSetupEventRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ev)
+	}
+	return out, nil
+}
+
+func fromSetupRow(row store.Setup) (Setup, error) {
+	state, err := parseState(row.State)
+	if err != nil {
+		return Setup{}, fmt.Errorf("setups: setup row %d: %w", row.ID, err)
+	}
+	plan, err := unmarshalPlanSnapshot(row.PlanSnapshot)
+	if err != nil {
+		return Setup{}, fmt.Errorf("setups: setup row %d: %w", row.ID, err)
+	}
+	su := Setup{
+		ID:                      row.ID,
+		InstrumentID:            row.InstrumentID,
+		Timeframe:               row.Timeframe,
+		POIType:                 row.PoiType,
+		POISourceCandleID:       row.PoiSourceCandleID,
+		Direction:               row.Direction,
+		StrategyVersion:         row.StrategyVersion,
+		State:                   state,
+		POISourceCandleRevision: row.PoiSourceCandleRevision,
+		Plan:                    plan,
+		EvaluationTime:          row.EvaluationTime,
+		AlgorithmVersion:        row.AlgorithmVersion,
+		CreatedAt:               row.CreatedAt,
+		UpdatedAt:               row.UpdatedAt,
+	}
+	if row.LastEventID.Valid {
+		id := row.LastEventID.Int64
+		su.LastEventID = &id
+	}
+	return su, nil
+}
+
+func fromSetupEventRow(row store.SetupEvent) (SetupEvent, error) {
+	eventType, err := parseEventType(row.EventType)
+	if err != nil {
+		return SetupEvent{}, fmt.Errorf("setups: setup event row %d: %w", row.ID, err)
+	}
+	plan, err := unmarshalPlanSnapshot(row.PlanSnapshot)
+	if err != nil {
+		return SetupEvent{}, fmt.Errorf("setups: setup event row %d: %w", row.ID, err)
+	}
+	return SetupEvent{
+		ID:                      row.ID,
+		SetupID:                 row.SetupID,
+		Type:                    eventType,
+		Plan:                    plan,
+		POISourceCandleID:       row.PoiSourceCandleID,
+		POISourceCandleRevision: row.PoiSourceCandleRevision,
+		EvaluationTime:          row.EvaluationTime,
+		AlgorithmVersion:        row.AlgorithmVersion,
+		CreatedAt:               row.CreatedAt,
+	}, nil
+}

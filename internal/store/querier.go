@@ -78,6 +78,8 @@ type Querier interface {
 	// needing to know what "now" means for this instrument's series.
 	GetLatestClosedCandle(ctx context.Context, instrumentID int64) (Candle, error)
 	GetLatestQuote(ctx context.Context, instrumentID int64) (LatestQuote, error)
+	GetSetupByID(ctx context.Context, id int64) (Setup, error)
+	GetSetupByIdentity(ctx context.Context, arg GetSetupByIdentityParams) (Setup, error)
 	GetStructureState(ctx context.Context, arg GetStructureStateParams) (StructureState, error)
 	// GetSwingByID looks up a swing directly by id, regardless of whether it
 	// is current or superseded -- used to resolve a structure_state
@@ -94,6 +96,14 @@ type Querier interface {
 	// default (000002): every value must come from the caller, and the
 	// database rejects the insert if any is left out.
 	InsertInstrument(ctx context.Context, arg InsertInstrumentParams) (Instrument, error)
+	// InsertSetup creates the row for a brand-new identity (spec section
+	// 15.1: the first step whose TradePlan.Status != PlanNone for this
+	// identity). last_event_id is set afterward, by UpdateSetup, once the
+	// paired 'detected' setup_events row exists -- the same reason
+	// structure_state's own last_event_id is set in a later call than the
+	// row that triggered it.
+	InsertSetup(ctx context.Context, arg InsertSetupParams) (Setup, error)
+	InsertSetupEvent(ctx context.Context, arg InsertSetupEventParams) (SetupEvent, error)
 	InsertStructureEvent(ctx context.Context, arg InsertStructureEventParams) (StructureEvent, error)
 	InsertSweep(ctx context.Context, arg InsertSweepParams) (LiquiditySweep, error)
 	InsertSwing(ctx context.Context, arg InsertSwingParams) (ConfirmedSwing, error)
@@ -174,6 +184,10 @@ type Querier interface {
 	// is responsible for detecting; this query does not fill gaps.
 	ListCurrentCandlesInRange(ctx context.Context, arg ListCurrentCandlesInRangeParams) ([]Candle, error)
 	ListEnabledInstruments(ctx context.Context) ([]Instrument, error)
+	// ListEventsForSetup returns a setup's full history in creation order
+	// -- reconstructing a setup's story (the frontend's eventual "Evidence"
+	// list is exactly this kind of data).
+	ListEventsForSetup(ctx context.Context, setupID int64) ([]SetupEvent, error)
 	// ListLatestCurrentSwings is bounded by max_pivot_time, not merely "the
 	// latest current rows overall": during a correction replay, an
 	// unbounded query can pick up a swing the walk has not reconciled yet
@@ -196,6 +210,10 @@ type Querier interface {
 	// "the most recent confirmed swing" as of a historical asOf.
 	ListLatestCurrentSwingsConfirmedBefore(ctx context.Context, arg ListLatestCurrentSwingsConfirmedBeforeParams) ([]ConfirmedSwing, error)
 	ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([]CandleGap, error)
+	// ListSetupsByInstrument lists every setup for (instrument_id,
+	// timeframe), most recently updated first -- for whatever reads the
+	// worker or a future API need (no HTTP surface yet, per this brief).
+	ListSetupsByInstrument(ctx context.Context, arg ListSetupsByInstrumentParams) ([]Setup, error)
 	// RecordCandleGap is idempotent: detecting the same gap twice (a retried
 	// or duplicate-delivered detection event) must not create a second row or
 	// error. The DO UPDATE is a deliberate no-op (detected_at keeps its
@@ -218,6 +236,12 @@ type Querier interface {
 	// migration that is written in place rather than through a supersede
 	// handshake (000005's comment on the table explains why).
 	SetStructureState(ctx context.Context, arg SetStructureStateParams) (StructureState, error)
+	// UpdateSetup is setups' one and only write path once a row exists:
+	// it is a mutable projection (000008's comment on the table), so a
+	// transition and an amendment both go through this same plain update,
+	// never a supersede handshake. Callers set state unchanged for an
+	// amendment, and a new state for a lifecycle transition.
+	UpdateSetup(ctx context.Context, arg UpdateSetupParams) (Setup, error)
 	// UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 	// a still-forming row in place for a later tick of the same minute.
 	// idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE
