@@ -1,6 +1,8 @@
 import { Outlet, useLocation } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { CommandPaletteProvider } from "@/components/workspace/command-palette";
+import { SampleDataBadge } from "@/components/ui/sample-data-badge";
+import { fixturesEnabled } from "@/mocks/fixtures-as-api";
 import { TopBar } from "./top-bar";
 
 export function AppShell() {
@@ -17,6 +19,11 @@ export function AppShell() {
           <main className="min-h-0 flex-1">
             <Outlet />
           </main>
+          {fixturesEnabled() && (
+            <div className="pointer-events-none fixed bottom-3 right-3 z-50">
+              <SampleDataBadge label="VITE_USE_FIXTURES: all data is sample" />
+            </div>
+          )}
         </div>
       </CommandPaletteProvider>
     </TooltipProvider>

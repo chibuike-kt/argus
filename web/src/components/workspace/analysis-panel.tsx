@@ -6,94 +6,88 @@ import {
   BellSlash,
   PaperPlaneTilt,
   Broadcast,
-  Warning,
-  Prohibit,
 } from "@phosphor-icons/react";
 import { ProvenanceChip } from "@/components/ui/provenance-chip";
 import { Button } from "@/components/ui/button";
-import { setup, annotations, dataQuality, instrument } from "@/mocks/fixtures";
+import { SampleDataBadge } from "@/components/ui/sample-data-badge";
+import { instrument as fixtureInstrument, dataQuality } from "@/mocks/fixtures";
 import { formatUTC } from "@/lib/format";
+import { parseRatString } from "@/api/money";
 import { cn } from "@/lib/cn";
+import { useAnalysisWorkspace } from "./analysis-workspace";
 import { SetupPanel } from "./setup-panel";
 import { BiasGauge } from "./bias-gauge";
 
-const choch = annotations.events.find((e) => e.label === "CHOCH");
-
-function fmt(p: number) {
-  return p.toLocaleString("en-US", { maximumFractionDigits: 1 });
-}
-
-// %-over-timeframe tiles, tinted by direction -- the reference dashboard's
-// performance-at-a-glance pattern. Market data, so it speaks the market's
-// own up/down colours, not the ARGUS accent.
+// %-over-timeframe tiles, tinted by direction. No endpoint carries this
+// (no per-instrument performance series exists in the API today), so
+// this stays the fixture's own numbers with a visible marker -- a
+// self-contained tile cluster, not drawn over real chart data, so a
+// badge is enough to keep it honest (contrast the chart's own stricter
+// choice: dropping fixture structure labels entirely rather than
+// overlaying them on real candles, see chart-surface.tsx).
 function PerformanceTiles() {
-  const perf = instrument.performance;
+  const perf = fixtureInstrument.performance;
   if (!perf) return null;
   return (
-    <div className="grid grid-cols-3 gap-2">
-      {Object.entries(perf).map(([tf, pct]) => {
-        const up = pct >= 0;
-        return (
-          <div key={tf} className={cn("rounded-lg px-2.5 py-2", up ? "bg-up/10" : "bg-down/10")}>
-            <div className="text-[10px] font-medium uppercase tracking-wide text-fg-subtle">
-              {tf}
+    <div>
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
+          Performance
+        </span>
+        <SampleDataBadge />
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {Object.entries(perf).map(([tf, pct]) => {
+          const up = pct >= 0;
+          return (
+            <div key={tf} className={cn("rounded-lg px-2.5 py-2", up ? "bg-up/10" : "bg-down/10")}>
+              <div className="text-[10px] font-medium uppercase tracking-wide text-fg-subtle">{tf}</div>
+              <div className={cn("tnum mt-0.5 text-[13px] font-semibold", up ? "text-up" : "text-down")}>
+                {up ? "+" : ""}
+                {pct.toFixed(2)}%
+              </div>
             </div>
-            <div
-              className={cn("tnum mt-0.5 text-[13px] font-semibold", up ? "text-up" : "text-down")}
-            >
-              {up ? "+" : ""}
-              {pct.toFixed(2)}%
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// Bias and structure state: ARGUS's own read on current direction, as a
-// semicircle gauge (the reference dashboard's "Strong Sell -> Strong Buy"
-// pattern, recast bearish -> bullish) rather than a plain line -- the
-// gauge speaks the intelligence accent, since this is ARGUS's structural
-// judgment, not a raw price tick. Source-confirmed [S] because it reports
-// the engine's own BOS/CHOCH classification, not a guess.
-function BiasLine() {
-  return (
-    <div className="flex items-start gap-2.5">
-      <ProvenanceChip p="S" className="mt-0.5" />
-      <div className="flex-1">
-        <BiasGauge direction={setup.direction} rr={setup.rr} />
-        {choch && (
-          <p className="-mt-1 text-center text-[12px] text-fg-muted">
-            {choch.label} confirmed at {fmt(choch.price)}
-          </p>
-        )}
+          );
+        })}
       </div>
     </div>
   );
 }
 
-const QUALITY_META = {
-  live: { icon: Broadcast, cls: "text-up", label: "Live" },
-  degraded: { icon: Warning, cls: "text-prov-r", label: "Degraded" },
-  stale: { icon: Prohibit, cls: "text-down", label: "Stale" },
-} as const;
+// Bias and structure state: ARGUS's own read on current direction, as a
+// semicircle gauge. direction and the R:R magnitude both come from the
+// real selected setup now; the CHOCH caption the fixture version showed
+// underneath is dropped -- that came from the structure-events
+// annotations, which have no per-setup API source (see chart-surface.tsx
+// and the brief's own report).
+function BiasLine() {
+  const { setup } = useAnalysisWorkspace();
+  if (!setup) return null;
+  const direction = setup.direction === "bearish" ? "bearish" : "bullish";
+  const targets = setup.plan_snapshot.targets;
+  const rr = targets.length > 0 ? parseRatString(targets[targets.length - 1].rr) : 1;
+  return (
+    <div className="flex items-start gap-2.5">
+      <ProvenanceChip p="S" className="mt-0.5" />
+      <div className="flex-1">
+        <BiasGauge direction={direction} rr={rr} />
+      </div>
+    </div>
+  );
+}
 
-// Data quality is first class, not a footnote: ARGUS only acts on trusted
-// data (ADR-006), so whether this analysis is still current is right next
-// to the plan that depends on it.
+// Data quality (ADR-006: freshness/finality) has no live signal yet --
+// no endpoint reports feed staleness today -- so this now always reads
+// as a marked sample rather than silently claiming "Live".
 function DataQualityRow() {
-  const meta = QUALITY_META[dataQuality.status];
-  const Icon = meta.icon;
-  const live = dataQuality.status === "live";
   return (
     <div className="flex items-center gap-2 rounded-lg bg-white/[0.03] px-3 py-2">
-      <Icon className={cn("size-4 shrink-0", meta.cls, live && "argus-pulse")} />
-      <p className="text-[12px] leading-snug text-fg-muted">
-        <span className={cn("font-medium", meta.cls)}>{meta.label}</span>, finalized through{" "}
+      <Broadcast className="size-4 shrink-0 text-fg-subtle" />
+      <p className="flex-1 text-[12px] leading-snug text-fg-muted">
+        Finalized through{" "}
         <span className="tnum text-fg">{formatUTC(dataQuality.finalizedThrough)}</span>
-        {dataQuality.note && <span className="text-fg-subtle"> — {dataQuality.note}</span>}
       </p>
+      <SampleDataBadge />
     </div>
   );
 }
@@ -148,9 +142,7 @@ function ReviewControls() {
 
 // The analysis panel: ARGUS's read on the current instrument/setup, top to
 // bottom bias -> plan + evidence (SetupPanel) -> data quality -> review
-// controls. This replaces the watchlist as the right panel's primary
-// surface (ADR-008-adjacent reframe: the system's findings are the home
-// surface, drawing is secondary).
+// controls.
 export function AnalysisPanel() {
   return (
     <div className="space-y-4">

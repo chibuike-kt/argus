@@ -2,14 +2,15 @@ import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNod
 import { Columns, PencilSimple, DotsThree, ArrowSquareOut } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { TabsRoot, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { instrument } from "@/mocks/fixtures";
-import { cn } from "@/lib/cn";
+import { SampleDataBadge } from "@/components/ui/sample-data-badge";
+import { useAnalysisWorkspace } from "./analysis-workspace";
 import { Watchlist } from "./watchlist";
 import { AnalysisPanel } from "./analysis-panel";
 
-const n = (v: number) => v.toLocaleString("en-US", { maximumFractionDigits: 1 });
-
-// Volume mock, matching TradingView's symbol detail.
+// Volume has no endpoint today (ADR-006's own market-data contracts
+// cover candles/quotes, not a traded-volume rollup) -- kept as a mock,
+// marked, matching TradingView's own symbol-detail layout this panel is
+// based on.
 const volume = 43.94;
 const avgVolume = 50.08;
 
@@ -48,6 +49,92 @@ function IconBtn({ children }: { children: ReactNode }) {
     <button className="focus-ring grid size-7 place-items-center rounded-md transition-colors hover:bg-white/5 hover:text-fg">
       {children}
     </button>
+  );
+}
+
+const n = (v: number) => v.toLocaleString("en-US", { maximumFractionDigits: 1 });
+
+// Symbol detail: the selected instrument's own real id/symbol/provider
+// (GET /instruments, via the workspace), "Last" derived from the most
+// recent candle already fetched for the chart (trivial -- no extra
+// request). changePct, "market open" and News have no endpoint at all
+// (ADR-006 covers candles/quotes, not a day-change rollup or a market-
+// status/news feed), so those are now fixed, marked samples instead of
+// numbers computed to look real.
+function SymbolDetail() {
+  const { instrument, candles } = useAnalysisWorkspace();
+  if (!instrument) return null;
+  const lastCandle = candles[candles.length - 1];
+  const last = lastCandle ? Number(lastCandle.close) : undefined;
+
+  return (
+    <div className="max-h-[50%] shrink-0 overflow-y-auto border-t-2 border-line-strong">
+      <div className="p-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CoinIcon symbol={instrument.native_symbol} size={26} />
+            <span className="text-sm font-semibold">{instrument.native_symbol}</span>
+          </div>
+          <div className="flex items-center gap-0.5 text-fg-subtle">
+            <IconBtn>
+              <Columns className="size-4" />
+            </IconBtn>
+            <IconBtn>
+              <PencilSimple className="size-4" />
+            </IconBtn>
+            <IconBtn>
+              <DotsThree className="size-4" />
+            </IconBtn>
+          </div>
+        </div>
+
+        <div className="mt-2 flex items-center gap-1 text-[12px] text-fg-muted">
+          {instrument.asset_class}
+          <ArrowSquareOut className="size-3 text-fg-subtle" />
+          <span className="text-fg-subtle">· {instrument.provider}</span>
+        </div>
+
+        <div className="mt-3 flex items-end gap-2">
+          <span className="tnum text-3xl font-semibold leading-none">
+            {last !== undefined ? n(last) : "—"}
+          </span>
+          {instrument.quote_asset && <span className="text-xs text-fg-subtle">{instrument.quote_asset}</span>}
+          <span className="ml-auto">
+            <SampleDataBadge label="Sample % change" />
+          </span>
+        </div>
+
+        <div className="mt-4">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[11px] text-fg-subtle">Volume · Avg. volume (30D)</span>
+            <SampleDataBadge />
+          </div>
+          <div className="tnum flex items-center justify-between text-[13px] font-medium">
+            <span>{volume} K</span>
+            <span>{avgVolume} K</span>
+          </div>
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full rounded-full bg-up"
+              style={{ width: `${Math.min(100, (volume / avgVolume) * 100)}%` }}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="border-t border-line p-4">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-fg-subtle">News</div>
+          <SampleDataBadge />
+        </div>
+        <button className="focus-ring mt-1.5 block text-left text-[13px] font-medium leading-snug transition-colors hover:underline">
+          Crypto Selloff Has Further to Go After Binance Hack — Market Talk
+        </button>
+        <button className="focus-ring mt-2 text-[12px] text-fg-muted transition-colors hover:text-fg">
+          More events ›
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -111,84 +198,7 @@ export function RightPanel() {
             <Watchlist />
           </div>
 
-          <div className="max-h-[50%] shrink-0 overflow-y-auto border-t-2 border-line-strong">
-            <div className="p-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <CoinIcon symbol={instrument.symbol} size={26} />
-                  <span className="text-sm font-semibold">{instrument.symbol}</span>
-                </div>
-                <div className="flex items-center gap-0.5 text-fg-subtle">
-                  <IconBtn>
-                    <Columns className="size-4" />
-                  </IconBtn>
-                  <IconBtn>
-                    <PencilSimple className="size-4" />
-                  </IconBtn>
-                  <IconBtn>
-                    <DotsThree className="size-4" />
-                  </IconBtn>
-                </div>
-              </div>
-
-              <div className="mt-2 flex items-center gap-1 text-[12px] text-fg-muted">
-                {instrument.name} Contract
-                <ArrowSquareOut className="size-3 text-fg-subtle" />
-                <span className="text-fg-subtle">· {instrument.venue}</span>
-              </div>
-              <div className="text-[11px] text-fg-subtle">Swap · Crypto</div>
-
-              <div className="mt-3 flex items-end gap-2">
-                <span className="tnum text-3xl font-semibold leading-none">
-                  {n(instrument.last)}
-                </span>
-                <span className="text-xs text-fg-subtle">USDT</span>
-                <span
-                  className={cn(
-                    "tnum ml-auto text-sm font-medium",
-                    instrument.changePct >= 0 ? "text-up" : "text-down",
-                  )}
-                >
-                  {instrument.changePct >= 0 ? "+" : ""}
-                  {n((instrument.last * instrument.changePct) / 100)}{" "}
-                  {instrument.changePct >= 0 ? "+" : ""}
-                  {instrument.changePct.toFixed(2)}%
-                </span>
-              </div>
-              <div className="mt-2 flex items-center gap-1.5 text-[12px] text-up">
-                <span className="size-1.5 rounded-full bg-up" /> Market open
-              </div>
-
-              <div className="mt-4">
-                <div className="flex items-center justify-between text-[11px] text-fg-subtle">
-                  <span>Volume</span>
-                  <span>Avg. volume (30D)</span>
-                </div>
-                <div className="tnum mt-0.5 flex items-center justify-between text-[13px] font-medium">
-                  <span>{volume} K</span>
-                  <span>{avgVolume} K</span>
-                </div>
-                <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10">
-                  <div
-                    className="h-full rounded-full bg-up"
-                    style={{ width: `${Math.min(100, (volume / avgVolume) * 100)}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="border-t border-line p-4">
-              <div className="text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
-                News · 16 minutes ago
-              </div>
-              <button className="focus-ring mt-1.5 block text-left text-[13px] font-medium leading-snug transition-colors hover:underline">
-                Crypto Selloff Has Further to Go After Binance Hack — Market Talk
-              </button>
-              <button className="focus-ring mt-2 text-[12px] text-fg-muted transition-colors hover:text-fg">
-                More events ›
-              </button>
-            </div>
-          </div>
+          <SymbolDetail />
         </TabsContent>
       </TabsRoot>
     </div>
