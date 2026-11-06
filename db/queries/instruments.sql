@@ -17,6 +17,24 @@ SELECT * FROM instruments WHERE enabled = TRUE ORDER BY provider, native_symbol;
 -- name: ListAllInstruments :many
 SELECT * FROM instruments ORDER BY provider, native_symbol;
 
+-- ListAllInstrumentsPaged is GET /instruments' own read path as of the
+-- backend-guards-cleanup brief (project-status audit, section D: the
+-- one list endpoint with no cap). Keyset pagination on id, not on
+-- (provider, native_symbol) the way ListAllInstruments above orders --
+-- id is a stable, monotonic BIGSERIAL well-suited to "id > after_id",
+-- which (provider, native_symbol) is not without a composite cursor no
+-- other endpoint in this API needs either. after_id is nullable
+-- (sqlc.narg): NULL means "from the start," matching a first page with
+-- no cursor yet. This is a new, separate ordering from
+-- ListAllInstruments's own -- that query is untouched, still available,
+-- still unbounded, in case anything else in this package ever needs
+-- the old order.
+-- name: ListAllInstrumentsPaged :many
+SELECT * FROM instruments
+WHERE sqlc.narg('after_id')::bigint IS NULL OR id > sqlc.narg('after_id')::bigint
+ORDER BY id
+LIMIT $1;
+
 -- InsertInstrument always writes enabled = FALSE. There is no parameter for
 -- it: enablement cannot be set through this query, and no other query in
 -- this file sets it either (ADR-006, ADR-007 -- enablement stays gated on

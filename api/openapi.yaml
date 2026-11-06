@@ -27,10 +27,37 @@ paths:
     get:
       operationId: listInstruments
       summary: >
-        List every registered instrument -- internal/instruments.Store.ListAll.
+        List every registered instrument -- internal/instruments.Store.ListAllFiltered.
         Includes disabled rows: nothing in that package can set enabled =
         TRUE yet (ADR-007), so filtering them out here would just hide every
         row behind a flag no client can act on.
+      parameters:
+        - name: after_id
+          in: query
+          required: false
+          description: >
+            Keyset cursor: return instruments with id strictly greater than
+            this value, ordered by id. Omitted means the first page. This is
+            a different ordering from calling this endpoint with no
+            parameters at all pages through (by id, not by provider then
+            native_symbol) -- intentional, see internal/instruments.Store's
+            own ListAllFiltered/ListAll split.
+          schema:
+            type: integer
+            format: int64
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Maximum rows returned. Default 200, maximum 500 -- enforced in
+            the query itself, matching GET /setups and
+            GET /instruments/{id}/candles's own caps.
+          schema:
+            type: integer
+            format: int32
+            default: 200
+            minimum: 1
+            maximum: 500
       responses:
         "200":
           description: OK
@@ -40,6 +67,12 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Instrument"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /instruments/{id}/candles:
     get:
       operationId: listInstrumentCandles

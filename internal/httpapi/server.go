@@ -43,6 +43,15 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/healthz", h.live)
 	r.Get("/readyz", h.ready)
 
+	// chi's own default 404 is plain text ("404 page not found"), not
+	// this API's shared Error shape -- every other error response goes
+	// through writeAPIError (see the RequestErrorHandlerFunc/
+	// ResponseErrorHandlerFunc below), so an unmatched route should too,
+	// not fall through to a different, undocumented body.
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		writeAPIError(w, http.StatusNotFound, "not_found", "no such route")
+	})
+
 	r.Route("/api/v1", func(r chi.Router) {
 		// OpenAPI-first (ADR-004): every operation in api/openapi.yaml,
 		// generated into openapi_gen.go by oapi-codegen (make generate),

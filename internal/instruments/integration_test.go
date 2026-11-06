@@ -175,6 +175,80 @@ func TestIntegration_ScaleIsImmutable(t *testing.T) {
 	}
 }
 
+// TestIntegration_ListAllFiltered_KeysetAndLimit is the backend-guards-
+// cleanup brief's own required proof for GET /instruments' new
+// pagination: afterID excludes everything up to and including the
+// cursor, ordering is strictly by id (ListAllInstrumentsPaged's own
+// documented departure from ListAll's provider/native_symbol order),
+// and limit is enforced by the query itself, not by fetching
+// everything and truncating in Go.
+func TestIntegration_ListAllFiltered_KeysetAndLimit(t *testing.T) {
+	db := testDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	var maxIDBefore int64
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM instruments`).Scan(&maxIDBefore); err != nil {
+		t.Fatalf("select max(id): %v", err)
+	}
+
+	priceScale := quant.Scale(2)
+	qtyScale := quant.Scale(6)
+	insertOne := func(label string) Instrument {
+		inst, err := store.Insert(ctx, NewInstrumentParams{
+			Provider:     "test-provider",
+			NativeSymbol: fmt.Sprintf("PAGE-%s-%d", label, time.Now().UnixNano()),
+			AssetClass:   "crypto_perp",
+			PriceScale:   &priceScale,
+			QtyScale:     &qtyScale,
+			TickSize:     1,
+			QtyStepSize:  1,
+		})
+		if err != nil {
+			t.Fatalf("Insert (%s): %v", label, err)
+		}
+		return inst
+	}
+	a := insertOne("a")
+	b := insertOne("b")
+	c := insertOne("c")
+
+	firstPage, err := store.ListAllFiltered(ctx, &maxIDBefore, 2)
+	if err != nil {
+		t.Fatalf("ListAllFiltered (first page): %v", err)
+	}
+	if len(firstPage) != 2 || firstPage[0].ID != a.ID || firstPage[1].ID != b.ID {
+		t.Fatalf("firstPage = %+v, want exactly [a(%d), b(%d)]", firstPage, a.ID, b.ID)
+	}
+
+	secondPage, err := store.ListAllFiltered(ctx, &b.ID, 2)
+	if err != nil {
+		t.Fatalf("ListAllFiltered (second page): %v", err)
+	}
+	if len(secondPage) != 1 || secondPage[0].ID != c.ID {
+		t.Fatalf("secondPage = %+v, want exactly [c(%d)]", secondPage, c.ID)
+	}
+
+	// A nil cursor is "from the start," not "unlimited" -- with a long-
+	// lived test database accumulating rows across many previous runs,
+	// a nil-cursor page capped at the default size legitimately will
+	// not reach rows this far into the table. Re-querying from
+	// maxIDBefore with a wide-enough limit is the meaningful version
+	// of "everything after the cursor, in one page" this test can make
+	// without depending on how many rows other tests left behind.
+	allAfterCursor, err := store.ListAllFiltered(ctx, &maxIDBefore, 500)
+	if err != nil {
+		t.Fatalf("ListAllFiltered (wide page after cursor): %v", err)
+	}
+	found := map[int64]bool{}
+	for _, inst := range allAfterCursor {
+		found[inst.ID] = true
+	}
+	if !found[a.ID] || !found[b.ID] || !found[c.ID] {
+		t.Fatalf("ListAllFiltered(maxIDBefore, 500) missing one of a(%d)/b(%d)/c(%d): got %d rows", a.ID, b.ID, c.ID, len(allAfterCursor))
+	}
+}
+
 func TestIntegration_GetByProviderAndSymbol_NotFound(t *testing.T) {
 	db := testDB(t)
 	store := NewStore(db)

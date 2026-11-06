@@ -147,6 +147,37 @@ func (s *Store) ListAll(ctx context.Context) ([]Instrument, error) {
 	return out, nil
 }
 
+// ListAllFiltered is GET /instruments' own read path as of the
+// backend-guards-cleanup brief: ListAll's own sibling with a keyset
+// cursor (afterID, nil for the first page) and a required limit,
+// enforced in the query itself (ListAllInstrumentsPaged's own comment
+// in db/queries) -- the same reason ListClosedCandlesInRangeLimited's
+// own LIMIT is enforced in SQL, not by fetching everything and
+// truncating in Go. Ordered by id, not by (provider, native_symbol)
+// the way ListAll's own query is -- a new, separate ordering, not a
+// change to ListAll's.
+func (s *Store) ListAllFiltered(ctx context.Context, afterID *int64, limit int32) ([]Instrument, error) {
+	var after sql.NullInt64
+	if afterID != nil {
+		after = sql.NullInt64{Int64: *afterID, Valid: true}
+	}
+	rows, err := s.q.ListAllInstrumentsPaged(ctx, store.ListAllInstrumentsPagedParams{
+		AfterID: after, Limit: limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("instruments: list all filtered: %w", err)
+	}
+	out := make([]Instrument, 0, len(rows))
+	for _, row := range rows {
+		inst, err := fromRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, inst)
+	}
+	return out, nil
+}
+
 func translateNotFound(err error) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
