@@ -1,5 +1,5 @@
 # Config for oapi-codegen. Run `make generate` to produce server types.
-package: api
+package: httpapi
 output: internal/httpapi/openapi_gen.go
 generate:
   models: true
