@@ -23,6 +23,18 @@ type Config struct {
 
 	DatabaseURL string `env:"ARGUS_DATABASE_URL" envDefault:"postgres://argus:argus@localhost:5432/argus?sslmode=disable"`
 	RedisURL    string `env:"ARGUS_REDIS_URL" envDefault:"redis://localhost:6379/0"`
+
+	// DevFixtureIngest turns on cmd/argus-worker's fixture-provider
+	// ingestion path: it replays the checked-in dev/test dataset
+	// (internal/ingestion/fixture/testdata) into whatever instruments
+	// db/seed/dev_fixture_instruments.sql seeded, so the worker's own
+	// processing loop has real candles to walk a setup through its
+	// lifecycle in a local or test environment. It must never be true
+	// in a real deployment -- this is a separate flag rather than
+	// branching on Env so that a future non-local Env value is never
+	// accidentally interpreted as "safe to enable this too". Defaulted
+	// false; opt in explicitly.
+	DevFixtureIngest bool `env:"ARGUS_DEV_FIXTURE_INGEST" envDefault:"false"`
 }
 
 // Load reads a local .env file when present, parses the environment and
