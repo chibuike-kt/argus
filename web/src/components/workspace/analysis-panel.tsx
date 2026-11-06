@@ -85,9 +85,10 @@ const QUALITY_META = {
 function DataQualityRow() {
   const meta = QUALITY_META[dataQuality.status];
   const Icon = meta.icon;
+  const live = dataQuality.status === "live";
   return (
     <div className="flex items-center gap-2 rounded-lg bg-white/[0.03] px-3 py-2">
-      <Icon className={cn("size-4 shrink-0", meta.cls)} />
+      <Icon className={cn("size-4 shrink-0", meta.cls, live && "argus-pulse")} />
       <p className="text-[12px] leading-snug text-fg-muted">
         <span className={cn("font-medium", meta.cls)}>{meta.label}</span>, finalized through{" "}
         <span className="tnum text-fg">{formatUTC(dataQuality.finalizedThrough)}</span>

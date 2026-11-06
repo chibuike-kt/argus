@@ -22,6 +22,7 @@ import { instrument } from "@/mocks/fixtures";
 import { cn } from "@/lib/cn";
 import { useDrawing } from "@/components/chart/drawing-context";
 import { useCommandPalette } from "@/components/workspace/command-palette";
+import { useArgusActivity } from "@/components/workspace/argus-activity-feed";
 
 const INTERVAL_GROUPS: { label: string; items: [string, string][] }[] = [
   {
@@ -123,6 +124,7 @@ export function ChartToolbar() {
   const { timeframe: tf, setTimeframe: setTf, drawings } = useDrawing();
   const navigate = useNavigate();
   const palette = useCommandPalette();
+  const activity = useArgusActivity();
   return (
     <div className="argus-in glass relative z-30 flex items-center gap-1.5 rounded-xl px-2 py-1.5">
       <IconButton
@@ -165,7 +167,13 @@ export function ChartToolbar() {
           </kbd>
         </button>
         <Divider />
-        <Button variant="glass" size="sm" className="gap-1.5">
+        <Button
+          variant="glass"
+          size="sm"
+          className="gap-1.5"
+          onClick={activity.replay}
+          title="Replay ARGUS's analysis steps"
+        >
           <ClockCounterClockwise className="size-4 text-accent" /> Replay
         </Button>
         <IconButton
