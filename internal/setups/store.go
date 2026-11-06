@@ -193,6 +193,34 @@ func (s *Store) ListByInstrument(ctx context.Context, instrumentID int64, timefr
 	return out, nil
 }
 
+// ListByInstrumentFiltered is ListByInstrument's own filtered sibling
+// -- GET /setups' read path (internal/httpapi, worker-hardening brief
+// Part C). Same ordering (most recently updated first, unchanged).
+// state, when non-nil, restricts the result to that one lifecycle
+// state; nil means no filter, matching ListByInstrument's own
+// unfiltered behavior exactly. limit is enforced in the query itself.
+func (s *Store) ListByInstrumentFiltered(ctx context.Context, instrumentID int64, timeframe string, state *State, limit int32) ([]Setup, error) {
+	var stateFilter sql.NullString
+	if state != nil {
+		stateFilter = sql.NullString{String: state.String(), Valid: true}
+	}
+	rows, err := s.q.ListSetupsByInstrumentFiltered(ctx, store.ListSetupsByInstrumentFilteredParams{
+		InstrumentID: instrumentID, Timeframe: timeframe, State: stateFilter, Limit: limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("setups: list by instrument filtered: %w", err)
+	}
+	out := make([]Setup, 0, len(rows))
+	for _, row := range rows {
+		su, err := fromSetupRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, su)
+	}
+	return out, nil
+}
+
 // ListEvents returns setupID's full history in creation order (spec
 // section 15.4: reconstructing a setup's story).
 func (s *Store) ListEvents(ctx context.Context, setupID int64) ([]SetupEvent, error) {

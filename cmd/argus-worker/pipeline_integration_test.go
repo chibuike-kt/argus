@@ -13,6 +13,7 @@ import (
 
 	"github.com/chibuike-kt/argus/internal/analysis"
 	"github.com/chibuike-kt/argus/internal/clock"
+	"github.com/chibuike-kt/argus/internal/cursor"
 	"github.com/chibuike-kt/argus/internal/ingestion"
 	"github.com/chibuike-kt/argus/internal/ingestion/fixture"
 	"github.com/chibuike-kt/argus/internal/instruments"
@@ -65,6 +66,29 @@ func TestIntegration_Pipeline_DevFixtureIngestThroughSetupsLifecycle(t *testing.
 	instrumentStore := instruments.NewStore(db)
 	instrumentID := seedDevFixtureInstrument(t, db, instrumentStore, symbol)
 
+	// This test calls proc.run below, the real per-tick entrypoint,
+	// deliberately -- not processInstrument directly -- specifically
+	// to exercise ListEnabled's "every enabled instrument" loop, since
+	// that is what the real worker actually does each tick. That
+	// means it is only as fast as the SHARED test database's current
+	// enabled-instrument set, not just this test's own one row: a
+	// prior run of this same test (or of worker-hardening Part B's
+	// own tests, before they were fixed to call processInstrument
+	// directly) left several other fixture-provider instruments
+	// enabled, and this test silently inherited several extra full
+	// dataset replays as a result. Disabling every other
+	// fixture-provider row except the real dev-seed symbols up front
+	// makes this test's own runtime depend only on its own data, not
+	// on how many other tests happened to run in this database before
+	// it -- a real fix for a real flakiness/runtime hazard, not
+	// incidental cleanup.
+	if _, err := db.ExecContext(ctx, `
+		UPDATE instruments SET enabled = FALSE
+		WHERE provider = $1 AND native_symbol NOT IN ('BTC-PERP', 'ETH-PERP') AND id != $2`,
+		devFixtureProviderName, instrumentID); err != nil {
+		t.Fatalf("disable other fixture instruments: %v", err)
+	}
+
 	if err := runDevFixtureIngest(ctx, logger, data, instrumentStore, marketdata.NewStore(db, clock.Real{})); err != nil {
 		t.Fatalf("runDevFixtureIngest: %v", err)
 	}
@@ -80,7 +104,8 @@ func TestIntegration_Pipeline_DevFixtureIngestThroughSetupsLifecycle(t *testing.
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
-	proc := newProcessor(db, logger, clk, instrumentStore, candleSource, engine, analysisStore, setupsStore)
+	cursorStore := cursor.NewStore(db)
+	proc := newProcessor(db, logger, clk, instrumentStore, candleSource, engine, analysisStore, setupsStore, cursorStore)
 
 	// One call already walks the full backlog (processInstrument loops
 	// over every new candle up to the latest closed one, not just one

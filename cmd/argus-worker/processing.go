@@ -10,6 +10,7 @@ import (
 
 	"github.com/chibuike-kt/argus/internal/analysis"
 	"github.com/chibuike-kt/argus/internal/clock"
+	"github.com/chibuike-kt/argus/internal/cursor"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/setups"
 )
@@ -43,23 +44,28 @@ type processor struct {
 	engine        *analysis.Engine
 	analysisStore *analysis.Store
 	setupsStore   *setups.Store
+	cursorStore   *cursor.Store
 
-	// cursor is the open_time this process has already processed up to,
-	// per instrument -- in-memory only, not persisted. On a cold start
-	// (including every restart today) it is empty, so the first tick
-	// for each instrument processes its entire currently-stored candle
-	// history once; every tick after that only sees genuinely new
-	// candles. That one-time replay is safe (analysis.Engine and
-	// setups.Reconcile are both designed to be idempotent over an
-	// already-processed range) and, for this brief's bounded
-	// fixture/replay dataset, cheap. A persisted resume cursor (so a
-	// restart does not even do that one replay) is a reasonable later
-	// hardening step, not something this brief asked for -- see the
-	// final report for why it was left out rather than guessed at.
-	cursor map[int64]time.Time
+	// cursorCache mirrors the persisted processing_cursors row per
+	// instrument, so most ticks avoid a DB round trip just to find out
+	// where to resume -- the DB row (cursorStore), not this map, is
+	// the durable source of truth a restart reads from. Populated
+	// lazily on first sight of each instrument (see processInstrument),
+	// not pre-loaded at startup, since the enabled-instrument set can
+	// change between ticks.
+	cursorCache map[int64]time.Time
+
+	// testFailBeforeReconcile, when non-nil, is called with each
+	// candle's close_time right after analysis.Engine's step commits
+	// but before setups reconciliation (and the cursor advance) runs
+	// for it. Returning true fails that candle at exactly that point,
+	// simulating a crash between the two commits -- a test-only hook
+	// (see processing_cursor_integration_test.go); newProcessor never
+	// sets it, so it is always nil, a no-op, in production.
+	testFailBeforeReconcile func(closeTime time.Time) bool
 }
 
-func newProcessor(db *sql.DB, logger *slog.Logger, clk clock.Clock, instrumentStore *instruments.Store, candles analysis.CandleSource, engine *analysis.Engine, analysisStore *analysis.Store, setupsStore *setups.Store) *processor {
+func newProcessor(db *sql.DB, logger *slog.Logger, clk clock.Clock, instrumentStore *instruments.Store, candles analysis.CandleSource, engine *analysis.Engine, analysisStore *analysis.Store, setupsStore *setups.Store, cursorStore *cursor.Store) *processor {
 	return &processor{
 		db:            db,
 		logger:        logger,
@@ -69,8 +75,31 @@ func newProcessor(db *sql.DB, logger *slog.Logger, clk clock.Clock, instrumentSt
 		engine:        engine,
 		analysisStore: analysisStore,
 		setupsStore:   setupsStore,
-		cursor:        make(map[int64]time.Time),
+		cursorStore:   cursorStore,
+		cursorCache:   make(map[int64]time.Time),
 	}
+}
+
+// lagWarnThreshold is Part D's own stated bound: an instrument more
+// than this far behind its own latest closed candle is worth a Warn,
+// not just a Debug line -- either the worker is falling behind a live
+// feed, or something stopped it from fully catching up this tick.
+const lagWarnThreshold = 5 * time.Minute
+
+// instrumentRunResult is processInstrument's own bookkeeping for
+// run's end-of-tick summary and per-instrument log line (worker-
+// hardening brief, Part D) -- candlesProcessed and eventsWritten
+// count only candles/events that actually committed, never ones a
+// failed step (or the test-only crash hook) left uncommitted.
+type instrumentRunResult struct {
+	cursorBefore, cursorAfter time.Time
+	latestClose               time.Time
+	candlesProcessed          int
+	eventsWritten             int
+}
+
+func (r instrumentRunResult) lag() time.Duration {
+	return r.latestClose.Sub(r.cursorAfter)
 }
 
 // run processes every enabled instrument once, sequentially. A single
@@ -86,11 +115,37 @@ func (p *processor) run(ctx context.Context) {
 		p.logger.Error("worker: list enabled instruments", "error", err)
 		return
 	}
+
+	var totalCandles, totalEvents, totalErrored int
 	for _, inst := range enabled {
-		if err := p.processInstrument(ctx, inst); err != nil {
+		result, err := p.processInstrument(ctx, inst)
+		if err != nil {
+			totalErrored++
 			p.logger.Error("worker: process instrument", "instrument_id", inst.ID, "error", err)
+			continue
+		}
+		totalCandles += result.candlesProcessed
+		totalEvents += result.eventsWritten
+
+		p.logger.Debug("worker: tick processed instrument",
+			"instrument_id", inst.ID,
+			"candles_processed", result.candlesProcessed,
+			"cursor_before", result.cursorBefore,
+			"cursor_after", result.cursorAfter,
+			"lag", result.lag(),
+		)
+		if lag := result.lag(); lag > lagWarnThreshold {
+			p.logger.Warn("worker: instrument processing lag exceeds threshold",
+				"instrument_id", inst.ID, "lag", lag, "threshold", lagWarnThreshold)
 		}
 	}
+
+	p.logger.Info("worker: tick complete",
+		"instruments_processed", len(enabled),
+		"candles_processed", totalCandles,
+		"setup_events_written", totalEvents,
+		"instruments_errored", totalErrored,
+	)
 }
 
 // processInstrument processes every candle newly closed since this
@@ -104,24 +159,34 @@ func (p *processor) run(ctx context.Context) {
 // triggered -> invalidated) within one batch if the worker fell behind,
 // and skipping straight to the last candle's status would silently
 // lose the triggered event that spec section 15.4 requires exist.
-func (p *processor) processInstrument(ctx context.Context, inst instruments.Instrument) error {
+//
+// The returned instrumentRunResult reflects progress actually made
+// before any error: a caller can log candles_processed/cursor_after
+// even when err != nil, which is exactly the "retried next tick for
+// free" case run's own doc comment describes.
+func (p *processor) processInstrument(ctx context.Context, inst instruments.Instrument) (instrumentRunResult, error) {
 	latest, err := p.candles.LatestClosed(ctx, inst.ID)
 	if errors.Is(err, analysis.ErrNoClosedCandles) {
-		return nil
+		return instrumentRunResult{}, nil
 	}
 	if err != nil {
-		return fmt.Errorf("latest closed candle: %w", err)
+		return instrumentRunResult{}, fmt.Errorf("latest closed candle: %w", err)
 	}
 
-	start := p.cursor[inst.ID]
+	start, err := p.loadCursor(ctx, inst.ID)
+	if err != nil {
+		return instrumentRunResult{}, fmt.Errorf("load cursor: %w", err)
+	}
+	result := instrumentRunResult{cursorBefore: start, cursorAfter: start, latestClose: latest.CloseTime}
+
 	end := latest.CloseTime
 	if !end.After(start) {
-		return nil // nothing new since the last tick
+		return result, nil // nothing new since the last tick
 	}
 
 	newCandles, err := p.candles.ListCandles(ctx, inst.ID, start, end)
 	if err != nil {
-		return fmt.Errorf("list candles [%s,%s): %w", start, end, err)
+		return result, fmt.Errorf("list candles [%s,%s): %w", start, end, err)
 	}
 
 	for _, c := range newCandles {
@@ -129,15 +194,55 @@ func (p *processor) processInstrument(ctx context.Context, inst instruments.Inst
 			continue
 		}
 		if err := p.engine.OnCandleClosed(ctx, inst.ID, timeframe, c); err != nil {
-			return fmt.Errorf("engine on candle closed open_time=%s: %w", c.OpenTime, err)
+			return result, fmt.Errorf("engine on candle closed open_time=%s: %w", c.OpenTime, err)
 		}
-		if err := p.reconcileSetup(ctx, inst, c.CloseTime); err != nil {
-			return fmt.Errorf("reconcile setup open_time=%s: %w", c.OpenTime, err)
+		if p.testFailBeforeReconcile != nil && p.testFailBeforeReconcile(c.CloseTime) {
+			return result, fmt.Errorf("processing: simulated crash after engine, before reconcile, at %s", c.CloseTime)
 		}
+		wrote, err := p.reconcileSetup(ctx, inst, c.CloseTime)
+		if err != nil {
+			return result, fmt.Errorf("reconcile setup open_time=%s: %w", c.OpenTime, err)
+		}
+		if wrote {
+			result.eventsWritten++
+		}
+		// Advanced only now, after BOTH the engine step and setups
+		// reconciliation above have committed -- a crash between them
+		// (or at the simulated hook above) leaves the persisted
+		// cursor at the PREVIOUS candle's close_time, so a restart
+		// reprocesses this exact candle. Safe: analysis.Engine and
+		// setups.Reconcile are both idempotent over an
+		// already-processed position (worker-hardening brief, Part B).
+		now := p.clk.Now()
+		if err := p.cursorStore.SetAt(ctx, inst.ID, timeframe, c.CloseTime, now); err != nil {
+			return result, fmt.Errorf("advance cursor open_time=%s: %w", c.OpenTime, err)
+		}
+		p.cursorCache[inst.ID] = c.CloseTime
+		result.cursorAfter = c.CloseTime
+		result.candlesProcessed++
 	}
 
-	p.cursor[inst.ID] = end
-	return nil
+	return result, nil
+}
+
+// loadCursor returns this instrument's resume point, reading the
+// in-memory cache when warm and falling back to the persisted
+// cursorStore (ultimately ErrNotFound -- ADR-005's "workers must
+// tolerate... process restarts": the zero time, a full replay from
+// the beginning, same as any other cold start) only on first sight of
+// this instrument in the process's lifetime.
+func (p *processor) loadCursor(ctx context.Context, instrumentID int64) (time.Time, error) {
+	if t, ok := p.cursorCache[instrumentID]; ok {
+		return t, nil
+	}
+	t, err := p.cursorStore.Get(ctx, instrumentID, timeframe)
+	if errors.Is(err, cursor.ErrNotFound) {
+		t = time.Time{}
+	} else if err != nil {
+		return time.Time{}, err
+	}
+	p.cursorCache[instrumentID] = t
+	return t, nil
 }
 
 // reconcileSetup runs the section 12-14 resolver chain at asOf and
@@ -151,10 +256,15 @@ func (p *processor) processInstrument(ctx context.Context, inst instruments.Inst
 // minTick is the instrument's own registered tick size (ADR-006) --
 // the semantically correct value for "two targets within one tick
 // collapse to one", not an arbitrary constant.
-func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrument, asOf time.Time) error {
+//
+// wrote reports whether a setup_events row was actually written this
+// call (false for a no-op reconciliation, same as setups.Reconcile's
+// own nil-event return) -- run's own tick-summary line counts this,
+// per Part D.
+func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrument, asOf time.Time) (wrote bool, err error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return false, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -163,12 +273,12 @@ func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrum
 
 	state, err := txAnalysisStore.GetState(ctx, inst.ID, timeframe)
 	if err != nil {
-		return fmt.Errorf("get state: %w", err)
+		return false, fmt.Errorf("get state: %w", err)
 	}
 
 	plan, ok, err := analysis.ResolveTradePlan(ctx, txAnalysisStore, p.candles, state, asOf, time.Minute, analysis.DefaultMinLegSpan, inst.TickSize)
 	if err != nil {
-		return fmt.Errorf("resolve trade plan: %w", err)
+		return false, fmt.Errorf("resolve trade plan: %w", err)
 	}
 	if !ok {
 		// Undefined (a POI present whose entry is not strictly beyond
@@ -177,17 +287,17 @@ func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrum
 		// never silently guessed at (CLAUDE.md rule 3).
 		p.logger.Warn("worker: trade plan undefined, skipping reconciliation this step",
 			"instrument_id", inst.ID, "timeframe", timeframe, "as_of", asOf)
-		return tx.Commit()
+		return false, tx.Commit()
 	}
 
 	now := p.clk.Now()
 	setup, event, err := setups.Reconcile(ctx, txSetupsStore, inst.ID, timeframe, plan, algorithmVersion, asOf, now)
 	if err != nil {
-		return fmt.Errorf("reconcile: %w", err)
+		return false, fmt.Errorf("reconcile: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return false, fmt.Errorf("commit: %w", err)
 	}
 
 	if event != nil {
@@ -201,5 +311,5 @@ func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrum
 			"poi_type", setup.POIType,
 		)
 	}
-	return nil
+	return event != nil, nil
 }

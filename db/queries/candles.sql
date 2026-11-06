@@ -23,6 +23,21 @@ WHERE instrument_id = $1 AND superseded_at IS NULL
   AND open_time >= $2 AND open_time < $3
 ORDER BY open_time;
 
+-- ListClosedCandlesInRangeLimited is GET /instruments/{id}/candles' own
+-- read path (internal/httpapi): current, CLOSED candles only (a
+-- forming candle's own values can still change, so it is never a
+-- reliable thing to hand a client), oldest first, with the hard LIMIT
+-- applied in the query itself -- not fetched in full and truncated in
+-- Go -- so a wide [from, to) cannot make Postgres materialize more
+-- rows than the endpoint will ever return, which is the entire point
+-- of the cap (worker-hardening brief, Part C).
+-- name: ListClosedCandlesInRangeLimited :many
+SELECT * FROM candles
+WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+  AND open_time >= $2 AND open_time < $3
+ORDER BY open_time
+LIMIT $4;
+
 -- UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 -- a still-forming row in place for a later tick of the same minute.
 -- idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE

@@ -249,10 +249,79 @@ type ListSetupsByInstrumentParams struct {
 }
 
 // ListSetupsByInstrument lists every setup for (instrument_id,
-// timeframe), most recently updated first -- for whatever reads the
-// worker or a future API need (no HTTP surface yet, per this brief).
+// timeframe), most recently updated first -- cmd/argus-worker's own
+// read path (processInstrument has no reason to filter or cap this;
+// it is not the HTTP layer -- see ListSetupsByInstrumentFiltered for
+// that one).
 func (q *Queries) ListSetupsByInstrument(ctx context.Context, arg ListSetupsByInstrumentParams) ([]Setup, error) {
 	rows, err := q.db.QueryContext(ctx, listSetupsByInstrument, arg.InstrumentID, arg.Timeframe)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Setup{}
+	for rows.Next() {
+		var i Setup
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstrumentID,
+			&i.Timeframe,
+			&i.PoiType,
+			&i.PoiSourceCandleID,
+			&i.Direction,
+			&i.StrategyVersion,
+			&i.State,
+			&i.PoiSourceCandleRevision,
+			&i.PlanSnapshot,
+			&i.LastEventID,
+			&i.EvaluationTime,
+			&i.AlgorithmVersion,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSetupsByInstrumentFiltered = `-- name: ListSetupsByInstrumentFiltered :many
+SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at FROM setups
+WHERE instrument_id = $1 AND timeframe = $2
+  AND ($4::text IS NULL OR state = $4::text)
+ORDER BY updated_at DESC
+LIMIT $3
+`
+
+type ListSetupsByInstrumentFilteredParams struct {
+	InstrumentID int64          `json:"instrument_id"`
+	Timeframe    string         `json:"timeframe"`
+	Limit        int32          `json:"limit"`
+	State        sql.NullString `json:"state"`
+}
+
+// ListSetupsByInstrumentFiltered is GET /setups' own read path
+// (internal/httpapi, worker-hardening brief Part C): same ordering as
+// ListSetupsByInstrument (most recently updated first -- unchanged,
+// not something this query introduces), plus an optional state filter
+// (sqlc::text passed NULL means "no filter", not a fourth state value
+// to match against) and a required LIMIT, enforced in the query
+// itself for the same reason ListClosedCandlesInRangeLimited's own
+// comment gives.
+func (q *Queries) ListSetupsByInstrumentFiltered(ctx context.Context, arg ListSetupsByInstrumentFilteredParams) ([]Setup, error) {
+	rows, err := q.db.QueryContext(ctx, listSetupsByInstrumentFiltered,
+		arg.InstrumentID,
+		arg.Timeframe,
+		arg.Limit,
+		arg.State,
+	)
 	if err != nil {
 		return nil, err
 	}

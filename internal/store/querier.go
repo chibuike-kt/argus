@@ -78,6 +78,7 @@ type Querier interface {
 	// needing to know what "now" means for this instrument's series.
 	GetLatestClosedCandle(ctx context.Context, instrumentID int64) (Candle, error)
 	GetLatestQuote(ctx context.Context, instrumentID int64) (LatestQuote, error)
+	GetProcessingCursor(ctx context.Context, arg GetProcessingCursorParams) (ProcessingCursor, error)
 	GetSetupByID(ctx context.Context, id int64) (Setup, error)
 	GetSetupByIdentity(ctx context.Context, arg GetSetupByIdentityParams) (Setup, error)
 	GetStructureState(ctx context.Context, arg GetStructureStateParams) (StructureState, error)
@@ -177,6 +178,23 @@ type Querier interface {
 	// this is equivalent to, but more direct than, bounding
 	// trigger_open_time by asOf minus one interval.
 	LatestSweepValidatedEventKnownAsOf(ctx context.Context, arg LatestSweepValidatedEventKnownAsOfParams) (StructureEvent, error)
+	// ListAllInstruments is GET /instruments' own read path -- every
+	// registered instrument regardless of enablement, unlike
+	// ListEnabledInstruments (the worker's own read path). Adding neither
+	// a WHERE clause nor any way to filter by enabled here: nothing in this
+	// query file sets enabled = TRUE either, so returning the full list is
+	// not a wider exposure of anything ListEnabledInstruments did not
+	// already expose the shape of.
+	ListAllInstruments(ctx context.Context) ([]Instrument, error)
+	// ListClosedCandlesInRangeLimited is GET /instruments/{id}/candles' own
+	// read path (internal/httpapi): current, CLOSED candles only (a
+	// forming candle's own values can still change, so it is never a
+	// reliable thing to hand a client), oldest first, with the hard LIMIT
+	// applied in the query itself -- not fetched in full and truncated in
+	// Go -- so a wide [from, to) cannot make Postgres materialize more
+	// rows than the endpoint will ever return, which is the entire point
+	// of the cap (worker-hardening brief, Part C).
+	ListClosedCandlesInRangeLimited(ctx context.Context, arg ListClosedCandlesInRangeLimitedParams) ([]Candle, error)
 	// ListCurrentCandlesInRange is the read path aggregation uses: the current
 	// (non-superseded) row for every open_time in [start, end), ordered so the
 	// caller can scan once for first/last open/close and reduce for high/low/
@@ -211,9 +229,20 @@ type Querier interface {
 	ListLatestCurrentSwingsConfirmedBefore(ctx context.Context, arg ListLatestCurrentSwingsConfirmedBeforeParams) ([]ConfirmedSwing, error)
 	ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([]CandleGap, error)
 	// ListSetupsByInstrument lists every setup for (instrument_id,
-	// timeframe), most recently updated first -- for whatever reads the
-	// worker or a future API need (no HTTP surface yet, per this brief).
+	// timeframe), most recently updated first -- cmd/argus-worker's own
+	// read path (processInstrument has no reason to filter or cap this;
+	// it is not the HTTP layer -- see ListSetupsByInstrumentFiltered for
+	// that one).
 	ListSetupsByInstrument(ctx context.Context, arg ListSetupsByInstrumentParams) ([]Setup, error)
+	// ListSetupsByInstrumentFiltered is GET /setups' own read path
+	// (internal/httpapi, worker-hardening brief Part C): same ordering as
+	// ListSetupsByInstrument (most recently updated first -- unchanged,
+	// not something this query introduces), plus an optional state filter
+	// (sqlc::text passed NULL means "no filter", not a fourth state value
+	// to match against) and a required LIMIT, enforced in the query
+	// itself for the same reason ListClosedCandlesInRangeLimited's own
+	// comment gives.
+	ListSetupsByInstrumentFiltered(ctx context.Context, arg ListSetupsByInstrumentFilteredParams) ([]Setup, error)
 	// RecordCandleGap is idempotent: detecting the same gap twice (a retried
 	// or duplicate-delivered detection event) must not create a second row or
 	// error. The DO UPDATE is a deliberate no-op (detected_at keeps its
@@ -231,6 +260,11 @@ type Querier interface {
 	ResolveSupersedeEvent(ctx context.Context, arg ResolveSupersedeEventParams) (int64, error)
 	ResolveSupersedeSweep(ctx context.Context, arg ResolveSupersedeSweepParams) (int64, error)
 	ResolveSupersedeSwing(ctx context.Context, arg ResolveSupersedeSwingParams) (int64, error)
+	// SetProcessingCursor is a plain upsert: processing_cursors is a
+	// mutable projection, not an evidence record (000009's comment on the
+	// table explains why), so it is written in place rather than through
+	// a supersede handshake, the same pattern SetStructureState uses.
+	SetProcessingCursor(ctx context.Context, arg SetProcessingCursorParams) (ProcessingCursor, error)
 	// SetStructureState is a plain upsert: structure_state is a mutable
 	// projection, not an evidence record, so it is the one table in this
 	// migration that is written in place rather than through a supersede

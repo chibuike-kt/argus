@@ -18,6 +18,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/analysis"
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/config"
+	"github.com/chibuike-kt/argus/internal/cursor"
 	"github.com/chibuike-kt/argus/internal/ingestion/fixture"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/marketdata"
@@ -64,6 +65,7 @@ func main() {
 	candleSource := analysis.NewMarketdataSource(marketdataStore)
 	analysisStore := analysis.NewStore(db)
 	setupsStore := setups.NewStore(db)
+	cursorStore := cursor.NewStore(db)
 
 	engineCfg := analysis.Config{
 		AlgorithmVersion: algorithmVersion,
@@ -77,7 +79,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	proc := newProcessor(db, logger, clk, instrumentStore, candleSource, engine, analysisStore, setupsStore)
+	proc := newProcessor(db, logger, clk, instrumentStore, candleSource, engine, analysisStore, setupsStore, cursorStore)
 
 	if cfg.DevFixtureIngest {
 		logger.Warn("worker: ARGUS_DEV_FIXTURE_INGEST is enabled -- replaying the checked-in dev dataset, never do this against a production database")

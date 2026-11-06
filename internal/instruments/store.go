@@ -125,6 +125,28 @@ func (s *Store) ListEnabled(ctx context.Context) ([]Instrument, error) {
 	return out, nil
 }
 
+// ListAll returns every registered instrument regardless of
+// enablement -- GET /instruments' own read path (internal/httpapi),
+// unlike ListEnabled (the worker's own read path). Exposing the full
+// list is not a wider exposure of anything: nothing in this package
+// can set enabled = TRUE either, so a disabled row carries no
+// enablement-gated fact ListEnabled would have hidden.
+func (s *Store) ListAll(ctx context.Context) ([]Instrument, error) {
+	rows, err := s.q.ListAllInstruments(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("instruments: list all: %w", err)
+	}
+	out := make([]Instrument, 0, len(rows))
+	for _, row := range rows {
+		inst, err := fromRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, inst)
+	}
+	return out, nil
+}
+
 func translateNotFound(err error) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound

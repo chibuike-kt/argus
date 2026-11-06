@@ -23,6 +23,84 @@ paths:
                 properties:
                   message:
                     type: string
+  /instruments:
+    get:
+      operationId: listInstruments
+      summary: >
+        List every registered instrument -- internal/instruments.Store.ListAll.
+        Includes disabled rows: nothing in that package can set enabled =
+        TRUE yet (ADR-007), so filtering them out here would just hide every
+        row behind a flag no client can act on.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Instrument"
+  /instruments/{id}/candles:
+    get:
+      operationId: listInstrumentCandles
+      summary: >
+        Closed 1-minute candles for one instrument in [from, to), oldest
+        first -- internal/marketdata.Store.ListClosedInRangeLimited, the
+        same read path cmd/argus-worker's own CandleSource uses. A forming
+        candle's own values can still change, so it is never included.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Maximum candles returned. Default 500, maximum 1000 -- a client
+            cannot request the whole table in one call regardless of how
+            wide [from, to) is.
+          schema:
+            type: integer
+            format: int32
+            default: 500
+            minimum: 1
+            maximum: 1000
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Candle"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /setups:
     get:
       operationId: listSetups
@@ -48,6 +126,27 @@ paths:
             timeframe becomes evaluable.
           schema:
             type: string
+        - name: state
+          in: query
+          required: false
+          description: >
+            Restrict to one lifecycle state. Omitted means no filter --
+            existing behavior, unchanged.
+          schema:
+            type: string
+            enum: [detected, actionable, triggered, invalidated]
+        - name: limit
+          in: query
+          required: false
+          description: >
+            Maximum rows returned, most recently updated first (the store's
+            own existing ordering, unchanged). Default 50, maximum 200.
+          schema:
+            type: integer
+            format: int32
+            default: 50
+            minimum: 1
+            maximum: 200
       responses:
         "200":
           description: OK
@@ -132,6 +231,81 @@ components:
               type: string
             request_id:
               type: string
+    Instrument:
+      type: object
+      required:
+        - id
+        - provider
+        - native_symbol
+        - asset_class
+        - price_scale
+        - qty_scale
+        - tick_size
+        - supported_intervals
+        - enabled
+      properties:
+        id:
+          type: integer
+          format: int64
+        provider:
+          type: string
+        native_symbol:
+          type: string
+        asset_class:
+          type: string
+        base_asset:
+          type: string
+          nullable: true
+        quote_asset:
+          type: string
+          nullable: true
+        price_scale:
+          type: integer
+          format: int32
+        qty_scale:
+          type: integer
+          format: int32
+        # Decimal string, not a JSON number: tick_size is a quant.Price
+        # scaled by price_scale, and a float would silently lose exactness
+        # (guide 13) -- the same reason Candle's own OHLCV fields below are
+        # strings, not numbers.
+        tick_size:
+          type: string
+        supported_intervals:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+    Candle:
+      type: object
+      required: [open_time, close_time, open, high, low, close, volume, is_closed, revision]
+      properties:
+        open_time:
+          type: string
+          format: date-time
+        close_time:
+          type: string
+          format: date-time
+        # Decimal strings, built from the instrument's own price_scale
+        # (open/high/low/close) and qty_scale (volume) -- never JSON
+        # numbers, which cannot carry a quant.Price/quant.Qty's exact
+        # scaled value without risking silent precision loss (guide 13).
+        open:
+          type: string
+        high:
+          type: string
+        low:
+          type: string
+        close:
+          type: string
+        volume:
+          type: string
+        is_closed:
+          type: boolean
+        revision:
+          type: integer
+          format: int32
     # PlanSnapshot (internal/setups/types.go) is intentionally
     # variable-shape -- targets are a variable-length list of (level, RR)
     # pairs, stored as JSONB -- so it is deliberately left loosely typed
