@@ -23,6 +23,99 @@ paths:
                 properties:
                   message:
                     type: string
+  /setups:
+    get:
+      operationId: listSetups
+      summary: >
+        List current setups for an instrument (and, optionally, a timeframe) --
+        internal/setups.Store.ListByInstrument. Read-only historical/resource
+        query per ADR-004; live lifecycle transitions are a separate,
+        still-open WebSocket piece, not this endpoint.
+      parameters:
+        - name: instrument_id
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: timeframe
+          in: query
+          required: false
+          description: >
+            Only "1m" is meaningful today (see
+            cmd/argus-worker/processing.go's own comment on why), but this
+            parameter is not hardcoded to it: a real seam for when a second
+            timeframe becomes evaluable.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Setup"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /setups/{id}:
+    get:
+      operationId: getSetup
+      summary: A single setup by its own id -- internal/setups.Store.GetByID.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Setup"
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /setups/{id}/events:
+    get:
+      operationId: listSetupEvents
+      summary: >
+        A setup's full append-only history, in creation order --
+        internal/setups.Store.ListEvents. The "Evidence" data a client needs
+        to reconstruct how a setup got where it is (ADR-011).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SetupEvent"
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   schemas:
     Error:
@@ -39,3 +132,107 @@ components:
               type: string
             request_id:
               type: string
+    # PlanSnapshot (internal/setups/types.go) is intentionally
+    # variable-shape -- targets are a variable-length list of (level, RR)
+    # pairs, stored as JSONB -- so it is deliberately left loosely typed
+    # here rather than over-modeled into a schema that would drift from
+    # the Go type on every change to it.
+    PlanSnapshot:
+      type: object
+      additionalProperties: true
+    Setup:
+      type: object
+      required:
+        - id
+        - instrument_id
+        - timeframe
+        - poi_type
+        - poi_source_candle_id
+        - direction
+        - strategy_version
+        - state
+        - poi_source_candle_revision
+        - plan_snapshot
+        - evaluation_time
+        - algorithm_version
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        instrument_id:
+          type: integer
+          format: int64
+        timeframe:
+          type: string
+        poi_type:
+          type: string
+        poi_source_candle_id:
+          type: integer
+          format: int64
+        direction:
+          type: string
+        strategy_version:
+          type: string
+        state:
+          type: string
+          enum: [detected, actionable, triggered, invalidated]
+        poi_source_candle_revision:
+          type: integer
+          format: int32
+        plan_snapshot:
+          $ref: "#/components/schemas/PlanSnapshot"
+        last_event_id:
+          type: integer
+          format: int64
+          nullable: true
+        evaluation_time:
+          type: string
+          format: date-time
+        algorithm_version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SetupEvent:
+      type: object
+      required:
+        - id
+        - setup_id
+        - event_type
+        - plan_snapshot
+        - poi_source_candle_id
+        - poi_source_candle_revision
+        - evaluation_time
+        - algorithm_version
+        - created_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        setup_id:
+          type: integer
+          format: int64
+        event_type:
+          type: string
+          enum: [detected, actionable, triggered, invalidated, amendment]
+        plan_snapshot:
+          $ref: "#/components/schemas/PlanSnapshot"
+        poi_source_candle_id:
+          type: integer
+          format: int64
+        poi_source_candle_revision:
+          type: integer
+          format: int32
+        evaluation_time:
+          type: string
+          format: date-time
+        algorithm_version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
