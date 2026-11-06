@@ -374,13 +374,16 @@ func TestIntegration_ProtectedAnchors_Coexist(t *testing.T) {
 		{28, 140, 118, 120}, // sweep: high 140 > 125, close 120 < 125
 		{29, 100, 94, 98},
 		{30, 100, 95, 99},
-		// A later bullish continuation BOS, above the new reference
-		// high (140, confirmed at minute 28).
-		{35, 148, 138, 145},
 	})
-
-	if err := e.EvaluateRange(context.Background(), instrumentID, "1m", et(18), et(36)); err != nil {
-		t.Fatalf("EvaluateRange: %v", err)
+	// The 140 wick at minute 28 confirms as a fractal high once minute
+	// 30 closes (RightBars=2), which ALSO replaces ReferenceSwingHighID
+	// with this same swing -- so a later continuation BOS validating
+	// against "the reference high" is, by construction, validating
+	// against the exact same price as the protected high. Checking
+	// both anchors' coexistence here, before that later BOS runs, is
+	// deliberately a separate EvaluateRange call from the one below.
+	if err := e.EvaluateRange(context.Background(), instrumentID, "1m", et(18), et(31)); err != nil {
+		t.Fatalf("EvaluateRange (through minute 30): %v", err)
 	}
 
 	protectedLow, err := store.GetCurrentSwing(context.Background(), instrumentID, "1m", SwingLow, clock.NewEventTime(et(20)))
@@ -407,9 +410,22 @@ func TestIntegration_ProtectedAnchors_Coexist(t *testing.T) {
 		t.Fatalf("state.ProtectedHighSwingID = %v, want %d", state.ProtectedHighSwingID, protectedHigh.ID)
 	}
 
-	// The later bullish BOS still validates against the untouched
-	// protected low -- not the protected high that just formed on the
-	// opposite side.
+	// A later bullish continuation BOS, above the reference high -- by
+	// this point the SAME swing as the protected high (140, confirmed
+	// above), so this close (145) necessarily closes through it too.
+	// Spec v0.12.0's close-through invalidation (batch 8) clears
+	// ProtectedHighSwingID as a direct, correct consequence; this is no
+	// longer evidence of anything broken, so this test does not assert
+	// it survives past this point -- only that the BOS itself still
+	// validates against the untouched protected LOW, which is the
+	// property two independent anchor slots exist to prove.
+	feedCloseCandles(t, db, instrumentID, []closeBar{
+		{35, 148, 138, 145},
+	})
+	if err := e.EvaluateRange(context.Background(), instrumentID, "1m", et(31), et(36)); err != nil {
+		t.Fatalf("EvaluateRange (minute 35): %v", err)
+	}
+
 	event, err := store.GetCurrentEvent(context.Background(), instrumentID, "1m", et(35))
 	if err != nil {
 		t.Fatalf("GetCurrentEvent at minute 35: %v", err)

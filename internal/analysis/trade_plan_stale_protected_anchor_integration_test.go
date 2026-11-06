@@ -10,33 +10,20 @@ import (
 	"github.com/chibuike-kt/argus/internal/clock"
 )
 
-// TestIntegration_TradePlan_UndefinedWhenOrderBlockBelowStaleProtectedAnchor
-// is a minimal golden fixture for a real gap found while investigating
-// cmd/argus-worker's "trade plan undefined" warnings against the dev
-// fixture dataset (worker-hardening brief, Part A).
-//
-// Section 7's two protected anchors are deliberately independent and
-// are cleared only by invalidateProtectedAnchor, on a CHOCH, for the
-// side the CHOCH flips AWAY from -- never for the side a CHOCH flips
-// TO. So the moment direction flips bullish, ProtectedLowSwingID is
-// whatever it already was, which may predate this exact bullish leg
-// entirely and have no price relationship to it. ResolveOrderBlock's
-// own search window is bounded by that anchor's PivotTime, a time
-// bound, not by its Price -- nothing stops the order block the search
-// finds from sitting, in price, below that anchor's own level, even
-// though the anchor is conceptually supposed to be the structure's
-// floor. When that happens, section 14's entry (the order block's own
-// high) ends up below stop (the anchor's price), which
-// ResolveTradePlan's own doc comment already calls out as an invariant
-// violation it refuses to guess around (ok == false) rather than
-// clamp or fabricate.
-//
-// This is real section 7/12/14 interaction, not a dataset artifact:
-// any real CHOCH followed by a fresh order block before a new sweep
-// re-establishes that side's own anchor would hit it. Reported per
-// CLAUDE.md rule 3 -- not fixed here; a spec/engine change is an
-// architect decision.
-func TestIntegration_TradePlan_UndefinedWhenOrderBlockBelowStaleProtectedAnchor(t *testing.T) {
+// TestIntegration_TradePlan_StaleProtectedAnchorClearedByCloseThrough
+// is the worker-hardening brief's own golden fixture (Part A), flipped
+// for spec v0.12.0 (batch 8): the fixture data is unchanged, but the
+// gap it used to reproduce -- ProtectedLowSwingID surviving as a stale
+// anchor because invalidateProtectedAnchor only clears the side a
+// CHOCH flips AWAY from, never re-validated against price -- is now
+// closed by applyCloseThroughInvalidation. The order-block candle at
+// minute 15 closes at 80, strictly below P's own price (100): that
+// close-through clears ProtectedLowSwingID before the BOS at minute 30
+// ever runs, so the BOS is no longer sweep-validated,
+// ResolveOrderBlock finds nothing to search for, and ResolveTradePlan
+// resolves PlanNone legitimately (ok == true) instead of the
+// entry-not-beyond-stop invariant violation this fixture used to prove.
+func TestIntegration_TradePlan_StaleProtectedAnchorClearedByCloseThrough(t *testing.T) {
 	db := testDB(t)
 	instrumentID := testInstrument(t, db)
 	e := newTestEngine(t, db)
@@ -90,6 +77,19 @@ func TestIntegration_TradePlan_UndefinedWhenOrderBlockBelowStaleProtectedAnchor(
 		t.Fatalf("EvaluateRange (order block candle): %v", err)
 	}
 
+	// The close-through assertion this fixture exists to pin down:
+	// minute 15's close (80) is strictly below P's own price (100), so
+	// applyCloseThroughInvalidation must have cleared ProtectedLowSwingID
+	// during that EvaluateRange call above -- before the BOS candle
+	// below ever runs, not as a side effect of it.
+	afterOB, err := store.GetState(ctx, instrumentID, "1m")
+	if err != nil {
+		t.Fatalf("GetState (after order block candle): %v", err)
+	}
+	if afterOB.ProtectedLowSwingID != nil {
+		t.Fatalf("ProtectedLowSwingID = %v, want nil: close-through invalidation (close 80 < P.Price 100) did not clear it", *afterOB.ProtectedLowSwingID)
+	}
+
 	// SL (minute 18, price 110, confirmed minute 20): the structural-
 	// liquidity candidate. Pivots AFTER the order block's own dip
 	// (minute 15) specifically so its own intactness scan -- which
@@ -103,15 +103,17 @@ func TestIntegration_TradePlan_UndefinedWhenOrderBlockBelowStaleProtectedAnchor(
 	// H2 (minute 25, price 210): SL's following opposite swing AND
 	// the reference high the break below targets.
 	h2 := seedSwing(t, store, instrumentID, SwingHigh, 25, 210, []int64{24, 25, 26, 27, 28})
-	if err := store.SetState(ctx, StateSnapshot{
-		InstrumentID: instrumentID, Timeframe: "1m", Direction: DirectionBullish,
-		ReferenceSwingHighID: &h2.ID, ReferenceSwingLowID: &p.ID, ProtectedLowSwingID: &p.ID,
-	}, time.Now().UTC()); err != nil {
+	// Built from afterOB, not a fresh literal: ReferenceSwingHighID is
+	// the only field this step adds. ProtectedLowSwingID stays nil --
+	// carrying forward the close-through clear above, not resetting it,
+	// is the whole point of this fixture now.
+	afterOB.ReferenceSwingHighID = &h2.ID
+	if err := store.SetState(ctx, afterOB, time.Now().UTC()); err != nil {
 		t.Fatalf("SetState (reference high): %v", err)
 	}
-	// B (minute 30): closes above H2 (210) -- a sweep-validated BOS
-	// (ProtectedLowSwingID is set), the break ResolveOrderBlock anchors
-	// its search to.
+	// B (minute 30): closes above H2 (210) -- a BOS, but no longer
+	// sweep-validated: ProtectedLowSwingID is nil going in, so
+	// decideSweepValidation has nothing to validate against.
 	feedCloseCandles(t, db, instrumentID, []closeBar{
 		{30, 225, 215, 220},
 	})
@@ -132,42 +134,39 @@ func TestIntegration_TradePlan_UndefinedWhenOrderBlockBelowStaleProtectedAnchor(
 		t.Fatalf("GetState: %v", err)
 	}
 
-	// Preconditions, asserted explicitly so a future break in either
-	// one fails here with a clear signal, rather than surfacing only
-	// as "ResolveTradePlan.ok was unexpectedly true" below.
+	// The BOS is no longer sweep-validated (ProtectedLowSwingID was
+	// cleared above, before this candle ran), so ResolveOrderBlock's own
+	// precondition -- a sweep-validated event known as of asOf -- is no
+	// longer met. This is the fix in effect, not a precondition the
+	// fixture happens to still satisfy: before batch 8 this call found
+	// the pathological [78,92] zone.
 	ob, obOK, obErr := ResolveOrderBlock(ctx, store, candles, state, asOf)
-	if obErr != nil || !obOK || ob.Status != OrderBlockPresent {
-		t.Fatalf("ResolveOrderBlock: ok=%v err=%v status=%v (want present)", obOK, obErr, ob.Status)
+	if obErr != nil {
+		t.Fatalf("ResolveOrderBlock: unexpected error: %v", obErr)
 	}
-	sl, slOK, slErr := ResolveStructuralLiquidity(ctx, store, candles, state, asOf, time.Minute, DefaultMinLegSpan)
-	if slErr != nil || !slOK || sl.Status != StructuralPresent {
-		t.Fatalf("ResolveStructuralLiquidity: ok=%v err=%v status=%v (want present)", slOK, slErr, sl.Status)
+	if obOK {
+		t.Fatalf("ResolveOrderBlock: ok = true, status = %v (want not found: the BOS is no longer sweep-validated)", ob.Status)
 	}
 
 	poi, poiErr := ResolvePOI(ctx, store, candles, state, asOf, time.Minute, DefaultMinLegSpan)
 	if poiErr != nil {
 		t.Fatalf("ResolvePOI: %v", poiErr)
 	}
-	if poi.Type != POIOrderBlock {
-		t.Fatalf("poi.Type = %v, want POIOrderBlock (got the pathological zone)", poi.Type)
-	}
-	if poi.High != 92 {
-		t.Fatalf("poi.High = %v, want 92 (the [78,92] order block)", poi.High)
-	}
-	// The failure condition this fixture exists to pin down: entry
-	// (the order block's own high, the bullish proximal edge) sits
-	// BELOW stop (the stale protected anchor's price) -- the exact
-	// "entry not strictly beyond stop" case ResolveTradePlan's own doc
-	// comment calls an invariant violation, not a legitimate outcome.
-	if !(poi.High < p.Price) {
-		t.Fatalf("poi.High = %v, p.Price = %v: fixture no longer reproduces entry < stop", poi.High, p.Price)
+	if poi.Type != POINone {
+		t.Fatalf("poi.Type = %v, want POINone (no sweep-validated event to search from)", poi.Type)
 	}
 
+	// The fix this fixture now proves: no invariant violation, a
+	// legitimate PlanNone (there is no POI at all, let alone one with
+	// entry below stop).
 	plan, ok, err := ResolveTradePlan(ctx, store, candles, state, asOf, time.Minute, DefaultMinLegSpan, 1)
 	if err != nil {
 		t.Fatalf("ResolveTradePlan: unexpected error: %v", err)
 	}
-	if ok {
-		t.Fatalf("ResolveTradePlan: ok = true, want false (entry %v not beyond stop %v); plan = %+v", plan.Entry, plan.Stop, plan)
+	if !ok {
+		t.Fatalf("ResolveTradePlan: ok = false, want true (close-through should have pre-empted the stale anchor entirely); plan = %+v", plan)
+	}
+	if plan.Status != PlanNone {
+		t.Fatalf("plan.Status = %v, want PlanNone; plan = %+v", plan.Status, plan)
 	}
 }

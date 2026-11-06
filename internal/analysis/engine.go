@@ -470,6 +470,40 @@ func invalidateProtectedAnchor(state *StateSnapshot, fromDirection Direction) {
 	}
 }
 
+// applyCloseThroughInvalidation clears a protected anchor whose own
+// price this finalized candle's close has moved strictly through --
+// spec section 7, v0.12.0's close-through rule, checked independently
+// of and before the CHOCH-coupled invalidation applyBreakStep decides
+// later in the same call (that one fires only as part of a break's own
+// outcome; this one runs on every finalized candle regardless of
+// whether a break occurs at all). Each side is checked and cleared
+// independently -- a wick through the level never invalidates, only a
+// close, which is why this only ever reads c.Close, never c.High/Low.
+// The anchor swings' prices are read through txStore on every call,
+// not cached across candles, since a correction can change which swing
+// a slot even points at between calls.
+func (e *Engine) applyCloseThroughInvalidation(ctx context.Context, txStore *Store, c CandleInput, state *StateSnapshot) error {
+	if state.ProtectedLowSwingID != nil {
+		low, err := txStore.GetSwingByID(ctx, *state.ProtectedLowSwingID)
+		if err != nil {
+			return err
+		}
+		if quant.Price(c.Close) < low.Price {
+			state.ProtectedLowSwingID = nil
+		}
+	}
+	if state.ProtectedHighSwingID != nil {
+		high, err := txStore.GetSwingByID(ctx, *state.ProtectedHighSwingID)
+		if err != nil {
+			return err
+		}
+		if quant.Price(c.Close) > high.Price {
+			state.ProtectedHighSwingID = nil
+		}
+	}
+	return nil
+}
+
 // applyBreakStep decides the deterministic verdict for candle c's close
 // (direction establishment, BOS, or CHOCH) and reconciles it against
 // whatever is currently stored for c as a trigger candle, with the same
@@ -480,6 +514,10 @@ func invalidateProtectedAnchor(state *StateSnapshot, fromDirection Direction) {
 func (e *Engine) applyBreakStep(ctx context.Context, txStore *Store, instrumentID int64, timeframe string, c CandleInput, now time.Time, state *StateSnapshot) error {
 	if !c.IsClosed {
 		return nil
+	}
+
+	if err := e.applyCloseThroughInvalidation(ctx, txStore, c, state); err != nil {
+		return err
 	}
 
 	var candidate *NewStructureEvent
@@ -765,6 +803,50 @@ func (e *Engine) reconstructProtectedAnchorAsOf(ctx context.Context, instrumentI
 		return nil, nil
 	}
 
+	closedThrough, err := e.closedThroughAnchorBefore(ctx, instrumentID, swingType, candidate.Price, candidate.ConfirmedAt.Time(), asOf)
+	if err != nil {
+		return nil, err
+	}
+	if closedThrough {
+		return nil, nil
+	}
+
 	id := candidate.ID
 	return &id, nil
+}
+
+// closedThroughAnchorBefore reconstructs spec section 7's close-through
+// invalidation (applyCloseThroughInvalidation's own forward-walk check)
+// for a correction replay's as-of state: whether any finalized candle
+// with close_time strictly after the candidate's own confirmed_at and
+// strictly before asOf closed through price -- below it for a
+// protected low, above it for a protected high. The window matches
+// LatestInvalidatingChochBefore's own bound exactly (reconstructProtected
+// AnchorAsOf's doc comment on why "strictly after confirmed_at" is
+// correct), so a corrected candle replay clears this anchor at the same
+// point a clean run would have.
+func (e *Engine) closedThroughAnchorBefore(ctx context.Context, instrumentID int64, swingType SwingType, price quant.Price, afterConfirmedAt, beforeAsOf time.Time) (bool, error) {
+	if !beforeAsOf.After(afterConfirmedAt) {
+		return false, nil
+	}
+	// ListCandles filters by open_time, not close_time; widen the lower
+	// bound by one interval so no candle whose close_time lands just
+	// after afterConfirmedAt is missed, then filter by CloseTime itself
+	// below.
+	candles, err := e.candles.ListCandles(ctx, instrumentID, afterConfirmedAt.Add(-e.cfg.Interval), beforeAsOf)
+	if err != nil {
+		return false, err
+	}
+	for _, c := range candles {
+		if !c.IsClosed || !c.CloseTime.After(afterConfirmedAt) || !c.CloseTime.Before(beforeAsOf) {
+			continue
+		}
+		if swingType == SwingLow && quant.Price(c.Close) < price {
+			return true, nil
+		}
+		if swingType == SwingHigh && quant.Price(c.Close) > price {
+			return true, nil
+		}
+	}
+	return false, nil
 }

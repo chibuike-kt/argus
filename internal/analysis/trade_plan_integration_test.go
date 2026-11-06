@@ -418,6 +418,19 @@ func TestIntegration_TradePlan_None_NoPOI(t *testing.T) {
 // anchor priced above the order block's zone) is reachable through
 // organic evaluation -- the guard must hold given the inputs, however
 // they arose.
+//
+// Also the brief's own required residual case for spec v0.12.0 (batch
+// 8, close-through anchor invalidation): every candle from minute 38
+// onward deliberately wicks near 115-120 without ever CLOSING at or
+// below 115 (which would close-through-clear the protected low before
+// ResolveTradePlan runs -- see
+// TestIntegration_TradePlan_StaleProtectedAnchorClearedByCloseThrough)
+// or closing back above 115 after a low beneath it (which would
+// instead supersede the anchor via spec section 7's existing
+// sweep-and-reclaim rule, unrelated to batch 8). A stale protected
+// anchor whose own price the market only ever wicks near, never
+// closes through either way, still produces ok == false here after
+// batch 8 -- reported per the brief's own instruction, not relaxed.
 func TestIntegration_TradePlan_Undefined_EntryNotBeyondStop(t *testing.T) {
 	db := testDB(t)
 	instrumentID := testInstrument(t, db)
@@ -462,17 +475,38 @@ func TestIntegration_TradePlan_Undefined_EntryNotBeyondStop(t *testing.T) {
 		t.Fatalf("seed live state: %v", err)
 	}
 
+	// Every close below stays strictly above the protected low (115),
+	// deliberately: a close at or below it would trigger spec v0.12.0's
+	// close-through invalidation (batch 8) before ResolveTradePlan ever
+	// runs, clearing the very anchor this fixture means to prove is
+	// still live and pathological -- that would still correctly resolve
+	// PlanNone (see TestIntegration_TradePlan_StaleProtectedAnchorClearedByCloseThrough
+	// in trade_plan_stale_protected_anchor_integration_test.go), but it
+	// is a different case from the one this test isolates: an anchor
+	// whose own price every finalized close only ever wicks near, never
+	// closes through, so close-through invalidation never fires and the
+	// stale anchor survives to produce the entry-not-beyond-stop
+	// invariant violation. Reported per the brief's own instruction, not
+	// relaxed.
+	// Minute 40's low (117) sits in the qualifying discount half of
+	// [115,125] (below the 120 equilibrium) without dipping below the
+	// protected low's own price (115) -- unlike the original fixture's
+	// 75, which this rewrite cannot reuse: a low below 115 that closes
+	// back above it is itself a sweep-and-reclaim of the protected low,
+	// which spec section 7's existing supersession rule (unrelated to
+	// batch 8) would use to replace the anchor with this brand-new
+	// swing, just as surely as close-through would have cleared it.
 	feedCloseCandles(t, db, instrumentID, []closeBar{
-		{38, 105, 95, 100},
-		{39, 105, 95, 100},
-		{40, 105, 75, 100}, // structural-liquidity candidate low (75, discount half of [115,125])
-		{41, 105, 95, 100},
-		{42, 105, 95, 100},
-		{46, 100, 95, 98},
-		{47, 100, 95, 98},
-		{48, 160, 95, 100}, // later confirmed swing high (160)
-		{49, 100, 95, 98},
-		{50, 100, 95, 98},
+		{38, 119, 119, 119},
+		{39, 119, 119, 119},
+		{40, 119, 117, 118}, // structural-liquidity candidate low (117), the unique local min among these candles
+		{41, 119, 119, 119},
+		{42, 119, 119, 119},
+		{46, 119, 119, 119},
+		{47, 119, 119, 119},
+		{48, 160, 119, 119}, // later confirmed swing high (160)
+		{49, 119, 119, 119},
+		{50, 119, 119, 119},
 	})
 	if err := e.EvaluateRange(context.Background(), instrumentID, "1m", et(38), et(51)); err != nil {
 		t.Fatalf("EvaluateRange (structural liquidity): %v", err)
