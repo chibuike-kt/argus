@@ -11,6 +11,12 @@ import (
 	"github.com/chibuike-kt/argus/internal/setups"
 )
 
+// defaultSetupsLimit/maxSetupsLimit are ListSetups' own caps (worker-
+// hardening brief, Part C), matching the OpenAPI spec's documented
+// default/maximum.
+const defaultSetupsLimit = 50
+const maxSetupsLimit = 200
+
 // defaultTimeframe is what listSetups uses when the caller omits the
 // optional timeframe query parameter. Only "1m" is evaluable today
 // (cmd/argus-worker/processing.go's own comment on why), but
@@ -32,8 +38,28 @@ const defaultTimeframe = "1m"
 // do with SQL.
 type setupsStore interface {
 	ListByInstrument(ctx context.Context, instrumentID int64, timeframe string) ([]setups.Setup, error)
+	ListByInstrumentFiltered(ctx context.Context, instrumentID int64, timeframe string, state *setups.State, limit int32) ([]setups.Setup, error)
 	GetByID(ctx context.Context, id int64) (setups.Setup, error)
 	ListEvents(ctx context.Context, setupID int64) ([]setups.SetupEvent, error)
+}
+
+// setupStateFromAPI maps the generated wire enum to setups' own
+// exported State constants -- kept here rather than as a new exported
+// parser on the setups package itself (CLAUDE.md rule 4: no exported
+// API changes to a shared package without asking).
+func setupStateFromAPI(s ListSetupsParamsState) (setups.State, bool) {
+	switch s {
+	case "detected":
+		return setups.StateDetected, true
+	case "actionable":
+		return setups.StateActionable, true
+	case "triggered":
+		return setups.StateTriggered, true
+	case "invalidated":
+		return setups.StateInvalidated, true
+	default:
+		return 0, false
+	}
 }
 
 var _ setupsStore = (*setups.Store)(nil)
@@ -46,8 +72,10 @@ var _ setupsStore = (*setups.Store)(nil)
 // does not need store; it lives here rather than as a second struct so
 // one generated router can be mounted with one implementation.
 type apiHandler struct {
-	store  setupsStore
-	logger *slog.Logger
+	store       setupsStore
+	instruments instrumentsStore
+	candles     candlesStore
+	logger      *slog.Logger
 }
 
 func (h *apiHandler) Ping(_ context.Context, _ PingRequestObject) (PingResponseObject, error) {
@@ -64,7 +92,23 @@ func (h *apiHandler) ListSetups(ctx context.Context, request ListSetupsRequestOb
 		timeframe = *request.Params.Timeframe
 	}
 
-	rows, err := h.store.ListByInstrument(ctx, request.Params.InstrumentId, timeframe)
+	limit := int32(defaultSetupsLimit)
+	if request.Params.Limit != nil {
+		limit = *request.Params.Limit
+	}
+	if limit < 1 || limit > maxSetupsLimit {
+		return ListSetups400JSONResponse(apiError("invalid_argument", fmt.Sprintf("limit must be between 1 and %d", maxSetupsLimit))), nil
+	}
+	var state *setups.State
+	if request.Params.State != nil {
+		s, ok := setupStateFromAPI(*request.Params.State)
+		if !ok {
+			return ListSetups400JSONResponse(apiError("invalid_argument", "state must be one of detected, actionable, triggered, invalidated")), nil
+		}
+		state = &s
+	}
+
+	rows, err := h.store.ListByInstrumentFiltered(ctx, request.Params.InstrumentId, timeframe, state, limit)
 	if err != nil {
 		h.logger.Error("httpapi: list setups", "instrument_id", request.Params.InstrumentId, "timeframe", timeframe, "error", err)
 		return nil, fmt.Errorf("list setups: %w", err)

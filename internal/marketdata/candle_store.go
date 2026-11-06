@@ -223,3 +223,26 @@ func (s *Store) GetLatestClosed(ctx context.Context, instrumentID int64) (Candle
 	}
 	return fromCandleRow(row), nil
 }
+
+// ListClosedInRangeLimited returns up to limit current, closed candles
+// for instrumentID with open_time in [start, end), oldest first --
+// GET /instruments/{id}/candles' own read path (internal/httpapi).
+// The limit is enforced in the query itself (see
+// ListClosedCandlesInRangeLimited's own comment in db/queries), not by
+// fetching a wider result and truncating here.
+func (s *Store) ListClosedInRangeLimited(ctx context.Context, instrumentID int64, start, end time.Time, limit int32) ([]Candle, error) {
+	rows, err := s.q.ListClosedCandlesInRangeLimited(ctx, store.ListClosedCandlesInRangeLimitedParams{
+		InstrumentID: instrumentID,
+		OpenTime:     start,
+		OpenTime_2:   end,
+		Limit:        limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marketdata: list closed candles instrument=%d [%s,%s): %w", instrumentID, start, end, err)
+	}
+	out := make([]Candle, len(rows))
+	for i, row := range rows {
+		out[i] = fromCandleRow(row)
+	}
+	return out, nil
+}

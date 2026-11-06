@@ -11,6 +11,9 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/chibuike-kt/argus/internal/clock"
+	"github.com/chibuike-kt/argus/internal/instruments"
+	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/setups"
 )
 
@@ -46,7 +49,12 @@ func NewRouter(d Deps) http.Handler {
 		// is served through the one strict handler below -- including
 		// /ping, which this replaces (it was hand-rolled before any
 		// feature module had a generated route to mount alongside it).
-		api := &apiHandler{store: setups.NewStore(d.DB), logger: d.Logger}
+		api := &apiHandler{
+			store:       setups.NewStore(d.DB),
+			instruments: instruments.NewStore(d.DB),
+			candles:     marketdata.NewStore(d.DB, clock.Real{}),
+			logger:      d.Logger,
+		}
 		strict := NewStrictHandlerWithOptions(api, nil, StrictHTTPServerOptions{
 			RequestErrorHandlerFunc: func(w http.ResponseWriter, _ *http.Request, err error) {
 				writeAPIError(w, http.StatusBadRequest, "invalid_argument", err.Error())

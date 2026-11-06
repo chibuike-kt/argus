@@ -47,12 +47,29 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
 -- ListSetupsByInstrument lists every setup for (instrument_id,
--- timeframe), most recently updated first -- for whatever reads the
--- worker or a future API need (no HTTP surface yet, per this brief).
+-- timeframe), most recently updated first -- cmd/argus-worker's own
+-- read path (processInstrument has no reason to filter or cap this;
+-- it is not the HTTP layer -- see ListSetupsByInstrumentFiltered for
+-- that one).
 -- name: ListSetupsByInstrument :many
 SELECT * FROM setups
 WHERE instrument_id = $1 AND timeframe = $2
 ORDER BY updated_at DESC;
+
+-- ListSetupsByInstrumentFiltered is GET /setups' own read path
+-- (internal/httpapi, worker-hardening brief Part C): same ordering as
+-- ListSetupsByInstrument (most recently updated first -- unchanged,
+-- not something this query introduces), plus an optional state filter
+-- (sqlc::text passed NULL means "no filter", not a fourth state value
+-- to match against) and a required LIMIT, enforced in the query
+-- itself for the same reason ListClosedCandlesInRangeLimited's own
+-- comment gives.
+-- name: ListSetupsByInstrumentFiltered :many
+SELECT * FROM setups
+WHERE instrument_id = $1 AND timeframe = $2
+  AND (sqlc.narg('state')::text IS NULL OR state = sqlc.narg('state')::text)
+ORDER BY updated_at DESC
+LIMIT $3;
 
 -- ListEventsForSetup returns a setup's full history in creation order
 -- -- reconstructing a setup's story (the frontend's eventual "Evidence"

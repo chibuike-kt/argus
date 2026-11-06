@@ -7,6 +7,16 @@ SELECT * FROM instruments WHERE provider = $1 AND native_symbol = $2;
 -- name: ListEnabledInstruments :many
 SELECT * FROM instruments WHERE enabled = TRUE ORDER BY provider, native_symbol;
 
+-- ListAllInstruments is GET /instruments' own read path -- every
+-- registered instrument regardless of enablement, unlike
+-- ListEnabledInstruments (the worker's own read path). Adding neither
+-- a WHERE clause nor any way to filter by enabled here: nothing in this
+-- query file sets enabled = TRUE either, so returning the full list is
+-- not a wider exposure of anything ListEnabledInstruments did not
+-- already expose the shape of.
+-- name: ListAllInstruments :many
+SELECT * FROM instruments ORDER BY provider, native_symbol;
+
 -- InsertInstrument always writes enabled = FALSE. There is no parameter for
 -- it: enablement cannot be set through this query, and no other query in
 -- this file sets it either (ADR-006, ADR-007 -- enablement stays gated on

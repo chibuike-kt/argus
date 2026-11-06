@@ -111,6 +111,13 @@ type LiquiditySweep struct {
 	CreatedAt          time.Time     `json:"created_at"`
 }
 
+type ProcessingCursor struct {
+	InstrumentID           int64     `json:"instrument_id"`
+	Timeframe              string    `json:"timeframe"`
+	LastProcessedCloseTime time.Time `json:"last_processed_close_time"`
+	UpdatedAt              time.Time `json:"updated_at"`
+}
+
 type Setup struct {
 	ID                      int64           `json:"id"`
 	InstrumentID            int64           `json:"instrument_id"`

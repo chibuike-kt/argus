@@ -73,6 +73,43 @@ func (e SetupEventEventType) Valid() bool {
 	}
 }
 
+// Defines values for ListSetupsParamsState.
+const (
+	ListSetupsParamsStateActionable  ListSetupsParamsState = "actionable"
+	ListSetupsParamsStateDetected    ListSetupsParamsState = "detected"
+	ListSetupsParamsStateInvalidated ListSetupsParamsState = "invalidated"
+	ListSetupsParamsStateTriggered   ListSetupsParamsState = "triggered"
+)
+
+// Valid indicates whether the value is a known member of the ListSetupsParamsState enum.
+func (e ListSetupsParamsState) Valid() bool {
+	switch e {
+	case ListSetupsParamsStateActionable:
+		return true
+	case ListSetupsParamsStateDetected:
+		return true
+	case ListSetupsParamsStateInvalidated:
+		return true
+	case ListSetupsParamsStateTriggered:
+		return true
+	default:
+		return false
+	}
+}
+
+// Candle defines model for Candle.
+type Candle struct {
+	Close     string    `json:"close"`
+	CloseTime time.Time `json:"close_time"`
+	High      string    `json:"high"`
+	IsClosed  bool      `json:"is_closed"`
+	Low       string    `json:"low"`
+	Open      string    `json:"open"`
+	OpenTime  time.Time `json:"open_time"`
+	Revision  int32     `json:"revision"`
+	Volume    string    `json:"volume"`
+}
+
 // Error defines model for Error.
 type Error struct {
 	Error struct {
@@ -80,6 +117,21 @@ type Error struct {
 		Message   string  `json:"message"`
 		RequestId *string `json:"request_id,omitempty"`
 	} `json:"error"`
+}
+
+// Instrument defines model for Instrument.
+type Instrument struct {
+	AssetClass         string   `json:"asset_class"`
+	BaseAsset          *string  `json:"base_asset,omitempty"`
+	Enabled            bool     `json:"enabled"`
+	Id                 int64    `json:"id"`
+	NativeSymbol       string   `json:"native_symbol"`
+	PriceScale         int32    `json:"price_scale"`
+	Provider           string   `json:"provider"`
+	QtyScale           int32    `json:"qty_scale"`
+	QuoteAsset         *string  `json:"quote_asset,omitempty"`
+	SupportedIntervals []string `json:"supported_intervals"`
+	TickSize           string   `json:"tick_size"`
 }
 
 // PlanSnapshot defines model for PlanSnapshot.
@@ -123,16 +175,40 @@ type SetupEvent struct {
 // SetupEventEventType defines model for SetupEvent.EventType.
 type SetupEventEventType string
 
+// ListInstrumentCandlesParams defines parameters for ListInstrumentCandles.
+type ListInstrumentCandlesParams struct {
+	From time.Time `form:"from" json:"from"`
+	To   time.Time `form:"to" json:"to"`
+
+	// Limit Maximum candles returned. Default 500, maximum 1000 -- a client cannot request the whole table in one call regardless of how wide [from, to) is.
+	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
 // ListSetupsParams defines parameters for ListSetups.
 type ListSetupsParams struct {
 	InstrumentId int64 `form:"instrument_id" json:"instrument_id"`
 
 	// Timeframe Only "1m" is meaningful today (see cmd/argus-worker/processing.go's own comment on why), but this parameter is not hardcoded to it: a real seam for when a second timeframe becomes evaluable.
 	Timeframe *string `form:"timeframe,omitempty" json:"timeframe,omitempty"`
+
+	// State Restrict to one lifecycle state. Omitted means no filter -- existing behavior, unchanged.
+	State *ListSetupsParamsState `form:"state,omitempty" json:"state,omitempty"`
+
+	// Limit Maximum rows returned, most recently updated first (the store's own existing ordering, unchanged). Default 50, maximum 200.
+	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
 }
+
+// ListSetupsParamsState defines parameters for ListSetups.
+type ListSetupsParamsState string
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAll. Includes disabled rows: nothing in that package can set enabled = TRUE yet (ADR-007), so filtering them out here would just hide every row behind a flag no client can act on.
+	// (GET /instruments)
+	ListInstruments(w http.ResponseWriter, r *http.Request)
+	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included.
+	// (GET /instruments/{id}/candles)
+	ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams)
 	// Ping Connectivity check for the versioned API surface.
 	// (GET /ping)
 	Ping(w http.ResponseWriter, r *http.Request)
@@ -150,6 +226,18 @@ type ServerInterface interface {
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
 
 type Unimplemented struct{}
+
+// ListInstruments List every registered instrument -- internal/instruments.Store.ListAll. Includes disabled rows: nothing in that package can set enabled = TRUE yet (ADR-007), so filtering them out here would just hide every row behind a flag no client can act on.
+// (GET /instruments)
+func (_ Unimplemented) ListInstruments(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included.
+// (GET /instruments/{id}/candles)
+func (_ Unimplemented) ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
 
 // Ping Connectivity check for the versioned API surface.
 // (GET /ping)
@@ -183,6 +271,88 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// ListInstruments operation middleware
+func (siw *ServerInterfaceWrapper) ListInstruments(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListInstruments(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListInstrumentCandles operation middleware
+func (siw *ServerInterfaceWrapper) ListInstrumentCandles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListInstrumentCandlesParams
+
+	// ------------- Required query parameter "from" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "from", r.URL.Query(), &params.From, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "from"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "from", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "to" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "to", r.URL.Query(), &params.To, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "to"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "to", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: "int32"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListInstrumentCandles(w, r, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // Ping operation middleware
 func (siw *ServerInterfaceWrapper) Ping(w http.ResponseWriter, r *http.Request) {
@@ -229,6 +399,32 @@ func (siw *ServerInterfaceWrapper) ListSetups(w http.ResponseWriter, r *http.Req
 			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "timeframe"})
 		} else {
 			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "timeframe", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: "int32"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
 		}
 		return
 	}
@@ -413,6 +609,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/ping", wrapper.Ping)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/instruments", wrapper.ListInstruments)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/instruments/{id}/candles", wrapper.ListInstrumentCandles)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/setups", wrapper.ListSetups)
 	})
 	r.Group(func(r chi.Router) {
@@ -423,6 +625,78 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 
 	return r
+}
+
+type ListInstrumentsRequestObject struct {
+}
+
+type ListInstrumentsResponseObject interface {
+	VisitListInstrumentsResponse(w http.ResponseWriter) error
+}
+
+type ListInstruments200JSONResponse []Instrument
+
+func (response ListInstruments200JSONResponse) VisitListInstrumentsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListInstrumentCandlesRequestObject struct {
+	Id     int64 `json:"id"`
+	Params ListInstrumentCandlesParams
+}
+
+type ListInstrumentCandlesResponseObject interface {
+	VisitListInstrumentCandlesResponse(w http.ResponseWriter) error
+}
+
+type ListInstrumentCandles200JSONResponse []Candle
+
+func (response ListInstrumentCandles200JSONResponse) VisitListInstrumentCandlesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListInstrumentCandles400JSONResponse Error
+
+func (response ListInstrumentCandles400JSONResponse) VisitListInstrumentCandlesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListInstrumentCandles404JSONResponse Error
+
+func (response ListInstrumentCandles404JSONResponse) VisitListInstrumentCandlesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 type PingRequestObject struct {
@@ -558,6 +832,12 @@ func (response ListSetupEvents404JSONResponse) VisitListSetupEventsResponse(w ht
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAll. Includes disabled rows: nothing in that package can set enabled = TRUE yet (ADR-007), so filtering them out here would just hide every row behind a flag no client can act on.
+	// (GET /instruments)
+	ListInstruments(ctx context.Context, request ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error)
+	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included.
+	// (GET /instruments/{id}/candles)
+	ListInstrumentCandles(ctx context.Context, request ListInstrumentCandlesRequestObject) (ListInstrumentCandlesResponseObject, error)
 	// Ping Connectivity check for the versioned API surface.
 	// (GET /ping)
 	Ping(ctx context.Context, request PingRequestObject) (PingResponseObject, error)
@@ -609,6 +889,57 @@ type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
 	options     StrictHTTPServerOptions
+}
+
+// ListInstruments operation middleware
+func (sh *strictHandler) ListInstruments(w http.ResponseWriter, r *http.Request) {
+	var request ListInstrumentsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListInstruments(ctx, request.(ListInstrumentsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListInstruments")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListInstrumentsResponseObject); ok {
+		if err := validResponse.VisitListInstrumentsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListInstrumentCandles operation middleware
+func (sh *strictHandler) ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams) {
+	var request ListInstrumentCandlesRequestObject
+
+	request.Id = id
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListInstrumentCandles(ctx, request.(ListInstrumentCandlesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListInstrumentCandles")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListInstrumentCandlesResponseObject); ok {
+		if err := validResponse.VisitListInstrumentCandlesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
 }
 
 // Ping operation middleware
@@ -718,28 +1049,40 @@ func (sh *strictHandler) ListSetupEvents(w http.ResponseWriter, r *http.Request,
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"1Jdfb9s2FMW/ygU3oA0g20kb7MF7StusKFasQdxhD01gXJPXMluKVEnKgRDkuw+XdGzFljOnxTb0yYbE",
-	"/+d3Dq9uhXRV7SzZGMT4VgS5oArT33Pvnec/tXc1+agpPab+x9Ip4t/Y1iTGIkSvbSnuClFRCFj2v/P0",
-	"taEQp1r1vF69156UGH/KE2yGuy7u27vZZ5Jxp31e526zQlwYtBOLdVi4yPOiUjpqZ9FcdLYUfUM9nScU",
-	"m3p3+2hK53VcVNMl+aCd7d2v9ISR1BTTvHPnK/4nFEYaRF3x/nb6KO1Jxn0j0hJNg/x6mgY4eNh85Ou2",
-	"2sZfTjfttI1Ukk8NbYi+qcjey3RAH4MhTmn5SB/bGIMzQ1vn3BmjNminoSPTz57mYix+Gm2IHa1wHT2Q",
-	"lDs7PQ2u8ZKmEq0ydPjad7t6Wup7SbsDvHyxd4D8tEevEDGmN2SbijFVFElGUqIQmGROp1KI6HVZkk8v",
-	"tF2i0Syn6gDdHdRjpLJ9lD0GYe6x6l9XU6snkrllN50X2mWlO2fnWPao0yW9Z0v3R/eoQNvU7Pqj6HHq",
-	"A18+OIrrfQFwzmz/lynwzT7PLrzn8VupKwRWZBUr20vg4e76UV0dWPZD5+vzxnqAB5rsErvHHI9S/2TK",
-	"e27PFPVzx/tTFKTXdb50xOX55COcXbyDufNwdvn2z8kQXruqQqtCASila2wEtkFaQShgoUN0Xks08LUh",
-	"rykAWgWe8gagQoslMUyAniBN0FhFHkZY69HyBJ6fvbkcHB+fHg3hvV4SZE+G1FyR0UtmFNySPPxFs4mT",
-	"XyjmSbhFqEnquSYFgWrkIDHt8MqmQIp854i0Dd6UKMTaquJ4eDI8ZrFdTRZrLcbiZXpUiBrjIll8VDPy",
-	"41tRUuJ3ve93SozFBb9k8UPtbMih8OL4OBdINq5CA+vaaJl6jT6HjGBmfjdS9pdPd70aPtTuw++pXWiq",
-	"Cn0rxuK1s5ZDdqljC3JB8kuSNS4IVudAKokdGj9HScPUf5TgDXu3/V6HOMlN+Kg48SP5IMafboXmdTAG",
-	"LV/76f7ZuSc2ZsnVwOYwDrDaNq8frGnhSpxUVwJ0gIrQalvOGwPRKWzheSACWakR+rIJgxvnv5Af1d5J",
-	"CkHbcli6ZwHcjQXpqgSps3CzaI8KmDUR4kIHWO+RZ7AuwgK94gpVQXSg4xgQPKGBQFilE75ZkAWEQNJZ",
-	"BeuLEWYkXUUBsoVnhjKofafWvU03J7RNxfV34qcjVeGfkjlXwRsC0Xts9wFYiNMnruGxqfNnSc9Ur1DB",
-	"Zf6g2IKe8QTZeM9iZpSTJmhhQyI8R6sKcHX+FDBtAbjR6QgGA2DovEWzssNwEp2nIY/+qn23HmgIl4Rq",
-	"4BjDTRKO1umXVIWaPKxC7lfgQAOj5yRbaQiiRxvSJ0lOPFznWAEhamMGHFCb5INak6QigZjwJKtqp21k",
-	"ljr+Hd1qdbfXxG8pe3iPhTkBOw7+Xtt+L6YH0LmfxtN/n8Y/XITfXGPVFotnwBljKHMIsxZ0zGmj1X7G",
-	"3hIj9ma4o+Yo1RIHJPN5bvdDaHt4BOU6/Ak59P8qz0t+FmDeGANY12QfxERbgLaQqjTtLDjPFdGjsZNF",
-	"HcLHBcGVOF9qRVbSlQCFEQFBGs3JZolU4IvJ8+3DOSUjLNxNChamsHSRLyhPoCPfaLn8Ojk5ygGSyl+/",
-	"vEem8UaMxapUE3fXd38HAAD//w==",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

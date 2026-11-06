@@ -207,6 +207,74 @@ func (q *Queries) InsertCorrectingCandle(ctx context.Context, arg InsertCorrecti
 	return i, err
 }
 
+const listClosedCandlesInRangeLimited = `-- name: ListClosedCandlesInRangeLimited :many
+SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
+WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+  AND open_time >= $2 AND open_time < $3
+ORDER BY open_time
+LIMIT $4
+`
+
+type ListClosedCandlesInRangeLimitedParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	OpenTime     time.Time `json:"open_time"`
+	OpenTime_2   time.Time `json:"open_time_2"`
+	Limit        int32     `json:"limit"`
+}
+
+// ListClosedCandlesInRangeLimited is GET /instruments/{id}/candles' own
+// read path (internal/httpapi): current, CLOSED candles only (a
+// forming candle's own values can still change, so it is never a
+// reliable thing to hand a client), oldest first, with the hard LIMIT
+// applied in the query itself -- not fetched in full and truncated in
+// Go -- so a wide [from, to) cannot make Postgres materialize more
+// rows than the endpoint will ever return, which is the entire point
+// of the cap (worker-hardening brief, Part C).
+func (q *Queries) ListClosedCandlesInRangeLimited(ctx context.Context, arg ListClosedCandlesInRangeLimitedParams) ([]Candle, error) {
+	rows, err := q.db.QueryContext(ctx, listClosedCandlesInRangeLimited,
+		arg.InstrumentID,
+		arg.OpenTime,
+		arg.OpenTime_2,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Candle{}
+	for rows.Next() {
+		var i Candle
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstrumentID,
+			&i.OpenTime,
+			&i.CloseTime,
+			&i.Open,
+			&i.High,
+			&i.Low,
+			&i.Close,
+			&i.Volume,
+			&i.Revision,
+			&i.IsClosed,
+			&i.TickAligned,
+			&i.Provider,
+			&i.IngestedAt,
+			&i.SupersededAt,
+			&i.SupersededBy,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCurrentCandlesInRange = `-- name: ListCurrentCandlesInRange :many
 SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
 WHERE instrument_id = $1 AND superseded_at IS NULL

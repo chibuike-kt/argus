@@ -32,6 +32,22 @@ func (f *fakeSetupsStore) ListByInstrument(_ context.Context, _ int64, _ string)
 	return f.setups, nil
 }
 
+func (f *fakeSetupsStore) ListByInstrumentFiltered(_ context.Context, _ int64, _ string, state *setups.State, _ int32) ([]setups.Setup, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if state == nil {
+		return f.setups, nil
+	}
+	out := make([]setups.Setup, 0, len(f.setups))
+	for _, s := range f.setups {
+		if s.State == *state {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeSetupsStore) GetByID(_ context.Context, _ int64) (setups.Setup, error) {
 	if f.getByIDErr != nil {
 		return setups.Setup{}, f.getByIDErr
@@ -86,6 +102,50 @@ func TestListSetups_OK(t *testing.T) {
 	decodeBody(t, rec, &got)
 	if len(got) != 1 || got[0].Id != 1 || got[0].State != SetupState("actionable") {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestListSetups_StateFilter(t *testing.T) {
+	triggered := testSetup()
+	triggered.ID, triggered.State = 2, setups.StateTriggered
+	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup(), triggered}}, logger: slog.Default()}
+	state := ListSetupsParamsState("triggered")
+	resp, err := h.ListSetups(context.Background(), ListSetupsRequestObject{Params: ListSetupsParams{InstrumentId: 42, State: &state}})
+	if err != nil {
+		t.Fatalf("ListSetups: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	if err := resp.VisitListSetupsResponse(rec); err != nil {
+		t.Fatalf("VisitListSetupsResponse: %v", err)
+	}
+	var got []Setup
+	decodeBody(t, rec, &got)
+	if len(got) != 1 || got[0].Id != 2 {
+		t.Fatalf("got %+v, want only the triggered setup", got)
+	}
+}
+
+func TestListSetups_InvalidState(t *testing.T) {
+	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup()}}, logger: slog.Default()}
+	state := ListSetupsParamsState("not-a-real-state")
+	resp, err := h.ListSetups(context.Background(), ListSetupsRequestObject{Params: ListSetupsParams{InstrumentId: 42, State: &state}})
+	if err != nil {
+		t.Fatalf("ListSetups: %v", err)
+	}
+	if _, ok := resp.(ListSetups400JSONResponse); !ok {
+		t.Fatalf("got %#v, want 400", resp)
+	}
+}
+
+func TestListSetups_LimitOutOfRange(t *testing.T) {
+	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup()}}, logger: slog.Default()}
+	tooMany := int32(maxSetupsLimit + 1)
+	resp, err := h.ListSetups(context.Background(), ListSetupsRequestObject{Params: ListSetupsParams{InstrumentId: 42, Limit: &tooMany}})
+	if err != nil {
+		t.Fatalf("ListSetups: %v", err)
+	}
+	if _, ok := resp.(ListSetups400JSONResponse); !ok {
+		t.Fatalf("got %#v, want 400 for limit=%d", resp, tooMany)
 	}
 }
 

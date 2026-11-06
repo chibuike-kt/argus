@@ -167,6 +167,62 @@ func (q *Queries) InsertInstrument(ctx context.Context, arg InsertInstrumentPara
 	return i, err
 }
 
+const listAllInstruments = `-- name: ListAllInstruments :many
+SELECT id, provider, native_symbol, asset_class, base_asset, quote_asset, contract_type, price_precision, quantity_precision, tick_size_deprecated, supported_intervals, enabled, metadata, created_at, updated_at, price_scale, qty_scale, tick_size, qty_step_size, contract_size, pip_size FROM instruments ORDER BY provider, native_symbol
+`
+
+// ListAllInstruments is GET /instruments' own read path -- every
+// registered instrument regardless of enablement, unlike
+// ListEnabledInstruments (the worker's own read path). Adding neither
+// a WHERE clause nor any way to filter by enabled here: nothing in this
+// query file sets enabled = TRUE either, so returning the full list is
+// not a wider exposure of anything ListEnabledInstruments did not
+// already expose the shape of.
+func (q *Queries) ListAllInstruments(ctx context.Context) ([]Instrument, error) {
+	rows, err := q.db.QueryContext(ctx, listAllInstruments)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Instrument{}
+	for rows.Next() {
+		var i Instrument
+		if err := rows.Scan(
+			&i.ID,
+			&i.Provider,
+			&i.NativeSymbol,
+			&i.AssetClass,
+			&i.BaseAsset,
+			&i.QuoteAsset,
+			&i.ContractType,
+			&i.PricePrecision,
+			&i.QuantityPrecision,
+			&i.TickSizeDeprecated,
+			pq.Array(&i.SupportedIntervals),
+			&i.Enabled,
+			&i.Metadata,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.PriceScale,
+			&i.QtyScale,
+			&i.TickSize,
+			&i.QtyStepSize,
+			&i.ContractSize,
+			&i.PipSize,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listEnabledInstruments = `-- name: ListEnabledInstruments :many
 SELECT id, provider, native_symbol, asset_class, base_asset, quote_asset, contract_type, price_precision, quantity_precision, tick_size_deprecated, supported_intervals, enabled, metadata, created_at, updated_at, price_scale, qty_scale, tick_size, qty_step_size, contract_size, pip_size FROM instruments WHERE enabled = TRUE ORDER BY provider, native_symbol
 `
