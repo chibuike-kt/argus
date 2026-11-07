@@ -73,8 +73,15 @@ func TestIntegration_SetupsEndpoints_RealStore(t *testing.T) {
 		if len(got) != 1 || got[0].Id != created.ID {
 			t.Fatalf("got %+v, want one setup with id %d", got, created.ID)
 		}
-		if got[0].PlanSnapshot["status"] != "actionable" || got[0].PlanSnapshot["poi"] == nil {
-			t.Fatalf("plan_snapshot round-trip = %+v", got[0].PlanSnapshot)
+		// Decimal strings built from the test instrument's own
+		// price_scale (0 here, see testInstrument) -- "90"/"70", not the
+		// bare scaled integers 90/70 the API sent before Part 3.
+		snap := got[0].PlanSnapshot
+		if snap.Status != "actionable" || snap.Entry != "90" || snap.Stop != "70" {
+			t.Fatalf("plan_snapshot round-trip = %+v, want status=actionable entry=90 stop=70", snap)
+		}
+		if snap.Poi.Low != "80" || snap.Poi.High != "90" {
+			t.Fatalf("plan_snapshot.poi round-trip = %+v, want low=80 high=90", snap.Poi)
 		}
 	})
 

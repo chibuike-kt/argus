@@ -15,16 +15,18 @@ import { ApiClientError } from "@/api/client";
 // most-recently-updated setup, so /analysis is never empty just because
 // a user landed on it directly.
 //
-// How far back the candle window reaches is a real open question this
-// wiring brief's own report flags: the API has no "latest closed candle"
-// endpoint, only from/to/limit, so there is no cheap way to ask "give me
-// whatever is most recent" without already knowing the range. This uses
-// a wide, fixed window (CANDLE_WINDOW_MS) ending at the instrument's own
-// setup's evaluation_time when one is selected (a real timestamp known to
-// be inside the dataset), falling back to "now" only when nothing is
-// selected yet.
+// The API still has no "latest closed candle" endpoint, but order=desc
+// (web-wiring-followup brief, Part 4/5) solves the actual problem that
+// gap created: [from, to) no longer needs to tightly bracket the real
+// data, since limit still caps how many rows the query returns
+// regardless of how wide the range is (enforced in SQL, see
+// ListClosedCandlesInRangeLimitedDesc's own comment in db/queries) --
+// EPOCH to "now" safely contains any real or historical dataset, and
+// order=desc&limit=MAX_CANDLES gets back exactly the most recent
+// MAX_CANDLES candles within it, reversed below into the ascending
+// order the chart needs.
 const MAX_CANDLES = 1000;
-const CANDLE_WINDOW_MS = 1000 * 60 * MAX_CANDLES; // MAX_CANDLES minutes, matching the server cap
+const EPOCH = new Date(0).toISOString();
 
 interface AnalysisWorkspace {
   instruments: ApiInstrument[];
@@ -181,7 +183,11 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     return () => controller.abort();
   }, [setup]);
 
-  // 5. Chart candles for the selected instrument.
+  // 5. Chart candles for the selected instrument: the most recent
+  // MAX_CANDLES, not a window anchored at the setup's own
+  // evaluation_time (web-wiring-followup brief, Part 5) -- order=desc
+  // comes back newest-first, reversed here into the ascending order the
+  // chart (and everything downstream of `candles`) expects.
   useEffect(() => {
     if (!setup) {
       setCandles([]);
@@ -190,15 +196,13 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     const controller = new AbortController();
     setCandlesLoading(true);
     setCandlesError(undefined);
-    const to = new Date(setup.evaluation_time);
-    const from = new Date(to.getTime() - CANDLE_WINDOW_MS);
     listInstrumentCandles(
       setup.instrument_id,
-      { from: from.toISOString(), to: to.toISOString(), limit: MAX_CANDLES },
+      { from: EPOCH, to: new Date().toISOString(), limit: MAX_CANDLES, order: "desc" },
       { signal: controller.signal },
     )
       .then((data) => {
-        if (!controller.signal.aborted) setCandles(data);
+        if (!controller.signal.aborted) setCandles([...data].reverse());
       })
       .catch((err: unknown) => {
         if (!controller.signal.aborted) {

@@ -88,6 +88,49 @@ export function useSetupsAcrossInstruments(
   );
 }
 
+const EPOCH = new Date(0).toISOString();
+
+// LATEST_CLOSE_INSTRUMENT_CAP bounds the Watchlist crypto group's "Last"
+// price lookups (web-wiring-followup brief, Part 5): one
+// order=desc&limit=1 candles request per instrument, which does not
+// scale to an unbounded instrument list, so only the first N get a real
+// Last price -- the rest keep the existing em-dash fallback rather than
+// firing an unbounded burst of requests.
+export const LATEST_CLOSE_INSTRUMENT_CAP = 20;
+
+// useLatestCloses fetches the single most recent closed candle for up to
+// LATEST_CLOSE_INSTRUMENT_CAP instruments, in parallel, each
+// individually abortable and each failure isolated (one instrument's
+// candles endpoint erroring -- e.g. a brand new instrument with no
+// candles yet -- must not blank out every other row's real price).
+// Keyed by instrument id; an instrument with no candles yet, or past the
+// cap, is simply absent from the map (the Watchlist's own existing
+// em-dash fallback for "no last price").
+export function useLatestCloses(instrumentIds: number[]): AsyncState<Map<number, number>> {
+  const capped = instrumentIds.slice(0, LATEST_CLOSE_INSTRUMENT_CAP);
+  return useAsyncResource(
+    async (signal) => {
+      if (capped.length === 0) return new Map();
+      const entries = await Promise.all(
+        capped.map(async (instrumentId): Promise<[number, number] | undefined> => {
+          try {
+            const rows = await listInstrumentCandles(
+              instrumentId,
+              { from: EPOCH, to: new Date().toISOString(), limit: 1, order: "desc" },
+              { signal },
+            );
+            return rows[0] ? [instrumentId, Number(rows[0].close)] : undefined;
+          } catch {
+            return undefined;
+          }
+        }),
+      );
+      return new Map(entries.filter((e): e is [number, number] => e !== undefined));
+    },
+    [capped.join(",")],
+  );
+}
+
 export function useSetup(id: number | undefined): AsyncState<ApiSetup> {
   return useAsyncResource(
     (signal) => {

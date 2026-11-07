@@ -30,14 +30,17 @@ function makeSetup(overrides: Partial<ApiSetup> = {}): ApiSetup {
     plan_snapshot: {
       status: "triggered",
       direction: "bullish",
-      entry: 9000,
-      stop: 8800,
-      targets: [{ level: 9400, rr: "2/1" }],
+      // Decimal strings, exactly as the real API sends them since Part 3
+      // (web-wiring-followup brief) -- not scaled integers needing the
+      // instrument's own price_scale to interpret.
+      entry: "90.00",
+      stop: "88.00",
+      targets: [{ level: "94.00", rr: "2/1" }],
       poi: {
         type: "order_block",
         direction: "bullish",
-        low: 8800,
-        high: 9000,
+        low: "88.00",
+        high: "90.00",
         order_block_candle_id: 7,
         order_block_candle_revision: 1,
         order_block_open_time: "2026-01-01T00:10:00Z",
@@ -74,7 +77,7 @@ describe("mapApiPoiType", () => {
 });
 
 describe("toSetupSummary", () => {
-  it("converts scaled-integer money using the instrument's own price_scale, exactly", () => {
+  it("converts plan_snapshot's own decimal-string money to a display number", () => {
     const summary = toSetupSummary(makeSetup(), instrument);
     expect(summary.entry).toBe(90);
     expect(summary.stop).toBe(88);
@@ -93,8 +96,8 @@ describe("toSetupSummary", () => {
 });
 
 describe("toPlanOverlay", () => {
-  it("scales entry/stop/targets/poi zone and carries the real formation time", () => {
-    const overlay = toPlanOverlay(makeSetup(), instrument);
+  it("converts entry/stop/targets/poi zone and carries the real formation time", () => {
+    const overlay = toPlanOverlay(makeSetup());
     expect(overlay.entry).toBe(90);
     expect(overlay.stop).toBe(88);
     expect(overlay.targets).toEqual([94]);

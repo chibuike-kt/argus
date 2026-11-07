@@ -18,38 +18,14 @@ import {
 import { IconButton } from "@/components/ui/icon-button";
 import { Button } from "@/components/ui/button";
 import { CoinIcon } from "@/components/ui/coin-icon";
-import { instrument } from "@/mocks/fixtures";
+import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { useDrawing } from "@/components/chart/drawing-context";
+import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import { useCommandPalette } from "@/components/workspace/command-palette";
 import { useArgusActivity } from "@/components/workspace/argus-activity-feed";
-
-const INTERVAL_GROUPS: { label: string; items: [string, string][] }[] = [
-  {
-    label: "Minutes",
-    items: [
-      ["1m", "1 minute"],
-      ["3m", "3 minutes"],
-      ["5m", "5 minutes"],
-      ["15m", "15 minutes"],
-      ["30m", "30 minutes"],
-    ],
-  },
-  {
-    label: "Hours",
-    items: [
-      ["1H", "1 hour"],
-      ["4H", "4 hours"],
-    ],
-  },
-  {
-    label: "Days",
-    items: [
-      ["1D", "1 day"],
-      ["1W", "1 week"],
-    ],
-  },
-];
+import { fixturesEnabled } from "@/mocks/fixtures-as-api";
+import type { ApiInstrument } from "@/api/types";
 
 function Divider() {
   return <span className="mx-0.5 h-5 w-px bg-line" />;
@@ -68,16 +44,42 @@ function ToolbarBtn({ icon, label, text }: { icon: ReactNode; label: string; tex
   );
 }
 
-function IntervalMenu({ tf, onSelect }: { tf: string; onSelect: (v: string) => void }) {
+// The backend has only ever evaluated 1m (cmd/argus-worker/processing.go's
+// own comment on why); showing a menu of 5m/15m/1H/etc that silently did
+// nothing, or worse, resampled 1m candles in the browser into something
+// that looks like a different timeframe but isn't, would misrepresent
+// what is actually being shown (web-wiring-followup brief, Part 2). This
+// is a locked, disabled control instead of a removed one, so the
+// timeframe ARGUS evaluates stays visible even though it cannot be
+// changed yet.
+function TimeframeLock({ tf }: { tf: string }) {
+  return (
+    <Tooltip content="More timeframes need the aggregation work (not built yet)">
+      <span
+        aria-disabled="true"
+        className="inline-flex h-7 cursor-not-allowed items-center gap-1 rounded-md px-2 text-[13px] font-semibold text-fg-subtle"
+      >
+        {tf}
+      </span>
+    </Tooltip>
+  );
+}
+
+// Lists every real instrument (GET /instruments, via the workspace) and
+// switches the selected one on click -- navigating to
+// /analysis?instrumentId=<id> re-enters exactly the URL-driven resolution
+// analysis-workspace.tsx's own setup-selection effect already implements
+// (clearing setupId falls through to that instrument's own most-recently-
+// updated setup), so no separate instrument-switching logic is needed
+// here.
+function SymbolPicker({ instrument, instruments }: { instrument?: ApiInstrument; instruments: ApiInstrument[] }) {
+  const navigate = useNavigate();
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <button
-          aria-label="Interval"
-          title="Interval"
-          className="focus-ring inline-flex h-7 items-center gap-1 rounded-md px-2 text-[13px] font-semibold text-fg outline-none transition-colors hover:bg-white/5 data-[state=open]:bg-white/5"
-        >
-          {tf}
+        <button className="focus-ring flex items-center gap-2 rounded-md px-2 py-1 outline-none transition-colors hover:bg-white/5 data-[state=open]:bg-white/5">
+          <CoinIcon symbol={instrument?.native_symbol ?? "?"} size={20} />
+          <span className="text-sm font-semibold">{instrument?.native_symbol ?? "Select instrument"}</span>
           <CaretDown className="size-3.5 text-fg-subtle" />
         </button>
       </DropdownMenu.Trigger>
@@ -85,33 +87,27 @@ function IntervalMenu({ tf, onSelect }: { tf: string; onSelect: (v: string) => v
         <DropdownMenu.Content
           align="start"
           sideOffset={6}
-          className="glass-strong z-[60] min-w-[190px] rounded-lg p-1 shadow-xl"
+          className="glass-strong z-[60] max-h-[320px] min-w-[220px] overflow-y-auto rounded-lg p-1 shadow-xl"
         >
-          {INTERVAL_GROUPS.map((g, gi) => (
-            <DropdownMenu.Group key={g.label}>
-              {gi > 0 && <DropdownMenu.Separator className="my-1 h-px bg-line" />}
-              <DropdownMenu.Label className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-fg-subtle">
-                {g.label}
-              </DropdownMenu.Label>
-              {g.items.map(([value, label]) => (
-                <DropdownMenu.Item
-                  key={value}
-                  onSelect={() => onSelect(value)}
-                  className={cn(
-                    "flex cursor-pointer items-center justify-between rounded-md px-2.5 py-1.5 text-[13px] outline-none transition-colors",
-                    "data-[highlighted]:bg-white/5",
-                    value === tf ? "text-fg" : "text-fg-muted data-[highlighted]:text-fg",
-                  )}
-                >
-                  <span className="flex items-center gap-2">
-                    <Check className={cn("size-3.5", value === tf ? "opacity-100" : "opacity-0")} />
-                    <span className="font-medium">{value}</span>
-                  </span>
-                  <span className="text-[11px] text-fg-subtle">{label}</span>
-                </DropdownMenu.Item>
-              ))}
-            </DropdownMenu.Group>
+          {instruments.map((inst) => (
+            <DropdownMenu.Item
+              key={inst.id}
+              onSelect={() => navigate(`/analysis?instrumentId=${inst.id}`)}
+              className={cn(
+                "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] outline-none transition-colors",
+                "data-[highlighted]:bg-white/5",
+                inst.id === instrument?.id ? "text-fg" : "text-fg-muted data-[highlighted]:text-fg",
+              )}
+            >
+              <Check className={cn("size-3.5 shrink-0", inst.id === instrument?.id ? "opacity-100" : "opacity-0")} />
+              <CoinIcon symbol={inst.native_symbol} size={16} />
+              <span className="font-medium">{inst.native_symbol}</span>
+              <span className="ml-auto text-[11px] text-fg-subtle">{inst.provider}</span>
+            </DropdownMenu.Item>
           ))}
+          {instruments.length === 0 && (
+            <div className="px-2.5 py-2 text-[12px] text-fg-subtle">No instruments registered.</div>
+          )}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
@@ -121,7 +117,8 @@ function IntervalMenu({ tf, onSelect }: { tf: string; onSelect: (v: string) => v
 // The analysis workspace's single top bar: ARGUS identity and nav on the left,
 // then the chart controls, then the chart actions and account on the right.
 export function ChartToolbar() {
-  const { timeframe: tf, setTimeframe: setTf, drawings } = useDrawing();
+  const { timeframe: tf, drawings } = useDrawing();
+  const { instrument, instruments } = useAnalysisWorkspace();
   const navigate = useNavigate();
   const palette = useCommandPalette();
   const activity = useArgusActivity();
@@ -138,15 +135,11 @@ export function ChartToolbar() {
 
       <Divider />
 
-      <button className="focus-ring flex items-center gap-2 rounded-md px-2 py-1 hover:bg-white/5">
-        <CoinIcon symbol={instrument.symbol} size={20} />
-        <span className="text-sm font-semibold">{instrument.symbol}</span>
-        <CaretDown className="size-3.5 text-fg-subtle" />
-      </button>
+      <SymbolPicker instrument={instrument} instruments={instruments} />
 
       <Divider />
 
-      <IntervalMenu tf={tf} onSelect={setTf} />
+      <TimeframeLock tf={tf} />
 
       <Divider />
 
@@ -166,16 +159,20 @@ export function ChartToolbar() {
             Ctrl K
           </kbd>
         </button>
-        <Divider />
-        <Button
-          variant="glass"
-          size="sm"
-          className="gap-1.5"
-          onClick={activity.replay}
-          title="Replay ARGUS's analysis steps"
-        >
-          <ClockCounterClockwise className="size-4 text-accent" /> Replay
-        </Button>
+        {fixturesEnabled() && (
+          <>
+            <Divider />
+            <Button
+              variant="glass"
+              size="sm"
+              className="gap-1.5"
+              onClick={activity.replay}
+              title="Replay ARGUS's analysis steps (sample data)"
+            >
+              <ClockCounterClockwise className="size-4 text-accent" /> Replay
+            </Button>
+          </>
+        )}
         <IconButton
           variant="ghost"
           size="sm"

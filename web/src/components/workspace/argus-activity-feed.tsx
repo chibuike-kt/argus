@@ -18,6 +18,7 @@ import {
 } from "@phosphor-icons/react";
 import { ProvenanceChip } from "@/components/ui/provenance-chip";
 import { annotations, setup, dataQuality } from "@/mocks/fixtures";
+import { fixturesEnabled } from "@/mocks/fixtures-as-api";
 import { formatUTC } from "@/lib/format";
 import type { Provenance } from "@/types/domain";
 import { cn } from "@/lib/cn";
@@ -31,6 +32,15 @@ const fmt = (p: number) => Math.round(p).toLocaleString("en-US");
 // This is ARGUS's own voice (the same role as its chart marks), which is
 // why the tray reads in the indigo accent, not the neutral chrome v3 just
 // pulled everything else into.
+//
+// This script is fixture content end to end -- it narrates fixture
+// annotations/setup/dataQuality, not whatever real setup is actually
+// selected -- so it only ever plays when VITE_USE_FIXTURES=true
+// (web-wiring-followup brief, Part 1). With real data active (the
+// default), ArgusActivityProvider below renders nothing and never
+// auto-plays: these toasts calling "Data verified" and quoting fixture
+// prices over real evidence would be false for the data actually on
+// screen, not just unlabelled.
 interface Step {
   icon: Icon;
   prov: Provenance;
@@ -169,6 +179,7 @@ export function ArgusActivityProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const replay = useCallback(() => {
+    if (!fixturesEnabled()) return;
     clearTimers();
     setToasts([]);
     const script = buildScript();

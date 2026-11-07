@@ -73,6 +73,24 @@ func (e SetupEventEventType) Valid() bool {
 	}
 }
 
+// Defines values for ListInstrumentCandlesParamsOrder.
+const (
+	Asc  ListInstrumentCandlesParamsOrder = "asc"
+	Desc ListInstrumentCandlesParamsOrder = "desc"
+)
+
+// Valid indicates whether the value is a known member of the ListInstrumentCandlesParamsOrder enum.
+func (e ListInstrumentCandlesParamsOrder) Valid() bool {
+	switch e {
+	case Asc:
+		return true
+	case Desc:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListSetupsParamsState.
 const (
 	ListSetupsParamsStateActionable  ListSetupsParamsState = "actionable"
@@ -134,8 +152,31 @@ type Instrument struct {
 	TickSize           string   `json:"tick_size"`
 }
 
+// POISnapshot defines model for POISnapshot.
+type POISnapshot struct {
+	Direction                string    `json:"direction"`
+	High                     string    `json:"high"`
+	InDiscount               bool      `json:"in_discount"`
+	Low                      string    `json:"low"`
+	OrderBlockCandleId       int64     `json:"order_block_candle_id"`
+	OrderBlockCandleRevision int32     `json:"order_block_candle_revision"`
+	OrderBlockOpenTime       time.Time `json:"order_block_open_time"`
+	QmrFailCandleId          int64     `json:"qmr_fail_candle_id"`
+	QmrFailCandleRevision    int32     `json:"qmr_fail_candle_revision"`
+	StructuralSwingId        int64     `json:"structural_swing_id"`
+	Type                     string    `json:"type"`
+}
+
 // PlanSnapshot defines model for PlanSnapshot.
-type PlanSnapshot map[string]interface{}
+type PlanSnapshot struct {
+	Direction        string           `json:"direction"`
+	Entry            string           `json:"entry"`
+	Poi              POISnapshot      `json:"poi"`
+	ProtectedSwingId int64            `json:"protected_swing_id"`
+	Status           string           `json:"status"`
+	Stop             string           `json:"stop"`
+	Targets          []TargetSnapshot `json:"targets"`
+}
 
 // Setup defines model for Setup.
 type Setup struct {
@@ -175,6 +216,12 @@ type SetupEvent struct {
 // SetupEventEventType defines model for SetupEvent.EventType.
 type SetupEventEventType string
 
+// TargetSnapshot defines model for TargetSnapshot.
+type TargetSnapshot struct {
+	Level string `json:"level"`
+	Rr    string `json:"rr"`
+}
+
 // ListInstrumentsParams defines parameters for ListInstruments.
 type ListInstrumentsParams struct {
 	// AfterId Keyset cursor: return instruments with id strictly greater than this value, ordered by id. Omitted means the first page. This is a different ordering from calling this endpoint with no parameters at all pages through (by id, not by provider then native_symbol) -- intentional, see internal/instruments.Store's own ListAllFiltered/ListAll split.
@@ -191,7 +238,13 @@ type ListInstrumentCandlesParams struct {
 
 	// Limit Maximum candles returned. Default 500, maximum 1000 -- a client cannot request the whole table in one call regardless of how wide [from, to) is.
 	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Order asc (default): oldest first, unchanged from before this parameter existed. desc: newest first -- "the most recent N" without already knowing a [from, to) range narrow enough to contain them (web-wiring-followup brief, Part 4). limit still applies either way, enforced in SQL.
+	Order *ListInstrumentCandlesParamsOrder `form:"order,omitempty" json:"order,omitempty"`
 }
+
+// ListInstrumentCandlesParamsOrder defines parameters for ListInstrumentCandles.
+type ListInstrumentCandlesParamsOrder string
 
 // ListSetupsParams defines parameters for ListSetups.
 type ListSetupsParams struct {
@@ -380,6 +433,19 @@ func (siw *ServerInterfaceWrapper) ListInstrumentCandles(w http.ResponseWriter, 
 			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
 		} else {
 			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "order" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "order", r.URL.Query(), &params.Order, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "order"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "order", Err: err})
 		}
 		return
 	}
@@ -1107,43 +1173,49 @@ func (sh *strictHandler) ListSetupEvents(w http.ResponseWriter, r *http.Request,
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"hB9I7GINmdaqbJp18/Ts4/uP/wsAAP//",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

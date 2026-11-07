@@ -1,10 +1,13 @@
 // Mapping from wire shapes (api/types.ts) to this app's existing display
 // types (@/types/domain), so the already-built components keep their
 // current props unchanged (the brief's own "pure wiring" rule) -- the
-// conversion to a plain display `number` happens once, here, at the edge,
-// using the exact scaled-integer string path (api/money.ts), never a raw
-// division.
-import { formatScaledInt, parseRatString, scaledIntToNumber } from "./money";
+// conversion to a plain display `number` happens once, here, at the edge.
+// plan_snapshot's price fields arrive as decimal strings since Part 3
+// (web-wiring-followup brief), the same already-formatted shape as candle
+// OHLCV and instrument tick_size, so formatMoney (Number on the string)
+// is now the one conversion every price field in this API goes through --
+// no scale lookup needed at the mapper level anymore.
+import { parseRatString } from "./money";
 import type { ApiInstrument, ApiSetup, ApiSetupEvent } from "./types";
 import type { EvidenceItem, POIType, SetupState, SetupSummary } from "@/types/domain";
 
@@ -41,7 +44,6 @@ export function instrumentSymbol(inst: ApiInstrument): string {
 // display) into the row shape the /setups table and the "other setups"
 // strip already render.
 export function toSetupSummary(setup: ApiSetup, instrument: ApiInstrument): SetupSummary {
-  const scale = instrument.price_scale;
   const targets = setup.plan_snapshot.targets;
   const lastTarget = targets[targets.length - 1];
   // R:R shown in these summary rows is the furthest target's own R:R, the
@@ -54,8 +56,8 @@ export function toSetupSummary(setup: ApiSetup, instrument: ApiInstrument): Setu
     direction: setup.direction === "bearish" ? "bearish" : "bullish",
     poiType: mapApiPoiType(setup.poi_type),
     timeframe: setup.timeframe,
-    entry: scaledIntToNumber(setup.plan_snapshot.entry, scale),
-    stop: scaledIntToNumber(setup.plan_snapshot.stop, scale),
+    entry: formatMoney(setup.plan_snapshot.entry),
+    stop: formatMoney(setup.plan_snapshot.stop),
     rr,
     state: mapApiState(setup.state),
     createdAt: setup.created_at,
@@ -107,25 +109,25 @@ export interface PlanOverlay {
   fromTime: string;
 }
 
-export function toPlanOverlay(setup: ApiSetup, instrument: ApiInstrument): PlanOverlay {
-  const scale = instrument.price_scale;
+export function toPlanOverlay(setup: ApiSetup): PlanOverlay {
   const plan = setup.plan_snapshot;
   return {
-    entry: scaledIntToNumber(plan.entry, scale),
-    stop: scaledIntToNumber(plan.stop, scale),
-    targets: plan.targets.map((t) => scaledIntToNumber(t.level, scale)),
-    poiLow: scaledIntToNumber(plan.poi.low, scale),
-    poiHigh: scaledIntToNumber(plan.poi.high, scale),
+    entry: formatMoney(plan.entry),
+    stop: formatMoney(plan.stop),
+    targets: plan.targets.map((t) => formatMoney(t.level)),
+    poiLow: formatMoney(plan.poi.low),
+    poiHigh: formatMoney(plan.poi.high),
     fromTime: plan.poi.order_block_open_time,
   };
 }
 
-// formatMoney is the one place a real, already-formatted decimal string
-// (candle OHLCV, instrument tick_size) gets turned into a display
-// number for an existing component's sake -- Number() on a string the
-// API itself already rendered exactly, never a division.
+// formatMoney is the one conversion every already-formatted decimal
+// string this API sends (candle OHLCV, instrument tick_size, and plan
+// snapshot prices since Part 3) goes through to become a display
+// number -- Number() on a string the API itself already rendered
+// exactly, never a division.
 export function formatMoney(decimalString: string): number {
   return Number(decimalString);
 }
 
-export { formatScaledInt, parseRatString };
+export { parseRatString };

@@ -45,7 +45,12 @@ export function fixtureApiInstruments(): ApiInstrument[] {
   }));
 }
 
-const toScaledInt = (v: number, scale: number) => Math.round(v * 10 ** scale);
+// toScaledString mirrors the real API's own plan_snapshot formatting
+// since Part 3 (web-wiring-followup brief): a decimal string at
+// PRICE_SCALE, not a bare scaled integer -- the fixture adapter's job is
+// to match the real wire shape exactly, so a component rendering fixture
+// data exercises the same string-parsing path it uses on real data.
+const toScaledString = (v: number) => v.toFixed(PRICE_SCALE);
 
 const STATE_FOR: Record<string, ApiSetupState> = {
   forming: "detected",
@@ -58,14 +63,14 @@ function fixturePlanSnapshot(entry: number, stop: number, targets: number[], dir
   return {
     status: "triggered",
     direction,
-    entry: toScaledInt(entry, PRICE_SCALE),
-    stop: toScaledInt(stop, PRICE_SCALE),
-    targets: targets.map((level) => ({ level: toScaledInt(level, PRICE_SCALE), rr: "1/1" })),
+    entry: toScaledString(entry),
+    stop: toScaledString(stop),
+    targets: targets.map((level) => ({ level: toScaledString(level), rr: "1/1" })),
     poi: {
       type: "order_block",
       direction,
-      low: toScaledInt(annotations.orderBlock.low, PRICE_SCALE),
-      high: toScaledInt(annotations.orderBlock.high, PRICE_SCALE),
+      low: toScaledString(annotations.orderBlock.low),
+      high: toScaledString(annotations.orderBlock.high),
       order_block_candle_id: 1,
       order_block_candle_revision: 1,
       order_block_open_time: fixtureCandles[annotations.orderBlock.fromIndex]?.openTime ?? fixtureCandles[0].openTime,

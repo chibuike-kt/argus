@@ -208,6 +208,15 @@ type Querier interface {
 	// rows than the endpoint will ever return, which is the entire point
 	// of the cap (worker-hardening brief, Part C).
 	ListClosedCandlesInRangeLimited(ctx context.Context, arg ListClosedCandlesInRangeLimitedParams) ([]Candle, error)
+	// ListClosedCandlesInRangeLimitedDesc is ListClosedCandlesInRangeLimited's
+	// own sibling for GET /instruments/{id}/candles?order=desc (web-wiring-
+	// followup brief, Part 4: "give me the most recent N" without already
+	// knowing a range). sqlc needs the ORDER BY direction literal in the SQL
+	// text itself -- it cannot be a bound parameter -- so this is a second,
+	// otherwise-identical query rather than one query with a dynamic order,
+	// matching how this file already has no query that varies its own SQL
+	// shape by parameter.
+	ListClosedCandlesInRangeLimitedDesc(ctx context.Context, arg ListClosedCandlesInRangeLimitedDescParams) ([]Candle, error)
 	// ListCurrentCandlesInRange is the read path aggregation uses: the current
 	// (non-superseded) row for every open_time in [start, end), ordered so the
 	// caller can scan once for first/last open/close and reduce for high/low/

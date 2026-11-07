@@ -124,7 +124,14 @@ export function ChartSurface({ className }: { className?: string }) {
     low: formatMoney(c.low),
     close: formatMoney(c.close),
   }));
-  const overlay = toPlanOverlay(setup, instrument);
+  const overlay = toPlanOverlay(setup);
+  // The chart window is now "the most recent MAX_CANDLES," not anchored
+  // at this setup's own evaluation_time (web-wiring-followup brief, Part
+  // 5) -- an older setup's formation candle can fall before that window
+  // starts. Rather than silently clipping the plan box/POI zone to
+  // whatever candle happens to be first on screen, this is surfaced as a
+  // small, honest label instead of hidden.
+  const formationOutsideWindow = new Date(overlay.fromTime) < new Date(chartCandles[0].openTime);
 
   return (
     <ChartSurfaceInner
@@ -134,6 +141,7 @@ export function ChartSurface({ className }: { className?: string }) {
       candles={chartCandles}
       poiZone={{ low: overlay.poiLow, high: overlay.poiHigh }}
       plan={{ entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime }}
+      formationOutsideWindow={formationOutsideWindow}
     />
   );
 }
@@ -145,6 +153,7 @@ function ChartSurfaceInner({
   candles,
   poiZone,
   plan,
+  formationOutsideWindow,
 }: {
   className?: string;
   symbol: string;
@@ -152,6 +161,7 @@ function ChartSurfaceInner({
   candles: ChartCandle[];
   poiZone: ChartPoiZone;
   plan: ChartPlanOverlay;
+  formationOutsideWindow: boolean;
 }) {
   const lastTime = unix(candles[candles.length - 1].openTime);
   const toData = (): CandlestickData<Time>[] =>
@@ -481,6 +491,11 @@ function ChartSurfaceInner({
             <span className={cn("ml-1 size-1.5 rounded-full", up ? "bg-up" : "bg-down")} />
           </div>
           <SampleDataBadge label="Sample % change" />
+          {formationOutsideWindow && (
+            <span className="rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
+              Setup formed before this window
+            </span>
+          )}
           <div className="tnum flex items-center gap-2.5 text-fg-subtle">
             <span>
               O{" "}

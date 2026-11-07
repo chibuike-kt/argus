@@ -38,6 +38,21 @@ WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
 ORDER BY open_time
 LIMIT $4;
 
+-- ListClosedCandlesInRangeLimitedDesc is ListClosedCandlesInRangeLimited's
+-- own sibling for GET /instruments/{id}/candles?order=desc (web-wiring-
+-- followup brief, Part 4: "give me the most recent N" without already
+-- knowing a range). sqlc needs the ORDER BY direction literal in the SQL
+-- text itself -- it cannot be a bound parameter -- so this is a second,
+-- otherwise-identical query rather than one query with a dynamic order,
+-- matching how this file already has no query that varies its own SQL
+-- shape by parameter.
+-- name: ListClosedCandlesInRangeLimitedDesc :many
+SELECT * FROM candles
+WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+  AND open_time >= $2 AND open_time < $3
+ORDER BY open_time DESC
+LIMIT $4;
+
 -- UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 -- a still-forming row in place for a later tick of the same minute.
 -- idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE
