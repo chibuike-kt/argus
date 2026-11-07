@@ -32,9 +32,12 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	_ = oneCandle(t, db, instrumentID, 0, 85)
 	_ = oneCandle(t, db, instrumentID, 1, 90)
 
-	r := NewRouter(Deps{Logger: slog.Default(), DB: db})
+	deps, users, sessions := testAuthDeps(db)
+	deps.Logger, deps.DB = slog.Default(), db
+	r := NewRouter(deps)
 	srv := httptest.NewServer(r)
 	defer srv.Close()
+	client := authenticatedClient(t, srv.URL, users, sessions)
 
 	t.Run("list instruments includes the disabled test instrument", func(t *testing.T) {
 		// after_id=instrumentID-1 pages starting exactly at the test
@@ -46,7 +49,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 		// now (web-wiring-polish brief, item 2): the default changed to
 		// enabled=true only, and this test's own instrument is always
 		// disabled (instruments.Store.Insert's own doc comment).
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d&enabled=all", srv.URL, instrumentID-1))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d&enabled=all", srv.URL, instrumentID-1))
 		if err != nil {
 			t.Fatalf("GET /instruments: %v", err)
 		}
@@ -90,7 +93,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 
 		fetch := func(query string) []Instrument {
 			t.Helper()
-			resp, err := http.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d%s", srv.URL, beforeBoth, query))
+			resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d%s", srv.URL, beforeBoth, query))
 			if err != nil {
 				t.Fatalf("GET /instruments%s: %v", query, err)
 			}
@@ -135,7 +138,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 			t.Fatalf("enabled=all: got ids %+v, want both %d and %d", allRows, enabledID, instrumentID)
 		}
 
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/instruments?enabled=maybe", srv.URL))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments?enabled=maybe", srv.URL))
 		if err != nil {
 			t.Fatalf("GET /instruments?enabled=maybe: %v", err)
 		}
@@ -148,7 +151,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	t.Run("candles in range, decimal-string OHLCV", func(t *testing.T) {
 		from := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 		to := time.Date(2026, 11, 6, 12, 5, 0, 0, time.UTC)
-		resp, err := http.Get(candlesURL(srv.URL, instrumentID, from, to))
+		resp, err := client.Get(candlesURL(srv.URL, instrumentID, from, to))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles: %v", err)
 		}
@@ -174,7 +177,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	t.Run("candles order=desc returns newest first", func(t *testing.T) {
 		from := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 		to := time.Date(2026, 11, 6, 12, 5, 0, 0, time.UTC)
-		resp, err := http.Get(candlesURLWithOrder(srv.URL, instrumentID, from, to, "desc"))
+		resp, err := client.Get(candlesURLWithOrder(srv.URL, instrumentID, from, to, "desc"))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles?order=desc: %v", err)
 		}
@@ -198,7 +201,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 		from := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 		to := time.Date(2026, 11, 6, 12, 5, 0, 0, time.UTC)
 		u := candlesURLWithOrder(srv.URL, instrumentID, from, to, "desc") + "&limit=1"
-		resp, err := http.Get(u)
+		resp, err := client.Get(u)
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles?order=desc&limit=1: %v", err)
 		}
@@ -213,7 +216,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	})
 
 	t.Run("candles order=desc with no from/to returns newest first (item 1)", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/instruments/%d/candles?order=desc&limit=2", srv.URL, instrumentID))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments/%d/candles?order=desc&limit=2", srv.URL, instrumentID))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles?order=desc&limit=2: %v", err)
 		}
@@ -235,7 +238,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	})
 
 	t.Run("candles order=asc with no from is still a 400 (unchanged)", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/instruments/%d/candles?order=asc&limit=2", srv.URL, instrumentID))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments/%d/candles?order=asc&limit=2", srv.URL, instrumentID))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles?order=asc&limit=2: %v", err)
 		}
@@ -248,7 +251,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	t.Run("candles order=sideways is a 400", func(t *testing.T) {
 		from := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 		to := time.Date(2026, 11, 6, 12, 5, 0, 0, time.UTC)
-		resp, err := http.Get(candlesURLWithOrder(srv.URL, instrumentID, from, to, "sideways"))
+		resp, err := client.Get(candlesURLWithOrder(srv.URL, instrumentID, from, to, "sideways"))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles?order=sideways: %v", err)
 		}
@@ -261,7 +264,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	t.Run("candles for an unknown instrument is 404", func(t *testing.T) {
 		to := time.Now().UTC()
 		from := to.Add(-time.Hour)
-		resp, err := http.Get(candlesURL(srv.URL, instrumentID+999999, from, to))
+		resp, err := client.Get(candlesURL(srv.URL, instrumentID+999999, from, to))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles: %v", err)
 		}

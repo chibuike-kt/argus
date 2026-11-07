@@ -55,6 +55,41 @@ services:
     environment:
       ARGUS_DATABASE_URL: postgres://argus:argus@postgres:5432/argus?sslmode=disable
       ARGUS_REDIS_URL: redis://redis:6379/0
+      # ADR-015 v0.2.0 (authentication). Values match
+      # internal/config/auth.go's own envDefault -- listed explicitly
+      # here (rather than relying on the Go defaults alone) so the
+      # container's auth behavior is visible from this file.
+      ARGUS_AUTH_ARGON_MEMORY_KIB: "65536"
+      ARGUS_AUTH_ARGON_ITERATIONS: "3"
+      ARGUS_AUTH_ARGON_PARALLELISM: "1"
+      ARGUS_AUTH_ARGON_SALT_LEN: "16"
+      ARGUS_AUTH_ARGON_KEY_LEN: "32"
+      ARGUS_AUTH_ARGON_MAX_CONCURRENT: "4"
+      ARGUS_AUTH_PASSWORD_MIN_LENGTH: "12"
+      ARGUS_AUTH_PASSWORD_MAX_LENGTH: "128"
+      ARGUS_AUTH_SESSION_IDLE_DURATION: 168h
+      ARGUS_AUTH_SESSION_ABSOLUTE_DURATION: 720h
+      ARGUS_AUTH_SENSITIVE_REAUTH_WINDOW: 10m
+      ARGUS_AUTH_SESSION_TOUCH_THROTTLE: 1m
+      ARGUS_AUTH_EMAIL_VERIFICATION_TTL: 24h
+      ARGUS_AUTH_PASSWORD_RESET_TTL: 1h
+      ARGUS_AUTH_RATE_LOGIN_FAILURES_PER_ACCOUNT: "5"
+      ARGUS_AUTH_RATE_LOGIN_ATTEMPTS_PER_IP: "20"
+      ARGUS_AUTH_RATE_REGISTER_PER_IP: "10"
+      ARGUS_AUTH_RATE_FORGOT_PASSWORD_PER_ACCOUNT: "5"
+      ARGUS_AUTH_RATE_FORGOT_PASSWORD_PER_IP: "10"
+      ARGUS_AUTH_RATE_RESEND_VERIFICATION_PER_ACCOUNT: "5"
+      ARGUS_AUTH_RATE_RESEND_VERIFICATION_PER_IP: "10"
+      ARGUS_AUTH_LOGIN_DELAY_STEP: 1s
+      ARGUS_AUTH_LOGIN_DELAY_MAX: 10s
+      ARGUS_AUTH_COOKIE_NAME_PROD: __Host-argus_session
+      ARGUS_AUTH_COOKIE_NAME_LOCAL: argus_session
+      # Keep in sync with the frontend dev server's own port
+      # (web/vite.config.ts) -- a state-changing request whose Origin
+      # does not exactly match one of these is rejected (ADR-015
+      # addendum row 6).
+      ARGUS_AUTH_ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      ARGUS_AUTH_TRUST_PROXY_FOR_IP: "false"
     ports:
       - "8080:8080"
 

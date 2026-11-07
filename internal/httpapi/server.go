@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/chibuike-kt/argus/internal/clock"
+	"github.com/chibuike-kt/argus/internal/config"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/setups"
@@ -22,6 +23,20 @@ type Deps struct {
 	Logger *slog.Logger
 	DB     *sql.DB
 	Redis  *redis.Client
+
+	// Auth is internal/identity/service.Service; Sessions is
+	// *internal/identity/session.Store; Users is *internal/identity.Store
+	// -- all three declared here as this package's own consumer-defined
+	// interfaces (authService/sessionResolver/userLookup, this brief's
+	// own rule 7) so server.go does not need to import those packages
+	// just for a type name, and so a test can satisfy them with a
+	// hand-written fake instead of a real Postgres connection.
+	Auth         authService
+	Sessions     sessionResolver
+	Users        userLookup
+	AuthPolicy   config.AuthPolicy
+	IsProduction bool
+	Clock        clock.Clock
 }
 
 // NewRouter builds the chi router with base middleware and routes.
@@ -53,16 +68,33 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		clk := d.Clock
+		if clk == nil {
+			clk = clock.Real{}
+		}
+		// Every /api/v1 request gets ip/User-Agent in context (public
+		// or not -- Register/Login/etc. need it too), then CSRF
+		// checking on state-changing methods, then deny-by-default
+		// session resolution (requireSession's own public-path
+		// allow-list is what actually exempts a route, not this
+		// ordering).
+		r.Use(requestMetaMiddleware(d.AuthPolicy.TrustProxyForIP))
+		r.Use(csrfProtection(d.AuthPolicy.AllowedOrigins))
+		r.Use(requireSession(d.Sessions, d.Users, d.AuthPolicy.CookieName(d.IsProduction), d.AuthPolicy.SessionTouchThrottle, clk, d.Logger))
+
 		// OpenAPI-first (ADR-004): every operation in api/openapi.yaml,
 		// generated into openapi_gen.go by oapi-codegen (make generate),
 		// is served through the one strict handler below -- including
 		// /ping, which this replaces (it was hand-rolled before any
 		// feature module had a generated route to mount alongside it).
 		api := &apiHandler{
-			store:       setups.NewStore(d.DB),
-			instruments: instruments.NewStore(d.DB),
-			candles:     marketdata.NewStore(d.DB, clock.Real{}),
-			logger:      d.Logger,
+			store:        setups.NewStore(d.DB),
+			instruments:  instruments.NewStore(d.DB),
+			candles:      marketdata.NewStore(d.DB, clock.Real{}),
+			auth:         d.Auth,
+			authPolicy:   d.AuthPolicy,
+			isProduction: d.IsProduction,
+			logger:       d.Logger,
 		}
 		strict := NewStrictHandlerWithOptions(api, nil, StrictHTTPServerOptions{
 			RequestErrorHandlerFunc: func(w http.ResponseWriter, _ *http.Request, err error) {

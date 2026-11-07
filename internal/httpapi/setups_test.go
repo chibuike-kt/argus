@@ -9,10 +9,48 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chibuike-kt/argus/internal/config"
+	"github.com/chibuike-kt/argus/internal/identity"
+	"github.com/chibuike-kt/argus/internal/identity/session"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/quant"
 	"github.com/chibuike-kt/argus/internal/setups"
 )
+
+// fakeSessionResolver/fakeUserLookup satisfy this package's own
+// sessionResolver/userLookup interfaces (auth_middleware.go) with no
+// database at all -- deny-by-default (ADR-015) now runs ahead of every
+// /api/v1 handler, this package's own pre-auth router tests included,
+// so a NewRouter-level test needs *some* session to reach its handler;
+// these fakes accept any non-empty raw token as valid.
+type fakeSessionResolver struct{ userID int64 }
+
+func (f fakeSessionResolver) Resolve(_ context.Context, rawToken string) (session.Session, error) {
+	if rawToken == "" {
+		return session.Session{}, session.ErrNotFound
+	}
+	return session.Session{ID: 1, UserID: f.userID}, nil
+}
+
+func (f fakeSessionResolver) Touch(context.Context, int64) error { return nil }
+
+type fakeUserLookup struct{ user identity.User }
+
+func (f fakeUserLookup) GetByID(context.Context, int64) (identity.User, error) {
+	return f.user, nil
+}
+
+// authTestCookie is the fixed session cookie every router-level test
+// in this file attaches, matching fakeSessionResolver's own "any
+// non-empty token is valid" rule.
+const authTestCookie = "test-session-token"
+
+func withAuthTestDeps(d Deps) Deps {
+	d.Sessions = fakeSessionResolver{userID: 1}
+	d.Users = fakeUserLookup{user: identity.User{ID: 1, Email: "router-test@example.com"}}
+	d.AuthPolicy = config.AuthPolicy{CookieNameLocal: "argus_session"}
+	return d
+}
 
 // setupsTestInstruments is the fakeInstrumentsStore every setups.go
 // handler test below needs once it reaches the instrument-scale lookup
@@ -255,11 +293,16 @@ func TestListSetups_InvalidInstrumentID(t *testing.T) {
 // only needs a non-nil Logger for this case: the request fails before
 // touching the database.
 func TestListSetups_MissingRequiredParam(t *testing.T) {
-	r := NewRouter(Deps{Logger: slog.Default()})
+	r := NewRouter(withAuthTestDeps(Deps{Logger: slog.Default()}))
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/api/v1/setups")
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/setups", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: "argus_session", Value: authTestCookie})
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /api/v1/setups: %v", err)
 	}

@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 )
 
 type Querier interface {
@@ -34,6 +35,14 @@ type Querier interface {
 	// than a confusing trigger error (guide 14: queue/worker retries must not
 	// turn a repeat delivery into a spurious failure).
 	CloseCandle(ctx context.Context, arg CloseCandleParams) (Candle, error)
+	// ConsumeEmailToken marks a token used and returns the row, atomically,
+	// only if it exists for the given purpose, has not been used yet, and
+	// has not expired -- one statement, not a separate check-then-mark
+	// pair, so two concurrent requests consuming the same token can never
+	// both see it as valid (classic single-use-token TOCTOU race). Zero
+	// rows back means "invalid, already used, or expired"; the caller
+	// cannot and does not need to distinguish which.
+	ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (EmailToken, error)
 	// EarliestCurrentSwingAfter finds the swing immediately following a
 	// given pivot_time -- the shape test's up-leg endpoint (spec section 9:
 	// "this low out to the following confirmed swing high"). Strictly
@@ -79,6 +88,19 @@ type Querier interface {
 	GetLatestClosedCandle(ctx context.Context, instrumentID int64) (Candle, error)
 	GetLatestQuote(ctx context.Context, instrumentID int64) (LatestQuote, error)
 	GetProcessingCursor(ctx context.Context, arg GetProcessingCursorParams) (ProcessingCursor, error)
+	// GetSessionByIDForUser is DELETE /auth/sessions/{id}'s own existence +
+	// ownership check, before revoking: sql.ErrNoRows here means exactly
+	// "404" whether the id does not exist at all or belongs to a different
+	// user (the brief's own instruction -- a session id that is not yours
+	// should not even confirm that it exists, so both cases produce the
+	// identical error).
+	GetSessionByIDForUser(ctx context.Context, arg GetSessionByIDForUserParams) (Session, error)
+	// GetSessionByTokenHash returns the raw row regardless of revoked/idle/
+	// absolute expiry state -- session.Resolve (internal/identity/session)
+	// decides what "valid" means in Go, in one place, rather than that
+	// logic being split between a WHERE clause here and a second check
+	// there.
+	GetSessionByTokenHash(ctx context.Context, tokenHash string) (Session, error)
 	GetSetupByID(ctx context.Context, id int64) (Setup, error)
 	GetSetupByIdentity(ctx context.Context, arg GetSetupByIdentityParams) (Setup, error)
 	GetStructureState(ctx context.Context, arg GetStructureStateParams) (StructureState, error)
@@ -87,7 +109,11 @@ type Querier interface {
 	// reference pointer (which names a specific row, not a position) back
 	// to its price.
 	GetSwingByID(ctx context.Context, id int64) (ConfirmedSwing, error)
+	GetUserByEmailNormalized(ctx context.Context, emailNormalized string) (User, error)
+	GetUserByID(ctx context.Context, id int64) (User, error)
+	InsertAuthEvent(ctx context.Context, arg InsertAuthEventParams) error
 	InsertCorrectingCandle(ctx context.Context, arg InsertCorrectingCandleParams) (Candle, error)
+	InsertEmailToken(ctx context.Context, arg InsertEmailTokenParams) (EmailToken, error)
 	// InsertInstrument always writes enabled = FALSE. There is no parameter for
 	// it: enablement cannot be set through this query, and no other query in
 	// this file sets it either (ADR-006, ADR-007 -- enablement stays gated on
@@ -97,6 +123,7 @@ type Querier interface {
 	// default (000002): every value must come from the caller, and the
 	// database rejects the insert if any is left out.
 	InsertInstrument(ctx context.Context, arg InsertInstrumentParams) (Instrument, error)
+	InsertSession(ctx context.Context, arg InsertSessionParams) (Session, error)
 	// InsertSetup creates the row for a brand-new identity (spec section
 	// 15.1: the first step whose TradePlan.Status != PlanNone for this
 	// identity). last_event_id is set afterward, by UpdateSetup, once the
@@ -108,6 +135,7 @@ type Querier interface {
 	InsertStructureEvent(ctx context.Context, arg InsertStructureEventParams) (StructureEvent, error)
 	InsertSweep(ctx context.Context, arg InsertSweepParams) (LiquiditySweep, error)
 	InsertSwing(ctx context.Context, arg InsertSwingParams) (ConfirmedSwing, error)
+	InsertUser(ctx context.Context, arg InsertUserParams) (User, error)
 	// LatestCurrentEventBefore orders by trigger_open_time because "before
 	// a point in time" is meaningful in candle time, not database insertion
 	// order. Used, like LatestCurrentSwingBefore, to reconstruct as-of
@@ -178,6 +206,9 @@ type Querier interface {
 	// this is equivalent to, but more direct than, bounding
 	// trigger_open_time by asOf minus one interval.
 	LatestSweepValidatedEventKnownAsOf(ctx context.Context, arg LatestSweepValidatedEventKnownAsOfParams) (StructureEvent, error)
+	// ListActiveSessionsForUser is GET /auth/sessions' own read path:
+	// neither revoked nor expired (idle or absolute) as of now.
+	ListActiveSessionsForUser(ctx context.Context, arg ListActiveSessionsForUserParams) ([]Session, error)
 	// ListAllInstruments is GET /instruments' own read path -- every
 	// registered instrument regardless of enablement, unlike
 	// ListEnabledInstruments (the worker's own read path). Adding neither
@@ -207,6 +238,10 @@ type Querier interface {
 	// exactly the bug this item fixes, so "no parameter" must not mean
 	// "every row" the way it used to.
 	ListAllInstrumentsPaged(ctx context.Context, arg ListAllInstrumentsPagedParams) ([]Instrument, error)
+	// ListAuthEventsForUser exists for tests (confirming an event was
+	// written with the right shape) -- nothing in the product itself reads
+	// this table back yet.
+	ListAuthEventsForUser(ctx context.Context, userID sql.NullInt64) ([]AuthEvent, error)
 	// ListClosedCandlesInRangeLimited is GET /instruments/{id}/candles' own
 	// read path (internal/httpapi): current, CLOSED candles only (a
 	// forming candle's own values can still change, so it is never a
@@ -286,6 +321,7 @@ type Querier interface {
 	// itself for the same reason ListClosedCandlesInRangeLimited's own
 	// comment gives.
 	ListSetupsByInstrumentFiltered(ctx context.Context, arg ListSetupsByInstrumentFilteredParams) ([]Setup, error)
+	MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) (User, error)
 	// RecordCandleGap is idempotent: detecting the same gap twice (a retried
 	// or duplicate-delivered detection event) must not create a second row or
 	// error. The DO UPDATE is a deliberate no-op (detected_at keeps its
@@ -303,6 +339,15 @@ type Querier interface {
 	ResolveSupersedeEvent(ctx context.Context, arg ResolveSupersedeEventParams) (int64, error)
 	ResolveSupersedeSweep(ctx context.Context, arg ResolveSupersedeSweepParams) (int64, error)
 	ResolveSupersedeSwing(ctx context.Context, arg ResolveSupersedeSwingParams) (int64, error)
+	RevokeAllSessionsForUser(ctx context.Context, arg RevokeAllSessionsForUserParams) error
+	// RevokeSessionForUser is both "logout" (the session's own id, its own
+	// user_id) and "DELETE /auth/sessions/{id}" (an id the caller must
+	// also own, checked separately above before this runs) in one query:
+	// the user_id = $2 guard is defense in depth, and revoked_at IS NULL
+	// makes a second revoke of an already-revoked session affect zero rows
+	// rather than erroring -- logout's own required idempotence, which
+	// DELETE /auth/sessions/{id} gets for free by sharing this query.
+	RevokeSessionForUser(ctx context.Context, arg RevokeSessionForUserParams) (int64, error)
 	// SetProcessingCursor is a plain upsert: processing_cursors is a
 	// mutable projection, not an evidence record (000009's comment on the
 	// table explains why), so it is written in place rather than through
@@ -313,6 +358,21 @@ type Querier interface {
 	// migration that is written in place rather than through a supersede
 	// handshake (000005's comment on the table explains why).
 	SetStructureState(ctx context.Context, arg SetStructureStateParams) (StructureState, error)
+	// TouchSession slides the idle expiry and records last_seen_at -- the
+	// caller (the auth middleware) throttles how often this actually runs
+	// (at most once a minute per session, ADR-015's own instruction), not
+	// this query.
+	TouchSession(ctx context.Context, arg TouchSessionParams) error
+	// UpdateLastPasswordAt is Part 2's own reauth path (ADR-015 addendum
+	// row 5) -- included now so the column has a writer once that work
+	// lands; nothing in Part 1 calls it.
+	UpdateLastPasswordAt(ctx context.Context, arg UpdateLastPasswordAtParams) error
+	// UpdatePasswordHash is the rehash-on-login path (ADR-015 addendum row
+	// 2): login already has the plaintext password in hand (it just
+	// verified it against the stored hash), so a parameter change is
+	// applied here rather than waiting for a password-change flow no one
+	// may ever trigger.
+	UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error
 	// UpdateSetup is setups' one and only write path once a row exists:
 	// it is a mutable projection (000008's comment on the table), so a
 	// transition and an amendment both go through this same plain update,

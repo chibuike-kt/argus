@@ -24,6 +24,11 @@ type Config struct {
 	DatabaseURL string `env:"ARGUS_DATABASE_URL" envDefault:"postgres://argus:argus@localhost:5432/argus?sslmode=disable"`
 	RedisURL    string `env:"ARGUS_REDIS_URL" envDefault:"redis://localhost:6379/0"`
 
+	// Auth is ADR-015's own tunables (internal/config/auth.go) --
+	// caarlos0/env recurses into a nested struct's own `env` tags
+	// automatically, so no prefix/special handling is needed here.
+	Auth AuthPolicy
+
 	// DevFixtureIngest turns on cmd/argus-worker's fixture-provider
 	// ingestion path: it replays the checked-in dev/test dataset
 	// (internal/ingestion/fixture/testdata) into whatever instruments
@@ -66,6 +71,15 @@ func (c Config) Validate() error {
 	}
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("ARGUS_SHUTDOWN_TIMEOUT must be positive")
+	}
+	// Defense in depth, not a real branch: AuthPolicy.SecureCookies
+	// already always returns true when IsProduction does (ADR-015:
+	// "production must set them"). This assertion exists so a future
+	// change to that derivation that breaks the invariant fails
+	// startup immediately, in production, rather than quietly serving
+	// an insecure cookie.
+	if c.IsProduction() && !c.Auth.SecureCookies(true) {
+		return errors.New("ARGUS_ENV=production requires secure cookies, but AuthPolicy.SecureCookies(true) is false")
 	}
 	return nil
 }

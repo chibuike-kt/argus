@@ -53,12 +53,15 @@ func TestIntegration_SetupsEndpoints_RealStore(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	r := NewRouter(Deps{Logger: slog.Default(), DB: db})
+	deps, users, sessions := testAuthDeps(db)
+	deps.Logger, deps.DB = slog.Default(), db
+	r := NewRouter(deps)
 	srv := httptest.NewServer(r)
 	defer srv.Close()
+	client := authenticatedClient(t, srv.URL, users, sessions)
 
 	t.Run("list", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/setups?instrument_id=%d", srv.URL, instrumentID))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/setups?instrument_id=%d", srv.URL, instrumentID))
 		if err != nil {
 			t.Fatalf("GET /setups: %v", err)
 		}
@@ -86,7 +89,7 @@ func TestIntegration_SetupsEndpoints_RealStore(t *testing.T) {
 	})
 
 	t.Run("get by id", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/setups/%d", srv.URL, created.ID))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/setups/%d", srv.URL, created.ID))
 		if err != nil {
 			t.Fatalf("GET /setups/{id}: %v", err)
 		}
@@ -104,7 +107,7 @@ func TestIntegration_SetupsEndpoints_RealStore(t *testing.T) {
 	})
 
 	t.Run("get by id not found", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/setups/%d", srv.URL, created.ID+999999))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/setups/%d", srv.URL, created.ID+999999))
 		if err != nil {
 			t.Fatalf("GET /setups/{id}: %v", err)
 		}
@@ -115,7 +118,7 @@ func TestIntegration_SetupsEndpoints_RealStore(t *testing.T) {
 	})
 
 	t.Run("events", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/setups/%d/events", srv.URL, created.ID))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/setups/%d/events", srv.URL, created.ID))
 		if err != nil {
 			t.Fatalf("GET /setups/{id}/events: %v", err)
 		}

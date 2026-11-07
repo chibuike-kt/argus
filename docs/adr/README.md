@@ -93,7 +93,7 @@ Draft, then review trade-offs and evidence, then approve, revise or reject, then
 
 | ADR | Title | Status |
 | --- | --- | --- |
-| [ADR-015](ADR-015-authentication-and-authorization.md) | Authentication and authorization | Confirmed direction; security parameters partially open |
+| [ADR-015](ADR-015-authentication-and-authorization.md) | Authentication and authorization | Confirmed direction; parameters approved [R] |
 | [ADR-016](ADR-016-data-retention-account-deletion-and-privacy.md) | Data retention, account deletion and privacy | Confirmed direction; retention periods partially open |
 
 ### Quality, reliability and operations
