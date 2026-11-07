@@ -20,6 +20,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-chi/chi/v5"
 	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
 // Defines values for SetupState.
@@ -115,6 +116,24 @@ func (e ListSetupsParamsState) Valid() bool {
 	}
 }
 
+// AuthSession defines model for AuthSession.
+type AuthSession struct {
+	CreatedAt  time.Time `json:"created_at"`
+	Current    bool      `json:"current"`
+	Id         int64     `json:"id"`
+	Ip         *string   `json:"ip,omitempty"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	UserAgent  *string   `json:"user_agent,omitempty"`
+}
+
+// AuthUser defines model for AuthUser.
+type AuthUser struct {
+	CreatedAt     time.Time `json:"created_at"`
+	Email         string    `json:"email"`
+	EmailVerified bool      `json:"email_verified"`
+	Id            int64     `json:"id"`
+}
+
 // Candle defines model for Candle.
 type Candle struct {
 	Close     string    `json:"close"`
@@ -137,6 +156,11 @@ type Error struct {
 	} `json:"error"`
 }
 
+// GenericAccepted defines model for GenericAccepted.
+type GenericAccepted struct {
+	Status string `json:"status"`
+}
+
 // Instrument defines model for Instrument.
 type Instrument struct {
 	AssetClass         string   `json:"asset_class"`
@@ -150,6 +174,12 @@ type Instrument struct {
 	QuoteAsset         *string  `json:"quote_asset,omitempty"`
 	SupportedIntervals []string `json:"supported_intervals"`
 	TickSize           string   `json:"tick_size"`
+}
+
+// LoginRequest defines model for LoginRequest.
+type LoginRequest struct {
+	Email    openapi_types.Email `json:"email"`
+	Password string              `json:"password"`
 }
 
 // POISnapshot defines model for POISnapshot.
@@ -176,6 +206,17 @@ type PlanSnapshot struct {
 	Status           string           `json:"status"`
 	Stop             string           `json:"stop"`
 	Targets          []TargetSnapshot `json:"targets"`
+}
+
+// RegisterRequest defines model for RegisterRequest.
+type RegisterRequest struct {
+	Email    openapi_types.Email `json:"email"`
+	Password string              `json:"password"`
+}
+
+// ResendVerificationRequest defines model for ResendVerificationRequest.
+type ResendVerificationRequest struct {
+	Email openapi_types.Email `json:"email"`
 }
 
 // Setup defines model for Setup.
@@ -222,6 +263,11 @@ type TargetSnapshot struct {
 	Rr    string `json:"rr"`
 }
 
+// VerifyEmailRequest defines model for VerifyEmailRequest.
+type VerifyEmailRequest struct {
+	Token string `json:"token"`
+}
+
 // ListInstrumentsParams defines parameters for ListInstruments.
 type ListInstrumentsParams struct {
 	// AfterId Keyset cursor: return instruments with id strictly greater than this value, ordered by id. Omitted means the first page. This is a different ordering from calling this endpoint with no parameters at all pages through (by id, not by provider then native_symbol) -- intentional, see internal/instruments.Store's own ListAllFiltered/ListAll split.
@@ -263,8 +309,47 @@ type ListSetupsParams struct {
 // ListSetupsParamsState defines parameters for ListSetups.
 type ListSetupsParamsState string
 
+// AuthLoginJSONRequestBody defines body for AuthLogin for application/json ContentType.
+type AuthLoginJSONRequestBody = LoginRequest
+
+// AuthRegisterJSONRequestBody defines body for AuthRegister for application/json ContentType.
+type AuthRegisterJSONRequestBody = RegisterRequest
+
+// AuthResendVerificationJSONRequestBody defines body for AuthResendVerification for application/json ContentType.
+type AuthResendVerificationJSONRequestBody = ResendVerificationRequest
+
+// AuthVerifyEmailJSONRequestBody defines body for AuthVerifyEmail for application/json ContentType.
+type AuthVerifyEmailJSONRequestBody = VerifyEmailRequest
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// AuthLogin Generic invalid_credentials for unknown email, wrong password or an unverified account alike (ADR-015). On success, sets the session cookie and returns the user.
+	// (POST /auth/login)
+	AuthLogin(w http.ResponseWriter, r *http.Request)
+	// AuthLogout Revokes the current session and clears the cookie. Idempotent.
+	// (POST /auth/logout)
+	AuthLogout(w http.ResponseWriter, r *http.Request)
+	// AuthLogoutAll Revokes every session belonging to the authenticated user.
+	// (POST /auth/logout-all)
+	AuthLogoutAll(w http.ResponseWriter, r *http.Request)
+	// AuthMe The authenticated user.
+	// (GET /auth/me)
+	AuthMe(w http.ResponseWriter, r *http.Request)
+	// AuthRegister Creates an unverified account and sends a verification email (ADR-015). Always responds 202 with the identical generic body whether the email was already registered or not -- the body itself never distinguishes the two cases.
+	// (POST /auth/register)
+	AuthRegister(w http.ResponseWriter, r *http.Request)
+	// AuthResendVerification Generic 202, rate limited per account and per IP, whether or not the email exists or is already verified (ADR-015).
+	// (POST /auth/resend-verification)
+	AuthResendVerification(w http.ResponseWriter, r *http.Request)
+	// AuthListSessions The authenticated user's own active sessions.
+	// (GET /auth/sessions)
+	AuthListSessions(w http.ResponseWriter, r *http.Request)
+	// AuthRevokeSession Revokes one of the authenticated user's own sessions. A session id that exists but belongs to a different user is 404, not 403 (ADR-015: it must not even confirm that id is real).
+	// (DELETE /auth/sessions/{id})
+	AuthRevokeSession(w http.ResponseWriter, r *http.Request, id int64)
+	// AuthVerifyEmail Consumes a single-use, 24-hour email verification token (ADR-015). Does not create a session.
+	// (POST /auth/verify-email)
+	AuthVerifyEmail(w http.ResponseWriter, r *http.Request)
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Includes disabled rows: nothing in that package can set enabled = TRUE yet (ADR-007), so filtering them out here would just hide every row behind a flag no client can act on.
 	// (GET /instruments)
 	ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams)
@@ -288,6 +373,60 @@ type ServerInterface interface {
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
 
 type Unimplemented struct{}
+
+// AuthLogin Generic invalid_credentials for unknown email, wrong password or an unverified account alike (ADR-015). On success, sets the session cookie and returns the user.
+// (POST /auth/login)
+func (_ Unimplemented) AuthLogin(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthLogout Revokes the current session and clears the cookie. Idempotent.
+// (POST /auth/logout)
+func (_ Unimplemented) AuthLogout(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthLogoutAll Revokes every session belonging to the authenticated user.
+// (POST /auth/logout-all)
+func (_ Unimplemented) AuthLogoutAll(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthMe The authenticated user.
+// (GET /auth/me)
+func (_ Unimplemented) AuthMe(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthRegister Creates an unverified account and sends a verification email (ADR-015). Always responds 202 with the identical generic body whether the email was already registered or not -- the body itself never distinguishes the two cases.
+// (POST /auth/register)
+func (_ Unimplemented) AuthRegister(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthResendVerification Generic 202, rate limited per account and per IP, whether or not the email exists or is already verified (ADR-015).
+// (POST /auth/resend-verification)
+func (_ Unimplemented) AuthResendVerification(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthListSessions The authenticated user's own active sessions.
+// (GET /auth/sessions)
+func (_ Unimplemented) AuthListSessions(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthRevokeSession Revokes one of the authenticated user's own sessions. A session id that exists but belongs to a different user is 404, not 403 (ADR-015: it must not even confirm that id is real).
+// (DELETE /auth/sessions/{id})
+func (_ Unimplemented) AuthRevokeSession(w http.ResponseWriter, r *http.Request, id int64) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthVerifyEmail Consumes a single-use, 24-hour email verification token (ADR-015). Does not create a session.
+// (POST /auth/verify-email)
+func (_ Unimplemented) AuthVerifyEmail(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
 
 // ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Includes disabled rows: nothing in that package can set enabled = TRUE yet (ADR-007), so filtering them out here would just hide every row behind a flag no client can act on.
 // (GET /instruments)
@@ -333,6 +472,144 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// AuthLogin operation middleware
+func (siw *ServerInterfaceWrapper) AuthLogin(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthLogin(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthLogout operation middleware
+func (siw *ServerInterfaceWrapper) AuthLogout(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthLogout(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthLogoutAll operation middleware
+func (siw *ServerInterfaceWrapper) AuthLogoutAll(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthLogoutAll(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthMe operation middleware
+func (siw *ServerInterfaceWrapper) AuthMe(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthMe(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthRegister operation middleware
+func (siw *ServerInterfaceWrapper) AuthRegister(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthRegister(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthResendVerification operation middleware
+func (siw *ServerInterfaceWrapper) AuthResendVerification(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthResendVerification(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthListSessions operation middleware
+func (siw *ServerInterfaceWrapper) AuthListSessions(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthListSessions(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthRevokeSession operation middleware
+func (siw *ServerInterfaceWrapper) AuthRevokeSession(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthRevokeSession(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthVerifyEmail operation middleware
+func (siw *ServerInterfaceWrapper) AuthVerifyEmail(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthVerifyEmail(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // ListInstruments operation middleware
 func (siw *ServerInterfaceWrapper) ListInstruments(w http.ResponseWriter, r *http.Request) {
@@ -730,8 +1007,309 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/setups/{id}/events", wrapper.ListSetupEvents)
 	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/auth/register", wrapper.AuthRegister)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/auth/verify-email", wrapper.AuthVerifyEmail)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/auth/resend-verification", wrapper.AuthResendVerification)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/auth/login", wrapper.AuthLogin)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/auth/logout", wrapper.AuthLogout)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/auth/logout-all", wrapper.AuthLogoutAll)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/auth/me", wrapper.AuthMe)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/auth/sessions", wrapper.AuthListSessions)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/auth/sessions/{id}", wrapper.AuthRevokeSession)
+	})
 
 	return r
+}
+
+type AuthLoginRequestObject struct {
+	Body *AuthLoginJSONRequestBody
+}
+
+type AuthLoginResponseObject interface {
+	VisitAuthLoginResponse(w http.ResponseWriter) error
+}
+
+type AuthLogin200JSONResponse AuthUser
+
+func (response AuthLogin200JSONResponse) VisitAuthLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthLogin401JSONResponse Error
+
+func (response AuthLogin401JSONResponse) VisitAuthLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthLogin429JSONResponse Error
+
+func (response AuthLogin429JSONResponse) VisitAuthLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthLogoutRequestObject struct {
+}
+
+type AuthLogoutResponseObject interface {
+	VisitAuthLogoutResponse(w http.ResponseWriter) error
+}
+
+type AuthLogout204Response struct {
+}
+
+func (response AuthLogout204Response) VisitAuthLogoutResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AuthLogoutAllRequestObject struct {
+}
+
+type AuthLogoutAllResponseObject interface {
+	VisitAuthLogoutAllResponse(w http.ResponseWriter) error
+}
+
+type AuthLogoutAll204Response struct {
+}
+
+func (response AuthLogoutAll204Response) VisitAuthLogoutAllResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AuthMeRequestObject struct {
+}
+
+type AuthMeResponseObject interface {
+	VisitAuthMeResponse(w http.ResponseWriter) error
+}
+
+type AuthMe200JSONResponse AuthUser
+
+func (response AuthMe200JSONResponse) VisitAuthMeResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthRegisterRequestObject struct {
+	Body *AuthRegisterJSONRequestBody
+}
+
+type AuthRegisterResponseObject interface {
+	VisitAuthRegisterResponse(w http.ResponseWriter) error
+}
+
+type AuthRegister202JSONResponse GenericAccepted
+
+func (response AuthRegister202JSONResponse) VisitAuthRegisterResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthRegister400JSONResponse Error
+
+func (response AuthRegister400JSONResponse) VisitAuthRegisterResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthRegister429JSONResponse Error
+
+func (response AuthRegister429JSONResponse) VisitAuthRegisterResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthResendVerificationRequestObject struct {
+	Body *AuthResendVerificationJSONRequestBody
+}
+
+type AuthResendVerificationResponseObject interface {
+	VisitAuthResendVerificationResponse(w http.ResponseWriter) error
+}
+
+type AuthResendVerification202JSONResponse GenericAccepted
+
+func (response AuthResendVerification202JSONResponse) VisitAuthResendVerificationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthResendVerification429JSONResponse Error
+
+func (response AuthResendVerification429JSONResponse) VisitAuthResendVerificationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthListSessionsRequestObject struct {
+}
+
+type AuthListSessionsResponseObject interface {
+	VisitAuthListSessionsResponse(w http.ResponseWriter) error
+}
+
+type AuthListSessions200JSONResponse []AuthSession
+
+func (response AuthListSessions200JSONResponse) VisitAuthListSessionsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthRevokeSessionRequestObject struct {
+	Id int64 `json:"id"`
+}
+
+type AuthRevokeSessionResponseObject interface {
+	VisitAuthRevokeSessionResponse(w http.ResponseWriter) error
+}
+
+type AuthRevokeSession204Response struct {
+}
+
+func (response AuthRevokeSession204Response) VisitAuthRevokeSessionResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AuthRevokeSession404JSONResponse Error
+
+func (response AuthRevokeSession404JSONResponse) VisitAuthRevokeSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthVerifyEmailRequestObject struct {
+	Body *AuthVerifyEmailJSONRequestBody
+}
+
+type AuthVerifyEmailResponseObject interface {
+	VisitAuthVerifyEmailResponse(w http.ResponseWriter) error
+}
+
+type AuthVerifyEmail200JSONResponse GenericAccepted
+
+func (response AuthVerifyEmail200JSONResponse) VisitAuthVerifyEmailResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthVerifyEmail400JSONResponse Error
+
+func (response AuthVerifyEmail400JSONResponse) VisitAuthVerifyEmailResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 type ListInstrumentsRequestObject struct {
@@ -954,6 +1532,33 @@ func (response ListSetupEvents404JSONResponse) VisitListSetupEventsResponse(w ht
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// AuthLogin Generic invalid_credentials for unknown email, wrong password or an unverified account alike (ADR-015). On success, sets the session cookie and returns the user.
+	// (POST /auth/login)
+	AuthLogin(ctx context.Context, request AuthLoginRequestObject) (AuthLoginResponseObject, error)
+	// AuthLogout Revokes the current session and clears the cookie. Idempotent.
+	// (POST /auth/logout)
+	AuthLogout(ctx context.Context, request AuthLogoutRequestObject) (AuthLogoutResponseObject, error)
+	// AuthLogoutAll Revokes every session belonging to the authenticated user.
+	// (POST /auth/logout-all)
+	AuthLogoutAll(ctx context.Context, request AuthLogoutAllRequestObject) (AuthLogoutAllResponseObject, error)
+	// AuthMe The authenticated user.
+	// (GET /auth/me)
+	AuthMe(ctx context.Context, request AuthMeRequestObject) (AuthMeResponseObject, error)
+	// AuthRegister Creates an unverified account and sends a verification email (ADR-015). Always responds 202 with the identical generic body whether the email was already registered or not -- the body itself never distinguishes the two cases.
+	// (POST /auth/register)
+	AuthRegister(ctx context.Context, request AuthRegisterRequestObject) (AuthRegisterResponseObject, error)
+	// AuthResendVerification Generic 202, rate limited per account and per IP, whether or not the email exists or is already verified (ADR-015).
+	// (POST /auth/resend-verification)
+	AuthResendVerification(ctx context.Context, request AuthResendVerificationRequestObject) (AuthResendVerificationResponseObject, error)
+	// AuthListSessions The authenticated user's own active sessions.
+	// (GET /auth/sessions)
+	AuthListSessions(ctx context.Context, request AuthListSessionsRequestObject) (AuthListSessionsResponseObject, error)
+	// AuthRevokeSession Revokes one of the authenticated user's own sessions. A session id that exists but belongs to a different user is 404, not 403 (ADR-015: it must not even confirm that id is real).
+	// (DELETE /auth/sessions/{id})
+	AuthRevokeSession(ctx context.Context, request AuthRevokeSessionRequestObject) (AuthRevokeSessionResponseObject, error)
+	// AuthVerifyEmail Consumes a single-use, 24-hour email verification token (ADR-015). Does not create a session.
+	// (POST /auth/verify-email)
+	AuthVerifyEmail(ctx context.Context, request AuthVerifyEmailRequestObject) (AuthVerifyEmailResponseObject, error)
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Includes disabled rows: nothing in that package can set enabled = TRUE yet (ADR-007), so filtering them out here would just hide every row behind a flag no client can act on.
 	// (GET /instruments)
 	ListInstruments(ctx context.Context, request ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error)
@@ -1011,6 +1616,252 @@ type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
 	options     StrictHTTPServerOptions
+}
+
+// AuthLogin operation middleware
+func (sh *strictHandler) AuthLogin(w http.ResponseWriter, r *http.Request) {
+	var request AuthLoginRequestObject
+
+	var body AuthLoginJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthLogin(ctx, request.(AuthLoginRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthLogin")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthLoginResponseObject); ok {
+		if err := validResponse.VisitAuthLoginResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthLogout operation middleware
+func (sh *strictHandler) AuthLogout(w http.ResponseWriter, r *http.Request) {
+	var request AuthLogoutRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthLogout(ctx, request.(AuthLogoutRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthLogout")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthLogoutResponseObject); ok {
+		if err := validResponse.VisitAuthLogoutResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthLogoutAll operation middleware
+func (sh *strictHandler) AuthLogoutAll(w http.ResponseWriter, r *http.Request) {
+	var request AuthLogoutAllRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthLogoutAll(ctx, request.(AuthLogoutAllRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthLogoutAll")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthLogoutAllResponseObject); ok {
+		if err := validResponse.VisitAuthLogoutAllResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthMe operation middleware
+func (sh *strictHandler) AuthMe(w http.ResponseWriter, r *http.Request) {
+	var request AuthMeRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthMe(ctx, request.(AuthMeRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthMe")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthMeResponseObject); ok {
+		if err := validResponse.VisitAuthMeResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthRegister operation middleware
+func (sh *strictHandler) AuthRegister(w http.ResponseWriter, r *http.Request) {
+	var request AuthRegisterRequestObject
+
+	var body AuthRegisterJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthRegister(ctx, request.(AuthRegisterRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthRegister")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthRegisterResponseObject); ok {
+		if err := validResponse.VisitAuthRegisterResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthResendVerification operation middleware
+func (sh *strictHandler) AuthResendVerification(w http.ResponseWriter, r *http.Request) {
+	var request AuthResendVerificationRequestObject
+
+	var body AuthResendVerificationJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthResendVerification(ctx, request.(AuthResendVerificationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthResendVerification")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthResendVerificationResponseObject); ok {
+		if err := validResponse.VisitAuthResendVerificationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthListSessions operation middleware
+func (sh *strictHandler) AuthListSessions(w http.ResponseWriter, r *http.Request) {
+	var request AuthListSessionsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthListSessions(ctx, request.(AuthListSessionsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthListSessions")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthListSessionsResponseObject); ok {
+		if err := validResponse.VisitAuthListSessionsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthRevokeSession operation middleware
+func (sh *strictHandler) AuthRevokeSession(w http.ResponseWriter, r *http.Request, id int64) {
+	var request AuthRevokeSessionRequestObject
+
+	request.Id = id
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthRevokeSession(ctx, request.(AuthRevokeSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthRevokeSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthRevokeSessionResponseObject); ok {
+		if err := validResponse.VisitAuthRevokeSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthVerifyEmail operation middleware
+func (sh *strictHandler) AuthVerifyEmail(w http.ResponseWriter, r *http.Request) {
+	var request AuthVerifyEmailRequestObject
+
+	var body AuthVerifyEmailJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthVerifyEmail(ctx, request.(AuthVerifyEmailRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthVerifyEmail")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthVerifyEmailResponseObject); ok {
+		if err := validResponse.VisitAuthVerifyEmailResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
 }
 
 // ListInstruments operation middleware
@@ -1173,49 +2024,63 @@ func (sh *strictHandler) ListSetupEvents(w http.ResponseWriter, r *http.Request,
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
-	"hB9I7GINmdaqbJp18/Ts4/uP/wsAAP//",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

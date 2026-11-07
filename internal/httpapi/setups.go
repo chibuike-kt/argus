@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/chibuike-kt/argus/internal/config"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/quant"
 	"github.com/chibuike-kt/argus/internal/setups"
@@ -73,10 +74,13 @@ var _ setupsStore = (*setups.Store)(nil)
 // does not need store; it lives here rather than as a second struct so
 // one generated router can be mounted with one implementation.
 type apiHandler struct {
-	store       setupsStore
-	instruments instrumentsStore
-	candles     candlesStore
-	logger      *slog.Logger
+	store        setupsStore
+	instruments  instrumentsStore
+	candles      candlesStore
+	auth         authService
+	authPolicy   config.AuthPolicy
+	isProduction bool
+	logger       *slog.Logger
 }
 
 func (h *apiHandler) Ping(_ context.Context, _ PingRequestObject) (PingResponseObject, error) {

@@ -30,9 +30,12 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	_ = oneCandle(t, db, instrumentID, 0, 85)
 	_ = oneCandle(t, db, instrumentID, 1, 90)
 
-	r := NewRouter(Deps{Logger: slog.Default(), DB: db})
+	deps, users, sessions := testAuthDeps(db)
+	deps.Logger, deps.DB = slog.Default(), db
+	r := NewRouter(deps)
 	srv := httptest.NewServer(r)
 	defer srv.Close()
+	client := authenticatedClient(t, srv.URL, users, sessions)
 
 	t.Run("list instruments includes the disabled test instrument", func(t *testing.T) {
 		// after_id=instrumentID-1 pages starting exactly at the test
@@ -41,7 +44,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 		// long-lived test database has far more than 200 rows ahead of
 		// this freshly-inserted one, so an unparameterized call would
 		// no longer reliably include it.
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d", srv.URL, instrumentID-1))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d", srv.URL, instrumentID-1))
 		if err != nil {
 			t.Fatalf("GET /instruments: %v", err)
 		}
@@ -73,7 +76,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	t.Run("candles in range, decimal-string OHLCV", func(t *testing.T) {
 		from := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 		to := time.Date(2026, 11, 6, 12, 5, 0, 0, time.UTC)
-		resp, err := http.Get(candlesURL(srv.URL, instrumentID, from, to))
+		resp, err := client.Get(candlesURL(srv.URL, instrumentID, from, to))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles: %v", err)
 		}
@@ -99,7 +102,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	t.Run("candles order=desc returns newest first", func(t *testing.T) {
 		from := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 		to := time.Date(2026, 11, 6, 12, 5, 0, 0, time.UTC)
-		resp, err := http.Get(candlesURLWithOrder(srv.URL, instrumentID, from, to, "desc"))
+		resp, err := client.Get(candlesURLWithOrder(srv.URL, instrumentID, from, to, "desc"))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles?order=desc: %v", err)
 		}
@@ -123,7 +126,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 		from := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 		to := time.Date(2026, 11, 6, 12, 5, 0, 0, time.UTC)
 		u := candlesURLWithOrder(srv.URL, instrumentID, from, to, "desc") + "&limit=1"
-		resp, err := http.Get(u)
+		resp, err := client.Get(u)
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles?order=desc&limit=1: %v", err)
 		}
@@ -140,7 +143,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	t.Run("candles order=sideways is a 400", func(t *testing.T) {
 		from := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 		to := time.Date(2026, 11, 6, 12, 5, 0, 0, time.UTC)
-		resp, err := http.Get(candlesURLWithOrder(srv.URL, instrumentID, from, to, "sideways"))
+		resp, err := client.Get(candlesURLWithOrder(srv.URL, instrumentID, from, to, "sideways"))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles?order=sideways: %v", err)
 		}
@@ -153,7 +156,7 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 	t.Run("candles for an unknown instrument is 404", func(t *testing.T) {
 		to := time.Now().UTC()
 		from := to.Add(-time.Hour)
-		resp, err := http.Get(candlesURL(srv.URL, instrumentID+999999, from, to))
+		resp, err := client.Get(candlesURL(srv.URL, instrumentID+999999, from, to))
 		if err != nil {
 			t.Fatalf("GET /instruments/{id}/candles: %v", err)
 		}

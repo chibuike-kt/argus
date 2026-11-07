@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+type AuthEvent struct {
+	ID        int64           `json:"id"`
+	At        time.Time       `json:"at"`
+	UserID    sql.NullInt64   `json:"user_id"`
+	Kind      string          `json:"kind"`
+	Ip        sql.NullString  `json:"ip"`
+	UserAgent sql.NullString  `json:"user_agent"`
+	Detail    json.RawMessage `json:"detail"`
+}
+
 type Candle struct {
 	ID           int64         `json:"id"`
 	InstrumentID int64         `json:"instrument_id"`
@@ -53,6 +63,16 @@ type ConfirmedSwing struct {
 	SupersededAt     sql.NullTime  `json:"superseded_at"`
 	SupersededBy     sql.NullInt64 `json:"superseded_by"`
 	CreatedAt        time.Time     `json:"created_at"`
+}
+
+type EmailToken struct {
+	ID        int64        `json:"id"`
+	UserID    int64        `json:"user_id"`
+	Purpose   string       `json:"purpose"`
+	TokenHash string       `json:"token_hash"`
+	CreatedAt time.Time    `json:"created_at"`
+	ExpiresAt time.Time    `json:"expires_at"`
+	UsedAt    sql.NullTime `json:"used_at"`
 }
 
 type Instrument struct {
@@ -118,6 +138,20 @@ type ProcessingCursor struct {
 	UpdatedAt              time.Time `json:"updated_at"`
 }
 
+type Session struct {
+	ID                int64          `json:"id"`
+	UserID            int64          `json:"user_id"`
+	TokenHash         string         `json:"token_hash"`
+	CreatedAt         time.Time      `json:"created_at"`
+	LastSeenAt        time.Time      `json:"last_seen_at"`
+	IdleExpiresAt     time.Time      `json:"idle_expires_at"`
+	AbsoluteExpiresAt time.Time      `json:"absolute_expires_at"`
+	RevokedAt         sql.NullTime   `json:"revoked_at"`
+	UserAgent         sql.NullString `json:"user_agent"`
+	Ip                sql.NullString `json:"ip"`
+	LastPasswordAt    time.Time      `json:"last_password_at"`
+}
+
 type Setup struct {
 	ID                      int64           `json:"id"`
 	InstrumentID            int64           `json:"instrument_id"`
@@ -179,4 +213,15 @@ type StructureState struct {
 	UpdatedAt             time.Time     `json:"updated_at"`
 	ProtectedLowSwingID   sql.NullInt64 `json:"protected_low_swing_id"`
 	ProtectedHighSwingID  sql.NullInt64 `json:"protected_high_swing_id"`
+}
+
+type User struct {
+	ID              int64        `json:"id"`
+	Email           string       `json:"email"`
+	EmailNormalized string       `json:"email_normalized"`
+	PasswordHash    string       `json:"password_hash"`
+	EmailVerifiedAt sql.NullTime `json:"email_verified_at"`
+	CreatedAt       time.Time    `json:"created_at"`
+	UpdatedAt       time.Time    `json:"updated_at"`
+	DisabledAt      sql.NullTime `json:"disabled_at"`
 }

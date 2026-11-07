@@ -9,8 +9,16 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/config"
 	"github.com/chibuike-kt/argus/internal/httpapi"
+	"github.com/chibuike-kt/argus/internal/identity"
+	"github.com/chibuike-kt/argus/internal/identity/mailer"
+	"github.com/chibuike-kt/argus/internal/identity/password"
+	"github.com/chibuike-kt/argus/internal/identity/ratelimit"
+	"github.com/chibuike-kt/argus/internal/identity/service"
+	"github.com/chibuike-kt/argus/internal/identity/session"
+	"github.com/chibuike-kt/argus/internal/identity/tokens"
 	"github.com/chibuike-kt/argus/internal/platform/logging"
 	"github.com/chibuike-kt/argus/internal/platform/postgres"
 	"github.com/chibuike-kt/argus/internal/platform/redis"
@@ -40,7 +48,42 @@ func main() {
 	}
 	defer func() { _ = rdb.Close() }()
 
-	handler := httpapi.NewRouter(httpapi.Deps{Logger: logger, DB: db, Redis: rdb})
+	clk := clock.Real{}
+	users := identity.NewStore(db)
+	sessions := session.NewStore(db, clk, cfg.Auth.SessionIdleDuration, cfg.Auth.SessionAbsoluteDuration)
+	tokenStore := tokens.NewStore(db, clk)
+	hasher := password.NewHasher(password.Params{
+		MemoryKiB:   cfg.Auth.ArgonMemoryKiB,
+		Iterations:  cfg.Auth.ArgonIterations,
+		Parallelism: cfg.Auth.ArgonParallelism,
+		SaltLen:     cfg.Auth.ArgonSaltLen,
+		KeyLen:      cfg.Auth.ArgonKeyLen,
+	}, cfg.Auth.ArgonMaxConcurrent)
+	limiter := ratelimit.NewLimiter(rdb, logger, clk)
+
+	// No mail provider is chosen yet (out of scope for this brief) --
+	// LogMailer is the only Mailer, and it refuses to construct in
+	// production so a real deployment cannot silently "send" email by
+	// writing verification/reset links to its own logs.
+	mail, err := mailer.NewLogMailer(logger, cfg.IsProduction())
+	if err != nil {
+		logger.Error("startup: mailer unavailable", "error", err)
+		os.Exit(1)
+	}
+
+	authSvc := service.New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, cfg.Auth, logger)
+
+	handler := httpapi.NewRouter(httpapi.Deps{
+		Logger:       logger,
+		DB:           db,
+		Redis:        rdb,
+		Auth:         authSvc,
+		Sessions:     sessions,
+		Users:        users,
+		AuthPolicy:   cfg.Auth,
+		IsProduction: cfg.IsProduction(),
+		Clock:        clk,
+	})
 	srv := httpapi.NewServer(":"+cfg.HTTPPort, handler, cfg.HTTPReadTimeout)
 
 	go func() {

@@ -261,6 +261,182 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /auth/register:
+    post:
+      operationId: authRegister
+      summary: >
+        Creates an unverified account and sends a verification email
+        (ADR-015). Always responds 202 with the identical generic body
+        whether the email was already registered or not -- the body
+        itself never distinguishes the two cases.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericAccepted"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Too Many Requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /auth/verify-email:
+    post:
+      operationId: authVerifyEmail
+      summary: >
+        Consumes a single-use, 24-hour email verification token
+        (ADR-015). Does not create a session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyEmailRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericAccepted"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /auth/resend-verification:
+    post:
+      operationId: authResendVerification
+      summary: >
+        Generic 202, rate limited per account and per IP, whether or
+        not the email exists or is already verified (ADR-015).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResendVerificationRequest"
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericAccepted"
+        "429":
+          description: Too Many Requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /auth/login:
+    post:
+      operationId: authLogin
+      summary: >
+        Generic invalid_credentials for unknown email, wrong password
+        or an unverified account alike (ADR-015). On success, sets the
+        session cookie and returns the user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthUser"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Too Many Requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /auth/logout:
+    post:
+      operationId: authLogout
+      summary: Revokes the current session and clears the cookie. Idempotent.
+      responses:
+        "204":
+          description: No Content
+  /auth/logout-all:
+    post:
+      operationId: authLogoutAll
+      summary: Revokes every session belonging to the authenticated user.
+      responses:
+        "204":
+          description: No Content
+  /auth/me:
+    get:
+      operationId: authMe
+      summary: The authenticated user.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthUser"
+  /auth/sessions:
+    get:
+      operationId: authListSessions
+      summary: The authenticated user's own active sessions.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuthSession"
+  /auth/sessions/{id}:
+    delete:
+      operationId: authRevokeSession
+      summary: >
+        Revokes one of the authenticated user's own sessions. A
+        session id that exists but belongs to a different user is 404,
+        not 403 (ADR-015: it must not even confirm that id is real).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "204":
+          description: No Content
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   schemas:
     Error:
@@ -277,6 +453,83 @@ components:
               type: string
             request_id:
               type: string
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+    VerifyEmailRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+    ResendVerificationRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+    # GenericAccepted is deliberately the same shape (and the same
+    # literal value) regardless of what actually happened server-side
+    # -- register/verify/resend's own ADR-015 requirement that the
+    # response never discloses whether an email exists or is already
+    # verified.
+    GenericAccepted:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+    AuthUser:
+      type: object
+      required: [id, email, email_verified, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        email:
+          type: string
+        email_verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+    AuthSession:
+      type: object
+      required: [id, created_at, last_seen_at, current]
+      properties:
+        id:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        user_agent:
+          type: string
+          nullable: true
+        ip:
+          type: string
+          nullable: true
+        current:
+          type: boolean
     Instrument:
       type: object
       required:
