@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -166,6 +167,7 @@ type Hasher struct {
 	params    Params
 	limiter   *limiter
 	dummyHash string
+	ops       atomic.Int64
 }
 
 // NewHasher builds a Hasher. maxConcurrent is ADR-015 addendum row 2's
@@ -186,6 +188,7 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 		return "", err
 	}
 	defer h.limiter.release()
+	h.ops.Add(1)
 	return hash(password, h.params)
 }
 
@@ -196,8 +199,17 @@ func (h *Hasher) Verify(ctx context.Context, password, encoded string) (bool, er
 		return false, err
 	}
 	defer h.limiter.release()
+	h.ops.Add(1)
 	return verify(password, encoded)
 }
+
+// Ops returns the number of real Argon2 operations (Hash, or Verify/
+// VerifyDummy, which calls Verify) this Hasher has performed so far.
+// It exists for tests that must prove a timing-sensitive code path
+// pays the same Argon2 cost on every branch (architect review item 1)
+// without asserting on wall-clock time, which is inherently flaky --
+// counting real operations is the deterministic alternative.
+func (h *Hasher) Ops() int64 { return h.ops.Load() }
 
 // VerifyDummy runs exactly the same work as Verify, against a fixed,
 // never-secret hash -- login's own unknown-email path calls this

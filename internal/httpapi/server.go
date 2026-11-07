@@ -3,6 +3,7 @@ package httpapi
 
 import (
 	"database/sql"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -17,6 +18,27 @@ import (
 	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/setups"
 )
+
+// maxRequestBodyBytes bounds every /api/v1 request body (architect
+// review item 4): an implementation limit, not an ADR-015 addendum
+// policy value, so it lives here next to the middleware that enforces
+// it rather than in config.AuthPolicy. Pre-auth endpoints (register,
+// login, ...) must not accept an unbounded body before any
+// authentication has even happened; applied to every /api/v1 route,
+// not only the auth ones, since no route needs more than this.
+const maxRequestBodyBytes = 64 * 1024
+
+// limitRequestBody wraps the request body in http.MaxBytesReader so a
+// read past maxRequestBodyBytes fails instead of buffering an
+// arbitrarily large body into memory. The read failure itself is
+// translated to 413 in the strict handler's RequestErrorHandlerFunc
+// below, once oapi-codegen's own JSON decode actually hits it.
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
 
 // Deps are the dependencies the HTTP layer needs.
 type Deps struct {
@@ -72,12 +94,14 @@ func NewRouter(d Deps) http.Handler {
 		if clk == nil {
 			clk = clock.Real{}
 		}
-		// Every /api/v1 request gets ip/User-Agent in context (public
+		// Every /api/v1 request gets its body size bounded first (before
+		// anything else reads it), then ip/User-Agent in context (public
 		// or not -- Register/Login/etc. need it too), then CSRF
 		// checking on state-changing methods, then deny-by-default
 		// session resolution (requireSession's own public-path
 		// allow-list is what actually exempts a route, not this
 		// ordering).
+		r.Use(limitRequestBody)
 		r.Use(requestMetaMiddleware(d.AuthPolicy.TrustProxyForIP))
 		r.Use(csrfProtection(d.AuthPolicy.AllowedOrigins))
 		r.Use(requireSession(d.Sessions, d.Users, d.AuthPolicy.CookieName(d.IsProduction), d.AuthPolicy.SessionTouchThrottle, clk, d.Logger))
@@ -98,6 +122,10 @@ func NewRouter(d Deps) http.Handler {
 		}
 		strict := NewStrictHandlerWithOptions(api, nil, StrictHTTPServerOptions{
 			RequestErrorHandlerFunc: func(w http.ResponseWriter, _ *http.Request, err error) {
+				if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+					writeAPIError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
+					return
+				}
 				writeAPIError(w, http.StatusBadRequest, "invalid_argument", err.Error())
 			},
 			// err here is whatever a StrictServerInterface method

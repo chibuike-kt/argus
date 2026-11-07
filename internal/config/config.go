@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -80,6 +81,18 @@ func (c Config) Validate() error {
 	// an insecure cookie.
 	if c.IsProduction() && !c.Auth.SecureCookies(true) {
 		return errors.New("ARGUS_ENV=production requires secure cookies, but AuthPolicy.SecureCookies(true) is false")
+	}
+	// Architect review item 8: a plain-http ARGUS_AUTH_ALLOWED_ORIGINS
+	// entry in production would let CSRF's own Origin check accept a
+	// non-TLS origin, undermining Secure cookies' own point. Local/test
+	// are exempt since the default origins are the Vite dev server's
+	// own http:// ones.
+	if c.IsProduction() {
+		for _, origin := range c.Auth.AllowedOrigins {
+			if !strings.HasPrefix(origin, "https://") {
+				return fmt.Errorf("ARGUS_ENV=%s requires every ARGUS_AUTH_ALLOWED_ORIGINS entry to start with https://, got %q", c.Env, origin)
+			}
+		}
 	}
 	return nil
 }

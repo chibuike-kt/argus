@@ -105,6 +105,26 @@ func (m *recordingMailer) messagesTo(email string) []mailer.Message {
 	return out
 }
 
+// waitForMessages polls messagesTo until it has at least n messages
+// for email or 2s pass -- Register/ResendVerification now send mail
+// in the background (architect review item 1: the send must not
+// affect response time), so a caller can no longer assume a message
+// has arrived the instant Register/ResendVerification returns.
+func waitForMessages(t *testing.T, mail *recordingMailer, email string, n int) []mailer.Message {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		msgs := mail.messagesTo(email)
+		if len(msgs) >= n {
+			return msgs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("got %d messages to %s after 2s, want at least %d", len(msgs), email, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // testPolicy returns cheap Argon2 parameters (this brief's own
 // "cheaper Argon2 params in tests through config only") and generous
 // rate limits, so a test exercises real business logic without paying
@@ -196,7 +216,7 @@ func TestIntegration_Register_NewEmail_SendsVerification(t *testing.T) {
 		t.Fatal("newly registered user is already verified, want unverified")
 	}
 
-	msgs := ts.mail.messagesTo(email)
+	msgs := waitForMessages(t, ts.mail, email, 1)
 	if len(msgs) != 1 {
 		t.Fatalf("got %d messages to %s, want 1", len(msgs), email)
 	}
@@ -228,7 +248,7 @@ func TestIntegration_Register_ExistingVerifiedEmail_SendsNoticeNotToken(t *testi
 		t.Fatalf("second Register (existing, verified): %v", err)
 	}
 
-	msgs := ts.mail.messagesTo(email)
+	msgs := waitForMessages(t, ts.mail, email, 2)
 	if len(msgs) != 2 {
 		t.Fatalf("got %d messages, want 2 (original verification + notice)", len(msgs))
 	}
@@ -245,7 +265,7 @@ func TestIntegration_VerifyEmail_HappyPathThenSingleUse(t *testing.T) {
 	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	msgs := ts.mail.messagesTo(email)
+	msgs := waitForMessages(t, ts.mail, email, 1)
 	token := extractToken(t, msgs[0].Body)
 
 	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
@@ -289,7 +309,7 @@ func TestIntegration_Login_IdenticalErrorForUnknownWrongPasswordAndUnverified(t 
 	if err := ts.Register(ctx, verifiedEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	msgs := ts.mail.messagesTo(verifiedEmail)
+	msgs := waitForMessages(t, ts.mail, verifiedEmail, 1)
 	token := extractToken(t, msgs[0].Body)
 	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
@@ -308,7 +328,7 @@ func TestIntegration_Login_Success_CreatesResolvableSession(t *testing.T) {
 	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	msgs := ts.mail.messagesTo(email)
+	msgs := waitForMessages(t, ts.mail, email, 1)
 	token := extractToken(t, msgs[0].Body)
 	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
@@ -341,7 +361,7 @@ func TestIntegration_Logout_RevokesSession(t *testing.T) {
 	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	token := extractToken(t, ts.mail.messagesTo(email)[0].Body)
+	token := extractToken(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
 	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -371,7 +391,7 @@ func TestIntegration_RevokeSession_AnotherUsersSessionIsNotFound(t *testing.T) {
 		if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
 			t.Fatalf("Register(%s): %v", email, err)
 		}
-		token := extractToken(t, ts.mail.messagesTo(email)[0].Body)
+		token := extractToken(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
 		if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
 			t.Fatalf("VerifyEmail(%s): %v", email, err)
 		}
@@ -416,7 +436,7 @@ func TestIntegration_SecretsNeverAppearInLogs(t *testing.T) {
 	if err := ts.Register(ctx, email, secretPassword, "203.0.113.1", "test-agent"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	token := extractToken(t, ts.mail.messagesTo(email)[0].Body)
+	token := extractToken(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
 	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -439,6 +459,156 @@ func TestIntegration_SecretsNeverAppearInLogs(t *testing.T) {
 	}
 	if strings.Contains(logs, token) {
 		t.Fatalf("log output contains the raw verification token:\n%s", logs)
+	}
+}
+
+// TestIntegration_Register_ExistingAndNewPaths_SameHasherOpCount is
+// architect review item 1's own test: every Register path that does
+// not insert a new user (existing verified, existing unverified) must
+// still pay exactly one real Argon2 operation, matching the new-user
+// path's own Hash call -- counted through Hasher.Ops, never wall-clock
+// time (inherently flaky).
+func TestIntegration_Register_ExistingAndNewPaths_SameHasherOpCount(t *testing.T) {
+	ts := newTestService(t)
+	ctx := context.Background()
+
+	newEmail := uniqueEmail(t)
+	before := ts.hasher.Ops()
+	if err := ts.Register(ctx, newEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("Register(new): %v", err)
+	}
+	if got := ts.hasher.Ops() - before; got != 1 {
+		t.Fatalf("new email: hasher performed %d operations, want exactly 1", got)
+	}
+
+	verifiedEmail := uniqueEmail(t)
+	if err := ts.Register(ctx, verifiedEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("Register(seed existing-verified): %v", err)
+	}
+	u, err := identity.NewStore(ts.db).GetByEmail(ctx, verifiedEmail)
+	if err != nil {
+		t.Fatalf("GetByEmail: %v", err)
+	}
+	if _, err := identity.NewStore(ts.db).MarkEmailVerified(ctx, u.ID, ts.clk.Now()); err != nil {
+		t.Fatalf("MarkEmailVerified: %v", err)
+	}
+
+	before = ts.hasher.Ops()
+	if err := ts.Register(ctx, verifiedEmail, "a-different-password-2", "203.0.113.2", "test-agent"); err != nil {
+		t.Fatalf("Register(existing verified): %v", err)
+	}
+	if got := ts.hasher.Ops() - before; got != 1 {
+		t.Fatalf("existing verified email: hasher performed %d operations, want exactly 1 (same as the new-email path)", got)
+	}
+
+	before = ts.hasher.Ops()
+	if err := ts.Register(ctx, newEmail, "another-password-3", "203.0.113.3", "test-agent"); err != nil {
+		t.Fatalf("Register(existing unverified): %v", err)
+	}
+	if got := ts.hasher.Ops() - before; got != 1 {
+		t.Fatalf("existing unverified email: hasher performed %d operations, want exactly 1 (same as the new-email path)", got)
+	}
+}
+
+// TestIntegration_Login_ProgressiveDelay_SameCounterForUnknownAndKnownEmail
+// is architect review item 2's own test: the progressive-delay counter
+// is keyed on the normalized email's hash and incremented before the
+// user lookup, so an unknown email accrues the exact same counter an
+// otherwise-identical known one would -- proven directly on the
+// counter (loginFailureKey, same package) rather than by comparing
+// wall-clock delays, which would make this test flaky under load.
+func TestIntegration_Login_ProgressiveDelay_SameCounterForUnknownAndKnownEmail(t *testing.T) {
+	ts := newTestService(t)
+	ctx := context.Background()
+
+	knownEmail := uniqueEmail(t)
+	if err := ts.Register(ctx, knownEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	token := extractToken(t, waitForMessages(t, ts.mail, knownEmail, 1)[0].Body)
+	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
+	}
+	unknownEmail := uniqueEmail(t)
+
+	const attempts = 3
+	for i := range attempts {
+		if _, _, err := ts.Login(ctx, knownEmail, "wrong-password", "203.0.113.9", "test-agent"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("Login(known) attempt %d = %v, want ErrInvalidCredentials", i, err)
+		}
+		if _, _, err := ts.Login(ctx, unknownEmail, "wrong-password", "203.0.113.9", "test-agent"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("Login(unknown) attempt %d = %v, want ErrInvalidCredentials", i, err)
+		}
+	}
+
+	knownCount, err := ts.limiter.IncrementAndCount(ctx, loginFailureKey(knownEmail), 15*time.Minute)
+	if err != nil {
+		t.Fatalf("IncrementAndCount(known): %v", err)
+	}
+	unknownCount, err := ts.limiter.IncrementAndCount(ctx, loginFailureKey(unknownEmail), 15*time.Minute)
+	if err != nil {
+		t.Fatalf("IncrementAndCount(unknown): %v", err)
+	}
+	if knownCount != attempts+1 || unknownCount != attempts+1 {
+		t.Fatalf("counts after %d Login attempts + 1 probe = known:%d unknown:%d, want both %d -- an unknown email must accrue the same failure counter as a known one", attempts, knownCount, unknownCount, attempts+1)
+	}
+}
+
+// TestIntegration_Login_DisabledAccount_SameGenericError is architect
+// review item 3's own service-level test: a disabled account's login
+// gets the same ErrInvalidCredentials every other failure case does.
+// The middleware's own "an existing session stops working" half of
+// item 3 is tested in internal/httpapi (auth_middleware_test.go),
+// since it needs the session-resolution middleware, not this package.
+func TestIntegration_Login_DisabledAccount_SameGenericError(t *testing.T) {
+	ts := newTestService(t)
+	ctx := context.Background()
+	email := uniqueEmail(t)
+
+	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	token := extractToken(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
+	}
+	u, err := identity.NewStore(ts.db).GetByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("GetByEmail: %v", err)
+	}
+	if _, err := ts.db.ExecContext(ctx, `UPDATE users SET disabled_at = now() WHERE id = $1`, u.ID); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+
+	if _, _, err := ts.Login(ctx, email, testPassword, "203.0.113.9", "test-agent"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Login(disabled account, correct password) = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+// TestIntegration_ResendVerification_AccountLimitNeverReturns429 is
+// architect review item 6's own test: the 6th resend within the hour
+// (per-account limit is 5, set via testPolicy's own override below)
+// returns the identical generic 202-equivalent (nil error) for a
+// known, unverified account as for an unknown one -- a 429 only for
+// accounts that exist would itself disclose existence.
+func TestIntegration_ResendVerification_AccountLimitNeverReturns429(t *testing.T) {
+	ts := newTestService(t)
+	ts.policy.ResendVerificationPerAccountPerHour = 5
+	ctx := context.Background()
+
+	knownEmail := uniqueEmail(t)
+	if err := ts.Register(ctx, knownEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	unknownEmail := uniqueEmail(t)
+
+	for i := range 6 {
+		if err := ts.ResendVerification(ctx, knownEmail, "203.0.113.1", "test-agent"); err != nil {
+			t.Fatalf("ResendVerification(known) call %d = %v, want nil (never 429, architect review item 6)", i, err)
+		}
+		if err := ts.ResendVerification(ctx, unknownEmail, "203.0.113.1", "test-agent"); err != nil {
+			t.Fatalf("ResendVerification(unknown) call %d = %v, want nil", i, err)
+		}
 	}
 }
 

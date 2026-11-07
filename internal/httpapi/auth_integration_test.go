@@ -85,6 +85,25 @@ func (m *recordingMailer) bodyFor(email string) (string, bool) {
 	return b, ok
 }
 
+// waitForBody polls bodyFor until a message for email arrives or 2s
+// pass -- Register/ResendVerification now send mail in the background
+// (architect review item 1: the send must not affect response time),
+// so a caller can no longer assume a message has arrived the instant
+// the HTTP call returns.
+func waitForBody(t *testing.T, mail *recordingMailer, email string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if body, ok := mail.bodyFor(email); ok {
+			return body
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no verification email recorded for %s after 2s", email)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 var tokenMarkerRe = regexp.MustCompile(`verify-email: (\S+)`)
 
 func extractVerificationToken(t *testing.T, body string) string {
@@ -206,22 +225,19 @@ func registerAndVerify(t *testing.T, srv *authTestServer, email, pw string) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("register status = %d, want 202", resp.StatusCode)
 	}
 
-	body, ok := srv.mail.bodyFor(email)
-	if !ok {
-		t.Fatalf("no verification email recorded for %s", email)
-	}
+	body := waitForBody(t, srv.mail, email)
 	token := extractVerificationToken(t, body)
 
 	resp, err = http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/verify-email", VerifyEmailRequest{Token: token}))
 	if err != nil {
 		t.Fatalf("verify-email: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("verify-email status = %d, want 200", resp.StatusCode)
 	}
@@ -235,7 +251,7 @@ func loginAndGetCookie(t *testing.T, srv *authTestServer, email, pw string) *htt
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("login status = %d, want 200", resp.StatusCode)
 	}
@@ -285,7 +301,7 @@ func TestIntegration_FullAuthFlow_RegisterVerifyLoginMeLogout(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
 		t.Fatalf("decode /auth/me: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /auth/me status = %d, want 200", resp.StatusCode)
 	}
@@ -299,7 +315,7 @@ func TestIntegration_FullAuthFlow_RegisterVerifyLoginMeLogout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("logout: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("logout status = %d, want 204", resp.StatusCode)
 	}
@@ -310,7 +326,7 @@ func TestIntegration_FullAuthFlow_RegisterVerifyLoginMeLogout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /auth/me after logout: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("GET /auth/me after logout status = %d, want 401 (session revoked)", resp.StatusCode)
 	}
@@ -329,7 +345,7 @@ func TestIntegration_Login_WrongPassword_UnknownEmail_Unverified_AllIdentical(t 
 	if err != nil {
 		t.Fatalf("register unverified: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	cases := []struct {
 		name  string
@@ -351,7 +367,7 @@ func TestIntegration_Login_WrongPassword_UnknownEmail_Unverified_AllIdentical(t 
 		}
 		var buf bytes.Buffer
 		_, _ = buf.ReadFrom(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		statuses = append(statuses, resp.StatusCode)
 		bodies = append(bodies, buf.String())
 	}
@@ -378,7 +394,7 @@ func TestIntegration_CSRF_RejectsMismatchedOriginAndMissingContentType(t *testin
 	if err != nil {
 		t.Fatalf("bad origin request: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("mismatched Origin status = %d, want 403", resp.StatusCode)
 	}
@@ -389,7 +405,7 @@ func TestIntegration_CSRF_RejectsMismatchedOriginAndMissingContentType(t *testin
 	if err != nil {
 		t.Fatalf("missing content-type request: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("missing Content-Type status = %d, want 403", resp.StatusCode)
 	}
@@ -411,15 +427,83 @@ func TestIntegration_RateLimit_Returns429WithRetryAfter(t *testing.T) {
 	}
 
 	first := req()
-	first.Body.Close()
+	_ = first.Body.Close()
 	if first.StatusCode != http.StatusAccepted {
 		t.Fatalf("first register status = %d, want 202", first.StatusCode)
 	}
 
 	second := req()
-	second.Body.Close()
+	_ = second.Body.Close()
 	if second.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("second register (over RegisterPerIPPerHour=1) status = %d, want 429", second.StatusCode)
+	}
+}
+
+// TestIntegration_OversizeBody_Returns413 is architect review item 4's
+// own test: a request body over maxRequestBodyBytes (64 KiB) is
+// rejected with 413 in the shared error shape, before ever reaching
+// the strict handler's JSON decode (login was measured accepting an
+// 8 MB body).
+func TestIntegration_OversizeBody_Returns413(t *testing.T) {
+	srv := newAuthTestServer(t, testAuthPolicy())
+
+	// Must be syntactically valid JSON, not just large: an invalid byte
+	// (this was originally 8MB of plain 'a' bytes) makes json.Decoder
+	// fail on a syntax error after only the first few bytes, long
+	// before MaxBytesReader's own limit is ever reached -- the oversize
+	// password is itself inside a valid, if very long, JSON string.
+	oversize := []byte(`{"email":"a@example.com","password":"` + strings.Repeat("a", 8*1024*1024) + `"}`)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/auth/login", bytes.NewReader(oversize))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://localhost:5173")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("oversize login request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize body status = %d, want 413", resp.StatusCode)
+	}
+	var got Error
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if got.Error.Code != "request_too_large" {
+		t.Fatalf("error.code = %q, want request_too_large", got.Error.Code)
+	}
+}
+
+// TestIntegration_Login_OversizePassword_SameGenericError is architect
+// review item 4's own second test: a password longer than the policy
+// maximum (128) must never reach Argon2 -- it is rejected as invalid
+// credentials, same status and (modulo the password itself, never
+// echoed) same body as any other login failure.
+func TestIntegration_Login_OversizePassword_SameGenericError(t *testing.T) {
+	srv := newAuthTestServer(t, testAuthPolicy())
+	email := testAuthEmail(t)
+	const pw = "a-perfectly-fine-password-1"
+	registerAndVerify(t, srv, email, pw)
+
+	longPassword := strings.Repeat("a", 129)
+	resp, err := http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/login", LoginRequest{
+		Email: openapi_types.Email(email), Password: longPassword,
+	}))
+	if err != nil {
+		t.Fatalf("login with oversize password: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("oversize password login status = %d, want 401", resp.StatusCode)
+	}
+	var got Error
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if got.Error.Code != "invalid_credentials" {
+		t.Fatalf("error.code = %q, want invalid_credentials (same as any other login failure)", got.Error.Code)
 	}
 }
 
@@ -455,7 +539,7 @@ func TestIntegration_DenyByDefault_EveryNonPublicRouteRequiresASession(t *testin
 		if err != nil {
 			return fmt.Errorf("%s %s: %w", method, route, err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s %s with no session cookie = %d, want 401", method, route, resp.StatusCode)
 		}

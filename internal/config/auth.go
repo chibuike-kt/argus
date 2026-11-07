@@ -85,8 +85,15 @@ type AuthPolicy struct {
 // IsProduction is the one place "what counts as production" is
 // decided -- everything else (cookie shape, the mailer) asks this,
 // rather than comparing Env to a literal string itself.
+//
+// Architect review item 8: this used to be true only for the exact
+// string "production", so any other value -- "staging", a typo --
+// silently got non-Secure cookies and the logging mailer. Inverted:
+// only "local" and "test" (this project's own two known-safe,
+// non-production environments) opt OUT of production behaviour; any
+// other value, known or not, gets it.
 func (c Config) IsProduction() bool {
-	return c.Env == "production"
+	return c.Env != "local" && c.Env != "test"
 }
 
 // CookieName is the session cookie's name: the __Host- prefixed form

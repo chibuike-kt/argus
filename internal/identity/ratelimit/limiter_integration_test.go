@@ -74,6 +74,69 @@ func TestIntegration_Allow_RealRedis_EnforcesLimit(t *testing.T) {
 	}
 }
 
+// TestIntegration_IncrWithExpiry_SelfHealsAMissingTTL is architect
+// review item 5's own test: a key that already exists with no TTL
+// (simulating the old two-command INCR-then-EXPIRE losing the second
+// command, or the process dying between them) gets one on its very
+// next hit through this package, rather than being left to grow
+// forever -- which for login:ip:* was a permanent ban, not "a drip of
+// Redis memory" as the old code's own comment called it.
+func TestIntegration_IncrWithExpiry_SelfHealsAMissingTTL(t *testing.T) {
+	rdb := testRedis(t)
+	ctx := context.Background()
+	key := uniqueKey(t, "no-ttl")
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+
+	// Simulate the pre-existing, TTL-less key directly -- no NewLimiter
+	// call needed to get into this state, which is exactly the point:
+	// today's incrWithExpiry must repair it regardless of how it arose.
+	if err := rdb.Set(ctx, key, 5, 0).Err(); err != nil {
+		t.Fatalf("seed key with no TTL: %v", err)
+	}
+	if ttl, err := rdb.TTL(ctx, key).Result(); err != nil || ttl > 0 {
+		t.Fatalf("seeded key TTL = %v, %v, want no TTL (-1)", ttl, err)
+	}
+
+	if _, err := incrWithExpiry(ctx, rdb, key, time.Minute); err != nil {
+		t.Fatalf("incrWithExpiry: %v", err)
+	}
+
+	ttl, err := rdb.TTL(ctx, key).Result()
+	if err != nil {
+		t.Fatalf("TTL: %v", err)
+	}
+	if ttl <= 0 {
+		t.Fatalf("TTL after incrWithExpiry = %v, want a positive TTL (self-healed)", ttl)
+	}
+}
+
+// TestIntegration_Allow_StopsLimitingAfterWindowExpires confirms the
+// atomic script's own TTL still actually expires the key (not just
+// "gets set once and never checked again"): once the window passes, a
+// previously-limited key allows again.
+func TestIntegration_Allow_StopsLimitingAfterWindowExpires(t *testing.T) {
+	rdb := testRedis(t)
+	clk := clock.NewFixed(time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC))
+	l := NewLimiter(rdb, slog.Default(), clk)
+	ctx := context.Background()
+	key := uniqueKey(t, "window")
+	t.Cleanup(func() { _ = rdb.Del(context.Background(), key).Err() })
+
+	const window = 2 * time.Second
+	if res, err := l.Allow(ctx, key, 1, window); err != nil || !res.Allowed {
+		t.Fatalf("Allow #1 = %v, %v, want allowed", res, err)
+	}
+	if res, err := l.Allow(ctx, key, 1, window); err != nil || res.Allowed {
+		t.Fatalf("Allow #2 (over limit) = %v, %v, want denied", res, err)
+	}
+
+	time.Sleep(window + 500*time.Millisecond)
+
+	if res, err := l.Allow(ctx, key, 1, window); err != nil || !res.Allowed {
+		t.Fatalf("Allow after window expired = %v, %v, want allowed again", res, err)
+	}
+}
+
 func TestIntegration_Reset_ClearsRealRedisCounter(t *testing.T) {
 	rdb := testRedis(t)
 	clk := clock.NewFixed(time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC))
