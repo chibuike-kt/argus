@@ -58,6 +58,14 @@ func NewStore(db store.DBTX, clk clock.Clock) *Store {
 	return &Store{q: store.New(db), clk: clk}
 }
 
+// WithTx returns a Store bound to tx -- VerifyEmail's own atomic
+// consume-then-mark-verified transaction (architect review item 9)
+// needs Consume to run against the same tx as identity.Store's
+// MarkEmailVerified, not its own separate connection.
+func (s *Store) WithTx(tx *sql.Tx) *Store {
+	return &Store{q: s.q.WithTx(tx), clk: s.clk}
+}
+
 // Issue creates a new single-use token for userID and purpose,
 // expiring after ttl, and returns the raw token (never stored --
 // token_hash is).

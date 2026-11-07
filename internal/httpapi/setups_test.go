@@ -34,6 +34,8 @@ func (f fakeSessionResolver) Resolve(_ context.Context, rawToken string) (sessio
 
 func (f fakeSessionResolver) Touch(context.Context, int64) error { return nil }
 
+func (f fakeSessionResolver) Revoke(context.Context, int64, int64) error { return nil }
+
 type fakeUserLookup struct{ user identity.User }
 
 func (f fakeUserLookup) GetByID(context.Context, int64) (identity.User, error) {

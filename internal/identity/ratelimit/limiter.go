@@ -49,6 +49,29 @@ func NewLimiter(redis *redis.Client, logger *slog.Logger, clk clock.Clock) *Limi
 	return &Limiter{redis: redis, logger: logger, clk: clk, fallback: make(map[string]*fallbackEntry)}
 }
 
+// incrWithExpiryScript makes "increment, and make sure the key has a
+// TTL" one atomic Redis operation instead of two separate commands
+// (architect review item 5). Two commands meant that if the process
+// died, or the EXPIRE call itself failed, between them, the key was
+// left with no TTL and nothing but a successful call to Reset would
+// ever clear it again -- for "login:ip:*" that is not "a drip of
+// Redis memory" (the old comment's words), it is a permanent ban of
+// that IP. The script re-applies EXPIRE whenever the key has no TTL
+// (TTL < 0), not only when count == 1, so it also self-heals a key
+// that already lost its TTL some other way, on its very next hit.
+var incrWithExpiryScript = redis.NewScript(`
+local count = redis.call('INCR', KEYS[1])
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 0 then
+	redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+`)
+
+func incrWithExpiry(ctx context.Context, rdb *redis.Client, key string, window time.Duration) (int64, error) {
+	return incrWithExpiryScript.Run(ctx, rdb, []string{key}, int64(window.Seconds())).Int64()
+}
+
 // Allow increments key's counter for the current window and reports
 // whether it is still within limit. A fixed window, not a sliding one
 // -- the standard, simplest Redis rate-limit pattern (INCR + EXPIRE),
@@ -72,20 +95,9 @@ func (l *Limiter) Allow(ctx context.Context, key string, limit int, window time.
 }
 
 func (l *Limiter) allowRedis(ctx context.Context, key string, limit int, window time.Duration) (Result, error) {
-	count, err := l.redis.Incr(ctx, key).Result()
+	count, err := incrWithExpiry(ctx, l.redis, key, window)
 	if err != nil {
 		return Result{}, fmt.Errorf("ratelimit: incr: %w", err)
-	}
-	if count == 1 {
-		// First hit this window: the key has no TTL yet (INCR creates
-		// it fresh at 1), so give it one now. A failure here leaves a
-		// counter that never expires on its own -- logged, not fatal,
-		// since the counter is still correct for this window; it just
-		// will not self-clean, a drip of Redis memory, not a limiting
-		// bypass.
-		if err := l.redis.Expire(ctx, key, window).Err(); err != nil {
-			l.logger.Warn("ratelimit: set expiry failed, key will not self-clean", "key", key, "error", err)
-		}
 	}
 	if count > int64(limit) {
 		ttl, err := l.redis.TTL(ctx, key).Result()
@@ -121,13 +133,8 @@ func (l *Limiter) allowFallback(key string, limit int, window time.Duration) Res
 // addendum row 12's progressive login delay) rather than a hard
 // allow/deny at one threshold.
 func (l *Limiter) IncrementAndCount(ctx context.Context, key string, window time.Duration) (int, error) {
-	count, err := l.redis.Incr(ctx, key).Result()
+	count, err := incrWithExpiry(ctx, l.redis, key, window)
 	if err == nil {
-		if count == 1 {
-			if err := l.redis.Expire(ctx, key, window).Err(); err != nil {
-				l.logger.Warn("ratelimit: set expiry failed, key will not self-clean", "key", key, "error", err)
-			}
-		}
 		return int(count), nil
 	}
 	l.logger.Warn("ratelimit: redis unavailable, using in-process fallback", "key", key, "error", err)

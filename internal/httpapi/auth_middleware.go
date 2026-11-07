@@ -37,6 +37,7 @@ var publicAPIPaths = map[string]bool{
 type sessionResolver interface {
 	Resolve(ctx context.Context, rawToken string) (session.Session, error)
 	Touch(ctx context.Context, sessionID int64) error
+	Revoke(ctx context.Context, sessionID, userID int64) error
 }
 
 // userLookup is the slice of *identity.Store requireSession actually
@@ -94,6 +95,21 @@ func requireSession(sessions sessionResolver, users userLookup, cookieName strin
 				// user genuinely might be authenticated; something is
 				// just broken).
 				writeAPIError(w, http.StatusServiceUnavailable, "unavailable", "could not load session user")
+				return
+			}
+
+			// Architect review item 3: disabled_at existed but nothing
+			// enforced it at the session layer -- a disabled account's
+			// existing session kept working indefinitely. Best-effort
+			// revoke (logged, not fatal: the 401 below holds regardless,
+			// since this check runs again on the account's very next
+			// request either way) so GET /auth/sessions stops listing a
+			// now-pointless session too.
+			if user.Disabled() {
+				if rerr := sessions.Revoke(r.Context(), sess.ID, user.ID); rerr != nil {
+					logger.Warn("auth middleware: revoke disabled user's session", "session_id", sess.ID, "user_id", user.ID, "error", rerr)
+				}
+				writeAPIError(w, http.StatusUnauthorized, "unauthorized", "account disabled")
 				return
 			}
 
@@ -155,11 +171,19 @@ func requestMetaMiddleware(trustProxy bool) func(http.Handler) http.Handler {
 // X-Forwarded-For, unless trustProxy says this deployment really does
 // sit behind a proxy that sets that header itself (ADR-015; the same
 // reason NewRouter does not use chi's own middleware.RealIP).
+//
+// When trusted, this takes the LAST entry in X-Forwarded-For, not the
+// first (architect review item 7): the header is a comma-separated
+// list each hop appends its own observed client to, so the first
+// entry is whatever the ORIGINAL client claimed as its own address --
+// fully attacker-controlled -- while the last entry is the one the
+// trusted proxy itself appended, the only entry this deployment did
+// not just take the client's word for.
 func clientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 			parts := strings.Split(fwd, ",")
-			return strings.TrimSpace(parts[0])
+			return strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
 	host := r.RemoteAddr
