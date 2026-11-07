@@ -73,6 +73,27 @@ func (e SetupEventEventType) Valid() bool {
 	}
 }
 
+// Defines values for ListInstrumentsParamsEnabled.
+const (
+	All   ListInstrumentsParamsEnabled = "all"
+	False ListInstrumentsParamsEnabled = "false"
+	True  ListInstrumentsParamsEnabled = "true"
+)
+
+// Valid indicates whether the value is a known member of the ListInstrumentsParamsEnabled enum.
+func (e ListInstrumentsParamsEnabled) Valid() bool {
+	switch e {
+	case All:
+		return true
+	case False:
+		return true
+	case True:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListInstrumentCandlesParamsOrder.
 const (
 	Asc  ListInstrumentCandlesParamsOrder = "asc"
@@ -224,6 +245,9 @@ type TargetSnapshot struct {
 
 // ListInstrumentsParams defines parameters for ListInstruments.
 type ListInstrumentsParams struct {
+	// Enabled true (default): only enabled instruments. false: only disabled. all: every row regardless of enablement (the endpoint's own previous default, before this parameter existed). Any other value is a 400.
+	Enabled *ListInstrumentsParamsEnabled `form:"enabled,omitempty" json:"enabled,omitempty"`
+
 	// AfterId Keyset cursor: return instruments with id strictly greater than this value, ordered by id. Omitted means the first page. This is a different ordering from calling this endpoint with no parameters at all pages through (by id, not by provider then native_symbol) -- intentional, see internal/instruments.Store's own ListAllFiltered/ListAll split.
 	AfterId *int64 `form:"after_id,omitempty" json:"after_id,omitempty"`
 
@@ -231,10 +255,13 @@ type ListInstrumentsParams struct {
 	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
+// ListInstrumentsParamsEnabled defines parameters for ListInstruments.
+type ListInstrumentsParamsEnabled string
+
 // ListInstrumentCandlesParams defines parameters for ListInstrumentCandles.
 type ListInstrumentCandlesParams struct {
-	From time.Time `form:"from" json:"from"`
-	To   time.Time `form:"to" json:"to"`
+	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
+	To   *time.Time `form:"to,omitempty" json:"to,omitempty"`
 
 	// Limit Maximum candles returned. Default 500, maximum 1000 -- a client cannot request the whole table in one call regardless of how wide [from, to) is.
 	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
@@ -265,10 +292,10 @@ type ListSetupsParamsState string
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
-	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Includes disabled rows: nothing in that package can set enabled = TRUE yet (ADR-007), so filtering them out here would just hide every row behind a flag no client can act on.
+	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams)
-	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included.
+	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1); the handler itself still requires both, with the same message as before, when order is asc or omitted -- see its own comment.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams)
 	// Ping Connectivity check for the versioned API surface.
@@ -289,13 +316,13 @@ type ServerInterface interface {
 
 type Unimplemented struct{}
 
-// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Includes disabled rows: nothing in that package can set enabled = TRUE yet (ADR-007), so filtering them out here would just hide every row behind a flag no client can act on.
+// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 // (GET /instruments)
 func (_ Unimplemented) ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included.
+// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1); the handler itself still requires both, with the same message as before, when order is asc or omitted -- see its own comment.
 // (GET /instruments/{id}/candles)
 func (_ Unimplemented) ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -342,6 +369,19 @@ func (siw *ServerInterfaceWrapper) ListInstruments(w http.ResponseWriter, r *htt
 
 	// Parameter object where we will unmarshal all parameters from the context
 	var params ListInstrumentsParams
+
+	// ------------- Optional query parameter "enabled" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "enabled", r.URL.Query(), &params.Enabled, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "enabled"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "enabled", Err: err})
+		}
+		return
+	}
 
 	// ------------- Optional query parameter "after_id" -------------
 
@@ -398,9 +438,9 @@ func (siw *ServerInterfaceWrapper) ListInstrumentCandles(w http.ResponseWriter, 
 	// Parameter object where we will unmarshal all parameters from the context
 	var params ListInstrumentCandlesParams
 
-	// ------------- Required query parameter "from" -------------
+	// ------------- Optional query parameter "from" -------------
 
-	err = runtime.BindQueryParameterWithOptions("form", true, true, "from", r.URL.Query(), &params.From, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "from", r.URL.Query(), &params.From, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
 	if err != nil {
 		var requiredError *runtime.RequiredParameterError
 		if errors.As(err, &requiredError) {
@@ -411,9 +451,9 @@ func (siw *ServerInterfaceWrapper) ListInstrumentCandles(w http.ResponseWriter, 
 		return
 	}
 
-	// ------------- Required query parameter "to" -------------
+	// ------------- Optional query parameter "to" -------------
 
-	err = runtime.BindQueryParameterWithOptions("form", true, true, "to", r.URL.Query(), &params.To, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "to", r.URL.Query(), &params.To, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
 	if err != nil {
 		var requiredError *runtime.RequiredParameterError
 		if errors.As(err, &requiredError) {
@@ -954,10 +994,10 @@ func (response ListSetupEvents404JSONResponse) VisitListSetupEventsResponse(w ht
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
-	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Includes disabled rows: nothing in that package can set enabled = TRUE yet (ADR-007), so filtering them out here would just hide every row behind a flag no client can act on.
+	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(ctx context.Context, request ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error)
-	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included.
+	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1); the handler itself still requires both, with the same message as before, when order is asc or omitted -- see its own comment.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(ctx context.Context, request ListInstrumentCandlesRequestObject) (ListInstrumentCandlesResponseObject, error)
 	// Ping Connectivity check for the versioned API surface.
@@ -1173,49 +1213,52 @@ func (sh *strictHandler) ListSetupEvents(w http.ResponseWriter, r *http.Request,
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
-	"hB9I7GINmdaqbJp18/Ts4/uP/wsAAP//",
+	"1Frdc9u2sv9XdnjvTO0ZWrLT5D6ocx/cNM1kmtvm2jlzHuqMBgKWImoQYABQqk4n//uZXVASKVGylJx+",
+	"vVkECOzHb3/7Qf+WSVfVzqKNIZv8lgVZYiX4z5fCKoP0V+1djT5q5OfSuMCP46rGbJKF6LWdZ5/ytDKN",
+	"uuLlwvlKxGySKRHxip/m+++Uel4OHqbDlM9TndWZcwaFpWXjloOvuRrtwYUzZfO40EE723tD2/j1s+1u",
+	"bSPO0dP2hTNNNWQZPupjoz0p83NHkp7JWtlbkyQN2w3Z5vCuXToCftjI42a/oIwkzivvnd93Hw4/lk4N",
+	"O7XCEMR8eI20whCnWj2tNV+wPW5f4p39Sc4hxd7YEH1ToY37aogQME6lESEMSjwTAae8iZZtY4yYEcij",
+	"b3AAAWhp+QAEk9ZdYPzP80FgWBH1AqdhVc2cGRSr9lriNEhh8ESw1d4ttEI/eNzHuDrrsI+Ni+eYJTR1",
+	"7XxENaVD/EIYtraOWA2bvX0gvBcr/q3l4zTof50QLZqAvtF215h5z+N9Q3bt0L1yWP6ts4cw9+6nN/dW",
+	"1KF0A6BT2qOMLVGcwXB2qnSQrklAPoPjvEI/nRknH6eSWXp6MhYH3j2T5ronfAapfqz8tBDanC357otn",
+	"ik2cIWPjhZmGpbbz0y9OT57CKa/mHSysGbyl82GnHXfIIWMPWvGIhYa17yNwEPVG2M+FPdroV8Nk5zQ9",
+	"/2+PRTbJ/mu8rUDGbfkx7oZbIruIkuL1TNeFKGIzTEkhunqYq4SfY+wT2jFZ3/P+rrh9ttvBSStSHynJ",
+	"WK1QWxGSrQb1H3LXPcamHsiJZu68jmU1XaAPh/wlPQq6QcTTY/kJBCyEaQQtn0kRJ7tXbyqB0yFhRIhT",
+	"XBx550D66yZfI+w0dALjKJa7QZTgPw2u8RLPpsD9V88kQTrgAJ2lYOEVtE1FUFWYUEdZlt3MVsmz6PV8",
+	"jh4ThSyE0eTOLia7h3oRcb46ij0CQuFFNSxXU6szkTlUQvSx0r2zY5YD3ukH655Ka9MdddAuavbjIx+I",
+	"1F5c9kxxkABeLYYr49+NBT47zlMUrvH4uajLM1GhVdwPfPgSNvnbRnUgt59631BsbA7o+WQfsQeC4yjq",
+	"z0b5ELB3cuweuA0ucLiz8v7p0i29zXsH2lLOM4XjigeD9LpOGS+7e3X/Hm7fvYHCebi9e/2P+xG8dFUl",
+	"rAo5CMl1FZCYrH7IodQhOq+lMPCxQa8xgLAKPCbrQSWsmCMhGYRH4Asaq9DDWNR6vLiBi9vv7q6ur59f",
+	"juCtXiAkQgi8XaHRCwoQcAv08E+c3Tv5iDFdQjtCjVIXGhUErAWxmFmNHiyzYaSEl7EapFSWZxueyK5H",
+	"N6Pr9RBF1DqbZF/zozyrRSzZBeMtwfLveeolN+q/Udkke6tDfNPZR+8TB0f0IZv8vGthyr9wobAQjYmX",
+	"E3DWrKBt06Bz3wgKYQK2G5QOvGMEwpgJ4AL9Crxbgse58MpgCOCK9hw29kUsEdCq2mkbvwrglhZqwrBr",
+	"ArTX5zDDwnmEWOoAG7EBf9Uhorocwa1dgYsleiDII+gAAp5fXycLa1KIvL7iJpZ4ctNx5u3cLWGMr2u1",
+	"59qQeZFrEVaTIsgMUN2nfNd+P+AqYATZ+OD8BDzGxtuu4WCpYwlaAZ0ho1nBnAPRQyyFTaqyMjlwJ4IK",
+	"ZivQagQ/VTpGVFChsAHIfoX2IUIt5jiC9/Qi6690UaAnI/MB2s6h8K4CKYyhH3zF2vRJHOu25g0gIrmR",
+	"z6V7vGvmJVywFDlYF0mg9XiA5LDQmxBcwtUVEPlZTiUmh4DID7wVpgva0X10HlvvE1Bvjflem0haj9vf",
+	"EGqj42GHiiKiT6S49egJlLzruP8Tv+qqqQi1oXUb4fm7hA14dn2dQ9XueXF9TTqiLZyXHBfsDpYMdAxo",
+	"CtocZUn2fv3qPYyZ7xMt8O+OFca/afVpnGg8tMaQog6HdTa60nEYwiTnfgJrBc8mL2i50jb9uhkwzAci",
+	"6lA7GxLPP7u+TsNKdiiXNXVttGSGGf8SUsrcSnJSA9eZJ+43b9Tl9Fzz0w+06/mZghy7Pw1qB676Vii4",
+	"SyNWzlmhqSpBTTXz6JrYcE4E5HuMuAb9MMZHO+jeACtAdBt+ZewxoV4scXa11BS8V7UzOpQw8xqLHMi+",
+	"8OxywoGeWBcihjgu9K+x8ci0W+gU6oKAVKPiWIalCFBqlTgAwSPF5iC3v2dyTgsJ1Vv2lcLCUiu04DxY",
+	"4em+WAoOUTLZQWifmKJetrv3EhVHAiW/bSDoNJJf1xWpeTyTBoYCjPhymFCOtkDDh0X3WUcN01NrywGG",
+	"etFlqJvrRFECpNGETiksMXf7+YD9vyydQYjkZWIwZ5FTxE7OLt2S3Q0/k1FyiO4S9Odx04vj3EQyP0FO",
+	"e2YRQfaqFaNIO86LOTRWlsLOUaX8d7SYGAEdPAGLy80JZMCHjExVuUC2k2TJHx8yTpquoTTpUagVPFq3",
+	"TPHWsZKnu9cRgpazaHRABCZSxqh6cV44Y9yyqdeR/k74CFR2skkhRG0MMOdhANRc9izFKu/lofv/f3vY",
+	"N1wPHCh9RJDbyqf9RSYZqnr+kBzRfgz9C+cHuvP573/njy7C966xaicjveRvknBzVWnbRNxQA/VGFMyd",
+	"3KRtB5h5L0x6easS/hGjElF00la65429Izy/JSyiyplBgqg4jVB+iSXISo2Fnzfhaun8I/q2lkmOvE/9",
+	"VhMwjOCWhKwoYpLQ7U6uewNnmIT2FL85BAc6UnVrKQODttI0ioKWlBpHx63WzMUSXJ2KTipiOdKTeYEb",
+	"TjqHY+B/ycJ8DxXTbZAbausi/Eg1bhu8FNcpzyEqVA/ZU4n55vIbtkzJavm2GGy1aRNVYEnzVHlvzNh+",
+	"pQURWqLKYVlykqUqmwr7IEkS13YBV1eprI5twegq8vQmCdcUqYcS7jta/MIY7k8DDn+y/jTY3u8HcB/a",
+	"zlqUUS90XIEsUT4yqslYbYuMiucAofGFkDhKSqci+2idcZ+2DBcXO3S5O7/8wkJjR2cq8x6ym+ohI+8S",
+	"DrWdF42B6JRYwQV5dzeixrV3EkPQdj6au696rgdnYVmuLnOYNXE3y1HouAil8Eo6RSUjRRQVkVQFQkBR",
+	"sYUZcgICSmcVbAa2MEPpKko7PFqaGTycZLpT3q2Fnixw7jA1xCQZsZfRBcqVNAg86d1tf62jIpdUo0aM",
+	"cjixyQxLsdDOd3L/YUHXE+StkP+5KfyJ/WXerSzMqp0tqZaZeUYSOi3yRs91Y9/R87JbCW4LwWfHhiFH",
+	"a7Vjpdqzv0Ybmb6+/a06SNl4Hs208wCKOdGdD8GFsCrfpDGzykFs4/Cyl63TGZ1M/e1q20aN4A6FuuJu",
+	"cjsEHW8Gn21bhx7a+eY3YPSiG3fRCxs0z1E5v4rNCDNPCe3K1Wi3Q0+oNUpME6LejGmTlJLA3BQeJOnX",
+	"mDj6j+n/vhSmJ6DzMBr/xNrxFiiHELmSkDxhbAsJrQ5j7DUSxL4b7XlzzN8wTsi8rxbDQ+i/om9Pp6D0",
+	"/e8MHvpzPU8ifxWgaFI/ibZHE6uc2gX+OqTduv48SjvJqWlq9JC9WmiFVuJDBtRIbEcQVEPzuMtTdZH+",
+	"PYbHC6JF4dxFKkA8tsV++vJyc3OZCIQ/u/nFGjKNN9kka7/SZJ8+fPp3AAAA//8=",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

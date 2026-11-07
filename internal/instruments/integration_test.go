@@ -213,7 +213,7 @@ func TestIntegration_ListAllFiltered_KeysetAndLimit(t *testing.T) {
 	b := insertOne("b")
 	c := insertOne("c")
 
-	firstPage, err := store.ListAllFiltered(ctx, &maxIDBefore, 2)
+	firstPage, err := store.ListAllFiltered(ctx, &maxIDBefore, nil, 2)
 	if err != nil {
 		t.Fatalf("ListAllFiltered (first page): %v", err)
 	}
@@ -221,7 +221,7 @@ func TestIntegration_ListAllFiltered_KeysetAndLimit(t *testing.T) {
 		t.Fatalf("firstPage = %+v, want exactly [a(%d), b(%d)]", firstPage, a.ID, b.ID)
 	}
 
-	secondPage, err := store.ListAllFiltered(ctx, &b.ID, 2)
+	secondPage, err := store.ListAllFiltered(ctx, &b.ID, nil, 2)
 	if err != nil {
 		t.Fatalf("ListAllFiltered (second page): %v", err)
 	}
@@ -236,7 +236,7 @@ func TestIntegration_ListAllFiltered_KeysetAndLimit(t *testing.T) {
 	// maxIDBefore with a wide-enough limit is the meaningful version
 	// of "everything after the cursor, in one page" this test can make
 	// without depending on how many rows other tests left behind.
-	allAfterCursor, err := store.ListAllFiltered(ctx, &maxIDBefore, 500)
+	allAfterCursor, err := store.ListAllFiltered(ctx, &maxIDBefore, nil, 500)
 	if err != nil {
 		t.Fatalf("ListAllFiltered (wide page after cursor): %v", err)
 	}
@@ -246,6 +246,78 @@ func TestIntegration_ListAllFiltered_KeysetAndLimit(t *testing.T) {
 	}
 	if !found[a.ID] || !found[b.ID] || !found[c.ID] {
 		t.Fatalf("ListAllFiltered(maxIDBefore, 500) missing one of a(%d)/b(%d)/c(%d): got %d rows", a.ID, b.ID, c.ID, len(allAfterCursor))
+	}
+}
+
+// TestIntegration_ListAllFiltered_EnabledFilter is the web-wiring-polish
+// brief's own required proof for item 2: one enabled row, one disabled
+// row, checked against all three ?enabled= values plus the default
+// (true, web-wiring-polish item 2's own change -- "no parameter" no
+// longer means "every row"). Insert always writes enabled = FALSE
+// (InsertInstrument's own doc comment, ADR-007), so the enabled row
+// here is a raw UPDATE after insert, the same way
+// TestIntegration_ScaleIsImmutable reaches past the Store's own API to
+// exercise a database-level fact this package's public surface has no
+// other way to set up.
+func TestIntegration_ListAllFiltered_EnabledFilter(t *testing.T) {
+	db := testDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	priceScale := quant.Scale(2)
+	qtyScale := quant.Scale(6)
+	insertOne := func(label string) Instrument {
+		inst, err := store.Insert(ctx, NewInstrumentParams{
+			Provider:     "test-provider",
+			NativeSymbol: fmt.Sprintf("ENABLED-%s-%d", label, time.Now().UnixNano()),
+			AssetClass:   "crypto_perp",
+			PriceScale:   &priceScale,
+			QtyScale:     &qtyScale,
+			TickSize:     1,
+			QtyStepSize:  1,
+		})
+		if err != nil {
+			t.Fatalf("Insert (%s): %v", label, err)
+		}
+		return inst
+	}
+	disabled := insertOne("disabled")
+	enabled := insertOne("enabled")
+	if _, err := db.ExecContext(ctx, `UPDATE instruments SET enabled = TRUE WHERE id = $1`, enabled.ID); err != nil {
+		t.Fatalf("UPDATE enabled = TRUE: %v", err)
+	}
+
+	beforeBoth := disabled.ID - 1 // both inserted rows are id > this
+
+	trueVal, falseVal := true, false
+	cases := []struct {
+		name    string
+		enabled *bool
+		want    []int64
+	}{
+		{"default (nil pointer from the handler's own perspective is never passed here -- true is what ListInstruments now passes for no query param)", &trueVal, []int64{enabled.ID}},
+		{"enabled=false", &falseVal, []int64{disabled.ID}},
+		{"enabled=all (nil)", nil, []int64{disabled.ID, enabled.ID}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rows, err := store.ListAllFiltered(ctx, &beforeBoth, c.enabled, 500)
+			if err != nil {
+				t.Fatalf("ListAllFiltered: %v", err)
+			}
+			got := make([]int64, len(rows))
+			for i, r := range rows {
+				got[i] = r.ID
+			}
+			if len(got) != len(c.want) {
+				t.Fatalf("got ids %v, want %v", got, c.want)
+			}
+			for i, id := range c.want {
+				if got[i] != id {
+					t.Fatalf("got ids %v, want %v", got, c.want)
+				}
+			}
+		})
 	}
 }
 

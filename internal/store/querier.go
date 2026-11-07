@@ -198,6 +198,14 @@ type Querier interface {
 	// ListAllInstruments's own -- that query is untouched, still available,
 	// still unbounded, in case anything else in this package ever needs
 	// the old order.
+	//
+	// enabled_filter (web-wiring-polish brief, item 2) is also nullable:
+	// NULL means no filter at all (every row, enabled or not -- the
+	// "?enabled=all" case); true or false means exactly that value. The
+	// handler's own default (no "enabled" query param given) passes true,
+	// not NULL -- a disabled test/fixture row filling a capped page is
+	// exactly the bug this item fixes, so "no parameter" must not mean
+	// "every row" the way it used to.
 	ListAllInstrumentsPaged(ctx context.Context, arg ListAllInstrumentsPagedParams) ([]Instrument, error)
 	// ListClosedCandlesInRangeLimited is GET /instruments/{id}/candles' own
 	// read path (internal/httpapi): current, CLOSED candles only (a
@@ -210,12 +218,15 @@ type Querier interface {
 	ListClosedCandlesInRangeLimited(ctx context.Context, arg ListClosedCandlesInRangeLimitedParams) ([]Candle, error)
 	// ListClosedCandlesInRangeLimitedDesc is ListClosedCandlesInRangeLimited's
 	// own sibling for GET /instruments/{id}/candles?order=desc (web-wiring-
-	// followup brief, Part 4: "give me the most recent N" without already
-	// knowing a range). sqlc needs the ORDER BY direction literal in the SQL
-	// text itself -- it cannot be a bound parameter -- so this is a second,
-	// otherwise-identical query rather than one query with a dynamic order,
-	// matching how this file already has no query that varies its own SQL
-	// shape by parameter.
+	// followup brief, item 1: "give me the most recent N" needs no range at
+	// all, not just a wide one). sqlc needs the ORDER BY direction literal in
+	// the SQL text itself -- it cannot be a bound parameter -- so this is a
+	// second, otherwise-identical query rather than one query with a dynamic
+	// order. from_time/to_time are nullable (sqlc.narg): NULL means "no lower/
+	// upper bound", which is the whole point here -- a caller asking for the
+	// latest N candles should not have to invent a [from, to) range just to
+	// satisfy a required parameter. limit is still enforced in the query
+	// itself regardless of how open the bounds are.
 	ListClosedCandlesInRangeLimitedDesc(ctx context.Context, arg ListClosedCandlesInRangeLimitedDescParams) ([]Candle, error)
 	// ListCurrentCandlesInRange is the read path aggregation uses: the current
 	// (non-superseded) row for every open_time in [start, end), ordered so the

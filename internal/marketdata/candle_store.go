@@ -251,21 +251,35 @@ func (s *Store) ListClosedInRangeLimited(ctx context.Context, instrumentID int64
 // sibling, newest first -- GET /instruments/{id}/candles?order=desc
 // (web-wiring-followup brief, Part 4), for a client that wants "the
 // most recent N" without already knowing a [from, to) range narrow
-// enough to contain them. The limit is still enforced in the query
-// itself, for the same reason as the ascending form.
-func (s *Store) ListClosedInRangeLimitedDesc(ctx context.Context, instrumentID int64, start, end time.Time, limit int32) ([]Candle, error) {
+// enough to contain them. start/end are both optional (web-wiring-
+// polish brief, item 1): nil means no lower/upper bound, so a caller
+// asking for the latest N candles does not have to invent a range just
+// to satisfy a required parameter. The limit is still enforced in the
+// query itself regardless of how open the bounds are.
+func (s *Store) ListClosedInRangeLimitedDesc(ctx context.Context, instrumentID int64, start, end *time.Time, limit int32) ([]Candle, error) {
 	rows, err := s.q.ListClosedCandlesInRangeLimitedDesc(ctx, store.ListClosedCandlesInRangeLimitedDescParams{
 		InstrumentID: instrumentID,
-		OpenTime:     start,
-		OpenTime_2:   end,
+		FromTime:     toNullTime(start),
+		ToTime:       toNullTime(end),
 		Limit:        limit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("marketdata: list closed candles desc instrument=%d [%s,%s): %w", instrumentID, start, end, err)
+		return nil, fmt.Errorf("marketdata: list closed candles desc instrument=%d [%v,%v): %w", instrumentID, start, end, err)
 	}
 	out := make([]Candle, len(rows))
 	for i, row := range rows {
 		out[i] = fromCandleRow(row)
 	}
 	return out, nil
+}
+
+// toNullTime is nil-safe: a nil bound becomes SQL NULL (no bound, see
+// ListClosedCandlesInRangeLimitedDesc's own comment in db/queries), not
+// a zero time.Time, which would be a real (and wrong) bound at the Unix
+// epoch.
+func toNullTime(t *time.Time) sql.NullTime {
+	if t == nil {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: *t, Valid: true}
 }

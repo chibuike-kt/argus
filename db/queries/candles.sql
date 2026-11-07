@@ -40,18 +40,22 @@ LIMIT $4;
 
 -- ListClosedCandlesInRangeLimitedDesc is ListClosedCandlesInRangeLimited's
 -- own sibling for GET /instruments/{id}/candles?order=desc (web-wiring-
--- followup brief, Part 4: "give me the most recent N" without already
--- knowing a range). sqlc needs the ORDER BY direction literal in the SQL
--- text itself -- it cannot be a bound parameter -- so this is a second,
--- otherwise-identical query rather than one query with a dynamic order,
--- matching how this file already has no query that varies its own SQL
--- shape by parameter.
+-- followup brief, item 1: "give me the most recent N" needs no range at
+-- all, not just a wide one). sqlc needs the ORDER BY direction literal in
+-- the SQL text itself -- it cannot be a bound parameter -- so this is a
+-- second, otherwise-identical query rather than one query with a dynamic
+-- order. from_time/to_time are nullable (sqlc.narg): NULL means "no lower/
+-- upper bound", which is the whole point here -- a caller asking for the
+-- latest N candles should not have to invent a [from, to) range just to
+-- satisfy a required parameter. limit is still enforced in the query
+-- itself regardless of how open the bounds are.
 -- name: ListClosedCandlesInRangeLimitedDesc :many
 SELECT * FROM candles
 WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
-  AND open_time >= $2 AND open_time < $3
+  AND (sqlc.narg('from_time')::timestamptz IS NULL OR open_time >= sqlc.narg('from_time')::timestamptz)
+  AND (sqlc.narg('to_time')::timestamptz IS NULL OR open_time < sqlc.narg('to_time')::timestamptz)
 ORDER BY open_time DESC
-LIMIT $4;
+LIMIT $2;
 
 -- UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 -- a still-forming row in place for a later tick of the same minute.

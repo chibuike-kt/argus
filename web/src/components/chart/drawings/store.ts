@@ -1,4 +1,4 @@
-import { useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { migrateDrawing, type Drawing } from "./types";
 
 // Everything the store needs from a persistence backend. localStorage is the
@@ -202,7 +202,27 @@ export function getDrawingsStore(): DrawingsStore {
  */
 export function useDrawingsStore(scopeKey: string) {
   const store = getDrawingsStore();
-  store.setScope(scopeKey);
+  // setScope is a side effect (it can emit(), synchronously notifying
+  // every other component subscribed to this shared store) -- calling
+  // it directly in the render body, as this used to, is exactly the
+  // React warning "Cannot update a component while rendering a
+  // different component" (web-wiring-polish brief, item 3: traced to
+  // here by reading /analysis's own console stack). An effect is the
+  // correct place for it: render stays pure, and the scope switch still
+  // happens as soon as scopeKey actually changes.
+  // setScope is a side effect (it can emit(), synchronously notifying
+  // every other component subscribed to this shared store) -- calling
+  // it directly in the render body, as this used to, is exactly the
+  // React warning "Cannot update a component while rendering a
+  // different component" (web-wiring-polish brief, item 3: traced to
+  // here by reading /analysis's own console stack, confirmed by
+  // store.render.test.tsx reproducing the exact warning text without
+  // this fix). An effect is the correct place for it: render stays
+  // pure, and the scope switch still happens as soon as scopeKey
+  // actually changes.
+  useEffect(() => {
+    store.setScope(scopeKey);
+  }, [store, scopeKey]);
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
 
   return useMemo(

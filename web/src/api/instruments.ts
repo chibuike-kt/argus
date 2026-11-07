@@ -8,8 +8,12 @@ export function listInstruments(options?: GetJSONOptions): Promise<ApiInstrument
 }
 
 export interface ListCandlesParams {
-  from: string; // ISO-8601
-  to: string; // ISO-8601
+  // Both optional (web-wiring-polish brief, item 1): required server-side
+  // only when order is "asc" or omitted. order="desc" means "the latest
+  // N candles," which needs no range at all -- from/to omitted entirely
+  // is the normal way to call it, not a workaround.
+  from?: string; // ISO-8601
+  to?: string; // ISO-8601
   limit?: number; // server caps at 1000 regardless
   // "desc" is the most-recent-N shortcut (web-wiring-followup brief,
   // Part 4): newest first, still capped by limit, still enforced in SQL

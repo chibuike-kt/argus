@@ -4,6 +4,7 @@ import { Stat } from "@/components/ui/stat";
 import { ProvenanceChip } from "@/components/ui/provenance-chip";
 import { SetupStateBadge } from "@/components/ui/setup-state-badge";
 import { mapApiPoiType, mapApiState, parseRatString, toEvidence, toPlanOverlay } from "@/api/mappers";
+import { formatRR } from "@/api/money";
 import { useAnalysisWorkspace } from "./analysis-workspace";
 import type { POIType } from "@/types/domain";
 
@@ -81,7 +82,7 @@ export function SetupPanel() {
             <Pill key={`${t.level}-${i}`} variant="glass" size="md" className="gap-1.5">
               <span className="text-fg-subtle">TP{i + 1}</span>
               {n(overlay.targets[i])}
-              <span className="text-fg">{parseRatString(t.rr).toFixed(1)}R</span>
+              <span className="text-fg">{formatRR(parseRatString(t.rr))}</span>
             </Pill>
           ))}
           {setup.plan_snapshot.targets.length === 0 && (
