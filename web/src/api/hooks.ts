@@ -88,8 +88,6 @@ export function useSetupsAcrossInstruments(
   );
 }
 
-const EPOCH = new Date(0).toISOString();
-
 // LATEST_CLOSE_INSTRUMENT_CAP bounds the Watchlist crypto group's "Last"
 // price lookups (web-wiring-followup brief, Part 5): one
 // order=desc&limit=1 candles request per instrument, which does not
@@ -116,7 +114,7 @@ export function useLatestCloses(instrumentIds: number[]): AsyncState<Map<number,
           try {
             const rows = await listInstrumentCandles(
               instrumentId,
-              { from: EPOCH, to: new Date().toISOString(), limit: 1, order: "desc" },
+              { limit: 1, order: "desc" },
               { signal },
             );
             return rows[0] ? [instrumentId, Number(rows[0].close)] : undefined;

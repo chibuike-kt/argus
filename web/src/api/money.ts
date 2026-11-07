@@ -17,3 +17,13 @@ export function parseRatString(rr: string): number {
   }
   return num / den;
 }
+
+// formatRR is display formatting for a parsed R:R value, not a change
+// to the data itself (web-wiring-polish brief, item 3): a small ratio
+// like 1/27 (~0.037) rounds to "0.0" at one decimal place, which reads
+// as "no reward at all" rather than "small but real" -- two decimals
+// below 0.1 keeps it legible ("0.04") without changing how larger,
+// more common values like 2 or 1.5 are shown (one decimal, unchanged).
+export function formatRR(rr: number): string {
+  return (Math.abs(rr) < 0.1 ? rr.toFixed(2) : rr.toFixed(1)) + "R";
+}

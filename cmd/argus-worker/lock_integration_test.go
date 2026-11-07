@@ -57,6 +57,47 @@ func TestIntegration_InstrumentLock_SecondAcquireFailsWhileFirstHeld(t *testing.
 	}
 }
 
+// TestIntegration_InstrumentLock_ReleaseSurvivesCancelledContext is the
+// web-wiring-polish brief's own required proof for item 4: release must
+// not leak the session-level lock when given an already-cancelled
+// context (processInstrumentLocked's own defer still calls it even
+// when the processing run's ctx was cancelled mid-flight) -- release
+// runs the unlock on context.WithoutCancel(ctx) with its own short
+// timeout specifically so this works.
+func TestIntegration_InstrumentLock_ReleaseSurvivesCancelledContext(t *testing.T) {
+	db := testWorkerDB(t)
+	const instrumentID = int64(9_000_002)
+
+	lock, ok, err := acquireInstrumentLock(context.Background(), db, instrumentID, "1m")
+	if err != nil {
+		t.Fatalf("acquireInstrumentLock: %v", err)
+	}
+	if !ok {
+		t.Fatal("acquireInstrumentLock: ok = false, want true (nothing else holds it yet)")
+	}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := lock.release(cancelledCtx); err != nil {
+		t.Fatalf("release (cancelled ctx): %v", err)
+	}
+
+	// The real proof: another acquirer succeeds afterward. A worker
+	// that never retries this check would otherwise skip this
+	// instrument forever, exactly the bug this item fixes.
+	second, ok, err := acquireInstrumentLock(context.Background(), db, instrumentID, "1m")
+	if err != nil {
+		t.Fatalf("acquireInstrumentLock (after cancelled-context release): %v", err)
+	}
+	if !ok {
+		t.Fatal("acquireInstrumentLock (after cancelled-context release): ok = false -- the lock was leaked")
+	}
+	if err := second.release(context.Background()); err != nil {
+		t.Fatalf("release (second): %v", err)
+	}
+}
+
 // TestIntegration_ProcessInstrumentLocked_ReleasedAfterNormalCompletion
 // proves the lock is free again immediately after a successful
 // processInstrumentLocked call, not just eventually (e.g. only once the

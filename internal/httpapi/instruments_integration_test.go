@@ -3,8 +3,10 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -43,8 +45,11 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 		// ordered by id (backend-guards-cleanup brief, item 2), and a
 		// long-lived test database has far more than 200 rows ahead of
 		// this freshly-inserted one, so an unparameterized call would
-		// no longer reliably include it.
-		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d", srv.URL, instrumentID-1))
+		// no longer reliably include it. enabled=all is also required
+		// now (web-wiring-polish brief, item 2): the default changed to
+		// enabled=true only, and this test's own instrument is always
+		// disabled (instruments.Store.Insert's own doc comment).
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d&enabled=all", srv.URL, instrumentID-1))
 		if err != nil {
 			t.Fatalf("GET /instruments: %v", err)
 		}
@@ -70,6 +75,76 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("instrument %d not in list of %d instruments", instrumentID, len(got))
+		}
+	})
+
+	t.Run("enabled filter: true (default), false, all", func(t *testing.T) {
+		// instrumentID (this test function's own fixture) is disabled;
+		// a second instrument, enabled via a raw UPDATE (Insert itself
+		// can never set it, ADR-007), gives one of each.
+		enabledID := testInstrument(t, db)
+		if _, err := db.ExecContext(context.Background(), `UPDATE instruments SET enabled = TRUE WHERE id = $1`, enabledID); err != nil {
+			t.Fatalf("UPDATE enabled = TRUE: %v", err)
+		}
+		beforeBoth := instrumentID - 1
+		if enabledID < instrumentID {
+			beforeBoth = enabledID - 1
+		}
+
+		fetch := func(query string) []Instrument {
+			t.Helper()
+			resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments?after_id=%d%s", srv.URL, beforeBoth, query))
+			if err != nil {
+				t.Fatalf("GET /instruments%s: %v", query, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			var got []Instrument
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			return got
+		}
+		hasID := func(rows []Instrument, id int64) bool {
+			for _, r := range rows {
+				if r.Id == id {
+					return true
+				}
+			}
+			return false
+		}
+
+		// Default (no ?enabled= at all): enabled only (web-wiring-polish
+		// brief, item 2's own behaviour change).
+		defaultRows := fetch("")
+		if !hasID(defaultRows, enabledID) || hasID(defaultRows, instrumentID) {
+			t.Fatalf("default: got ids %+v, want only the enabled one (%d), not the disabled one (%d)", defaultRows, enabledID, instrumentID)
+		}
+
+		trueRows := fetch("&enabled=true")
+		if !hasID(trueRows, enabledID) || hasID(trueRows, instrumentID) {
+			t.Fatalf("enabled=true: got ids %+v, want only %d", trueRows, enabledID)
+		}
+
+		falseRows := fetch("&enabled=false")
+		if hasID(falseRows, enabledID) || !hasID(falseRows, instrumentID) {
+			t.Fatalf("enabled=false: got ids %+v, want only %d", falseRows, instrumentID)
+		}
+
+		allRows := fetch("&enabled=all")
+		if !hasID(allRows, enabledID) || !hasID(allRows, instrumentID) {
+			t.Fatalf("enabled=all: got ids %+v, want both %d and %d", allRows, enabledID, instrumentID)
+		}
+
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments?enabled=maybe", srv.URL))
+		if err != nil {
+			t.Fatalf("GET /instruments?enabled=maybe: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("enabled=maybe: status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 		}
 	})
 
@@ -137,6 +212,39 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 		}
 		if len(got) != 1 || got[0].Open != "90" {
 			t.Fatalf("got %+v, want exactly one candle, open \"90\"", got)
+		}
+	})
+
+	t.Run("candles order=desc with no from/to returns newest first (item 1)", func(t *testing.T) {
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments/%d/candles?order=desc&limit=2", srv.URL, instrumentID))
+		if err != nil {
+			t.Fatalf("GET /instruments/{id}/candles?order=desc&limit=2: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want %d, body=%s", resp.StatusCode, http.StatusOK, body)
+		}
+		var got []Candle
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d candles, want 2", len(got))
+		}
+		if got[0].Open != "90" || got[1].Open != "85" {
+			t.Fatalf("got opens %q, %q, want \"90\", \"85\" (newest first, no range given at all)", got[0].Open, got[1].Open)
+		}
+	})
+
+	t.Run("candles order=asc with no from is still a 400 (unchanged)", func(t *testing.T) {
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/instruments/%d/candles?order=asc&limit=2", srv.URL, instrumentID))
+		if err != nil {
+			t.Fatalf("GET /instruments/{id}/candles?order=asc&limit=2: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 		}
 	})
 

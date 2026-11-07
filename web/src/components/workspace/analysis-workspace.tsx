@@ -16,17 +16,13 @@ import { ApiClientError } from "@/api/client";
 // a user landed on it directly.
 //
 // The API still has no "latest closed candle" endpoint, but order=desc
-// (web-wiring-followup brief, Part 4/5) solves the actual problem that
-// gap created: [from, to) no longer needs to tightly bracket the real
-// data, since limit still caps how many rows the query returns
-// regardless of how wide the range is (enforced in SQL, see
+// with no from/to at all (web-wiring-polish brief, item 1) solves the
+// actual problem that gap created: this is "give me the most recent
+// MAX_CANDLES candles," with limit still capping the result server-side
+// regardless of there being no range to bound it (enforced in SQL, see
 // ListClosedCandlesInRangeLimitedDesc's own comment in db/queries) --
-// EPOCH to "now" safely contains any real or historical dataset, and
-// order=desc&limit=MAX_CANDLES gets back exactly the most recent
-// MAX_CANDLES candles within it, reversed below into the ascending
-// order the chart needs.
+// reversed below into the ascending order the chart needs.
 const MAX_CANDLES = 1000;
-const EPOCH = new Date(0).toISOString();
 
 interface AnalysisWorkspace {
   instruments: ApiInstrument[];
@@ -198,7 +194,7 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     setCandlesError(undefined);
     listInstrumentCandles(
       setup.instrument_id,
-      { from: EPOCH, to: new Date().toISOString(), limit: MAX_CANDLES, order: "desc" },
+      { limit: MAX_CANDLES, order: "desc" },
       { signal: controller.signal },
     )
       .then((data) => {
