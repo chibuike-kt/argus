@@ -1,0 +1,106 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Login } from "../login";
+import { AuthProvider } from "@/auth/auth-context";
+
+function jsonResponse(body: unknown, status = 200, headers?: Record<string, string>): Response {
+  return new Response(body === undefined ? null : JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...headers },
+  });
+}
+
+// Every test visits /login with a session that does not exist yet
+// (GET /auth/me -> 401), the same as a real signed-out visitor -- the
+// AuthProvider mounted alongside Login needs that resolved before the
+// login form is meaningfully interactive.
+function installFetchMock(loginHandler: (body: unknown) => Response) {
+  const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/v1/auth/me") {
+      return Promise.resolve(jsonResponse({ error: { code: "unauthorized", message: "no session" } }, 401));
+    }
+    if (url.pathname === "/api/v1/auth/login") {
+      return Promise.resolve(loginHandler(init?.body ? JSON.parse(String(init.body)) : undefined));
+    }
+    throw new Error(`unexpected fetch: ${url.toString()}`);
+  });
+  global.fetch = fetchMock as unknown as typeof fetch;
+  return fetchMock;
+}
+
+function renderLogin(initialEntries: string[] = ["/login"]) {
+  return render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/setups" element={<div>SETUPS PAGE</div>} />
+          <Route path="/account" element={<div>ACCOUNT PAGE</div>} />
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+}
+
+describe("Login route", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("redirects to ?next= on success", async () => {
+    installFetchMock(() =>
+      jsonResponse({ id: 1, email: "a@example.com", email_verified: true, created_at: "2026-01-01T00:00:00Z" }),
+    );
+    renderLogin(["/login?next=/account"]);
+
+    await userEvent.type(await screen.findByLabelText("Email"), "a@example.com");
+    await userEvent.type(screen.getByLabelText("Password"), "whatever12345");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText("ACCOUNT PAGE")).toBeInTheDocument();
+  });
+
+  it("shows the single generic message for invalid_credentials, regardless of cause", async () => {
+    installFetchMock(() =>
+      jsonResponse({ error: { code: "invalid_credentials", message: "invalid email or password" } }, 401),
+    );
+    renderLogin();
+
+    await userEvent.type(await screen.findByLabelText("Email"), "a@example.com");
+    await userEvent.type(screen.getByLabelText("Password"), "wrong-password");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(
+      await screen.findByText("Email or password is incorrect, or the email is not verified yet"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows and counts down a rate_limited response", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installFetchMock(() =>
+      jsonResponse(
+        { error: { code: "rate_limited", message: "too many attempts" } },
+        429,
+        { "Retry-After": "5" },
+      ),
+    );
+    renderLogin();
+
+    await userEvent.type(await screen.findByLabelText("Email"), "a@example.com");
+    await userEvent.type(screen.getByLabelText("Password"), "whatever12345");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText(/Too many attempts\. Try again in 5s\./)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeDisabled();
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await screen.findByText(/Try again in 2s\./)).toBeInTheDocument();
+
+    vi.useRealTimers();
+  });
+});

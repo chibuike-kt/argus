@@ -90,6 +90,9 @@ services:
       # addendum row 6).
       ARGUS_AUTH_ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
       ARGUS_AUTH_TRUST_PROXY_FOR_IP: "false"
+      # The verification-email link's own origin (web auth UI brief
+      # A0) -- same port as the Vite dev server above.
+      ARGUS_PUBLIC_BASE_URL: http://localhost:5173
     ports:
       - "8080:8080"
 

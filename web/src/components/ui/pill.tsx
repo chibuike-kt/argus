@@ -11,6 +11,12 @@ const pill = cva("inline-flex items-center gap-1.5 rounded-full font-medium lead
       outline: "border border-line text-fg-muted",
       up: "bg-up/15 text-up",
       down: "bg-down/15 text-down",
+      // Generic (non-market) status, e.g. a verified/unverified badge
+      // on the Account page -- reuses the provenance tokens, not
+      // --color-up/--color-down, since those are reserved for market
+      // data (theme.css's own "three colour languages kept apart" rule).
+      "prov-s": "bg-prov-s/15 text-prov-s",
+      "prov-u": "bg-prov-u/15 text-prov-u",
     },
     size: {
       sm: "h-6 px-2.5 text-[11px]",

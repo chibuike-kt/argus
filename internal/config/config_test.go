@@ -30,7 +30,8 @@ func validConfig(env string) Config {
 	return Config{
 		Env: env, DatabaseURL: "postgres://x", RedisURL: "redis://x",
 		HTTPPort: "8080", ShutdownTimeout: 1,
-		Auth: AuthPolicy{AllowedOrigins: []string{"https://app.example.com"}},
+		PublicBaseURL: "https://app.example.com",
+		Auth:          AuthPolicy{AllowedOrigins: []string{"https://app.example.com"}},
 	}
 }
 
@@ -70,7 +71,20 @@ func TestValidate_ProductionRejectsNonHTTPSOrigin(t *testing.T) {
 func TestValidate_NonProductionAllowsHTTPOrigin(t *testing.T) {
 	c := validConfig("local")
 	c.Auth.AllowedOrigins = []string{"http://localhost:5173"}
+	c.PublicBaseURL = "http://localhost:5173"
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate() with an http origin outside production = %v, want nil", err)
+	}
+}
+
+// TestValidate_ProductionRejectsNonHTTPSPublicBaseURL is web auth UI
+// brief item A0's own test: ARGUS_PUBLIC_BASE_URL (the origin the
+// verification-email link is built against) must be https:// in
+// production, validated the same way as ARGUS_AUTH_ALLOWED_ORIGINS.
+func TestValidate_ProductionRejectsNonHTTPSPublicBaseURL(t *testing.T) {
+	c := validConfig("staging")
+	c.PublicBaseURL = "http://app.example.com"
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() with a non-https PublicBaseURL in production = nil, want an error")
 	}
 }
