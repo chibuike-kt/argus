@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Bell, Plus, MagnifyingGlass, SlidersHorizontal } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
@@ -10,6 +10,18 @@ import { CoinIcon } from "@/components/ui/coin-icon";
 import { TabsRoot, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { Provenance } from "@/types/domain";
 import { cn } from "@/lib/cn";
+import { Wordmark } from "@/components/light/wordmark";
+import { BackButton } from "@/components/light/back-button";
+import { SupportButton } from "@/components/light/support-button";
+import { StepProgress } from "@/components/light/step-progress";
+import { TextInput } from "@/components/light/text-input";
+import { PasswordInput } from "@/components/light/password-input";
+import { PrimaryButton } from "@/components/light/primary-button";
+import { SocialButton } from "@/components/light/social-button";
+import { OrDivider } from "@/components/light/or-divider";
+import { CodeInput } from "@/components/light/code-input";
+import { Checkbox } from "@/components/light/checkbox";
+import { GoogleIcon, AppleIcon } from "@/components/light/brand-icons";
 
 function Section({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
   return (
@@ -44,6 +56,87 @@ const PROV: { p: Provenance; name: string }[] = [
   { p: "U", name: "Unresolved" },
 ];
 
+// Every light-theme component, built once in components/light/ for the
+// sign-in/sign-up/onboarding pages, shown here too so there is one
+// place that renders the whole light library (brief's own "build once,
+// show on /style" instruction). theme-light sets its own background
+// and min-height:100dvh for a full page -- min-h-0 cancels the latter
+// so this nests as a contained panel instead of trying to fill the
+// viewport again inside the (dark) style guide page around it.
+function LightPagesShowcase() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [checked, setChecked] = useState(false);
+
+  return (
+    <div className="theme-light min-h-0 space-y-8 rounded-xl border border-light-line bg-light-page p-6 sm:p-10">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Swatch name="Page" hex="#FBFBFB" cls="bg-light-page" />
+        <Swatch name="Surface" hex="#FFFFFF" cls="bg-light-surface border-light-line" />
+        <Swatch name="Fill" hex="#EEEEEE" cls="bg-light-fill" />
+        <Swatch name="Line" hex="#E5E7EB" cls="bg-light-line" />
+        <Swatch name="Text (accent-fg)" hex="#0A0B0D" cls="bg-light-text" />
+        <Swatch name="Muted" hex="#6B7280" cls="bg-light-muted" />
+        <Swatch name="Primary (accent)" hex="#6D7BFF" cls="bg-light-primary" />
+        <Swatch name="Error" hex="#DC2626" cls="bg-light-error" />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-6">
+        <Wordmark />
+        <BackButton onClick={() => {}} />
+        <SupportButton />
+        <StepProgress current={2} total={5} />
+      </div>
+
+      <div className="grid gap-8 sm:grid-cols-2">
+        <div className="space-y-3.5">
+          <TextInput
+            label="Email address"
+            id="style-guide-email"
+            required
+            placeholder="e.g. you@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <PasswordInput
+            label="Password"
+            id="style-guide-password"
+            required
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <TextInput label="With an error" id="style-guide-error" error="That doesn't look right" />
+          <Checkbox
+            id="style-guide-checkbox"
+            checked={checked}
+            onChange={(e) => setChecked(e.target.checked)}
+            label="I agree to the Terms and Privacy Policy"
+          />
+        </div>
+        <div className="space-y-3.5">
+          <OrDivider />
+          <SocialButton icon={<GoogleIcon />} soon>
+            Continue with Google
+          </SocialButton>
+          <SocialButton icon={<AppleIcon />} soon>
+            Continue with Apple
+          </SocialButton>
+          <PrimaryButton disabled={!email || !password}>Continue (muted until filled)</PrimaryButton>
+          <PrimaryButton loading>Continue (loading)</PrimaryButton>
+          <PrimaryButton>Continue (ready)</PrimaryButton>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="text-sm font-medium text-light-text">Verification code</div>
+        <CodeInput value={code} onChange={setCode} />
+      </div>
+    </div>
+  );
+}
+
 export function StyleGuide() {
   return (
     <div className="mx-auto h-full max-w-[1180px] space-y-10 overflow-y-auto px-4 py-8 sm:px-6">
@@ -53,17 +146,27 @@ export function StyleGuide() {
           A trading-intelligence terminal: true black, flat segmented cards, and colour that only
           ever means something -- the market speaks green/red, ARGUS's own marks on the chart speak
           the indigo accent, and generic chrome (tabs, the active tool, focus) stays neutral.
-          Typeface is Montserrat with IBM Plex Mono for every number, and Astron Valley reserved for
-          the ARGUS logo mark and wordmark.
+          Typeface is Onest for body text and Archivo for headings (replacing Montserrat), with IBM
+          Plex Mono for every number unchanged, and Astron Valley reserved for the ARGUS logo mark
+          and wordmark.
         </p>
       </header>
 
       <Section
         title="Typography"
-        desc="Montserrat across the interface. Every number -- prices, times, deltas -- renders in IBM Plex Mono via the .tnum class, with tabular figures so they stay aligned under live updates."
+        desc="Onest across body text, Archivo for headings -- the web light auth redesign brief's own default, confirmed against the reference screenshots rather than reversed. Every number -- prices, times, deltas -- still renders in IBM Plex Mono via the .tnum class, with tabular figures so they stay aligned under live updates."
       >
         <Panel variant="strong" pad="lg" className="space-y-6">
-          <div className="text-6xl font-semibold tracking-tight">Montserrat</div>
+          <div className="font-heading text-6xl font-semibold tracking-tight">Archivo</div>
+          <div className="flex flex-wrap items-end gap-x-6 gap-y-2 font-heading">
+            <span className="text-2xl font-normal">Regular 400</span>
+            <span className="text-2xl font-medium">Medium 500</span>
+            <span className="text-2xl font-semibold">Semibold 600</span>
+            <span className="text-2xl font-bold">Bold 700</span>
+          </div>
+          <div className="border-t border-line pt-6 text-6xl font-semibold tracking-tight">
+            Onest
+          </div>
           <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
             <span className="text-2xl font-normal">Regular 400</span>
             <span className="text-2xl font-medium">Medium 500</span>
@@ -109,6 +212,13 @@ export function StyleGuide() {
             <Swatch name="Prov U" hex="#F0616D" cls="bg-prov-u" />
           </div>
         </div>
+      </Section>
+
+      <Section
+        title="Light pages"
+        desc="Sign-in, sign-up and onboarding (web light auth redesign brief): a second, entirely separate token set and component library -- white, not terminal black. --color-light-primary is literally --color-accent, the same indigo hex as above, so the two palettes share one brand accent even though they never share a surface."
+      >
+        <LightPagesShowcase />
       </Section>
 
       <Section

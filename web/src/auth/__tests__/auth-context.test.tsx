@@ -63,7 +63,7 @@ describe("AuthProvider", () => {
         <AuthProvider>
           <Routes>
             <Route path="/setups" element={<Probe />} />
-            <Route path="/login" element={<div>LOGIN PAGE</div>} />
+            <Route path="/sign-in" element={<div>LOGIN PAGE</div>} />
           </Routes>
         </AuthProvider>
       </MemoryRouter>,

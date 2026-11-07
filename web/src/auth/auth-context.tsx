@@ -65,7 +65,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUser(null);
           setStatus("signedOut");
           const current = locationRef.current;
-          navigate(`/login?next=${encodeURIComponent(current.pathname + current.search)}`, {
+          navigate(`/sign-in?next=${encodeURIComponent(current.pathname + current.search)}`, {
             replace: true,
           });
         });

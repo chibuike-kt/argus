@@ -18,7 +18,7 @@ function renderProtected(initialEntries: string[]) {
             <Route path="/setups" element={<div>SETUPS PAGE</div>} />
             <Route path="/account" element={<div>ACCOUNT PAGE</div>} />
           </Route>
-          <Route path="/login" element={<div>LOGIN PAGE</div>} />
+          <Route path="/sign-in" element={<div>LOGIN PAGE</div>} />
         </Routes>
       </AuthProvider>
     </MemoryRouter>,

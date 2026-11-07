@@ -271,7 +271,7 @@ export class RectanglePrimitive extends BasePrimitive {
               ctx.fillStyle = withAlpha(this.d.style.color, 0.12);
               ctx.fillRect(left, top, w, h);
               if (this.d.label) {
-                ctx.font = "600 10px Montserrat, sans-serif";
+                ctx.font = "600 10px Onest, sans-serif";
                 ctx.fillStyle = "#fff";
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
@@ -446,7 +446,7 @@ export class TextPrimitive extends BasePrimitive {
             const y = this.y(this.d.p.price);
             if (x == null || y == null) return;
             target.useMediaCoordinateSpace(({ context: ctx }) => {
-              ctx.font = "500 12px Montserrat, sans-serif";
+              ctx.font = "500 12px Onest, sans-serif";
               ctx.fillStyle = this.d.style.color;
               ctx.textBaseline = "middle";
               ctx.fillText(this.d.text || "Text", x, y);

@@ -1,13 +1,17 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { RouterProvider, createBrowserRouter, Navigate, Outlet } from "react-router-dom";
+import { RouterProvider, createBrowserRouter, Navigate, Outlet, useLocation } from "react-router-dom";
 
-// Montserrat is the interface face, IBM Plex Mono is every number -- both
-// self-hosted via Fontsource (OFL).
-import "@fontsource/montserrat/400.css";
-import "@fontsource/montserrat/500.css";
-import "@fontsource/montserrat/600.css";
-import "@fontsource/montserrat/700.css";
+// Onest is the interface face (body, labels, inputs, buttons, terminal
+// UI text), Archivo is headings/display text, IBM Plex Mono is every
+// number and code -- all three self-hosted via Fontsource (OFL).
+// Montserrat is retired (web light auth redesign brief, Part 1a).
+import "@fontsource/onest/400.css";
+import "@fontsource/onest/500.css";
+import "@fontsource/onest/600.css";
+import "@fontsource/onest/700.css";
+import "@fontsource/archivo/600.css";
+import "@fontsource/archivo/700.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import "@fontsource/ibm-plex-mono/600.css";
@@ -18,12 +22,18 @@ import { StyleGuide } from "@/routes/style-guide";
 import { AnalysisPreview } from "@/routes/analysis-preview";
 import { Setups } from "@/routes/setups";
 import { Account } from "@/routes/account";
-import { Login } from "@/routes/login";
-import { Register } from "@/routes/register";
-import { VerifyEmail } from "@/routes/verify-email";
+import { SignIn } from "@/routes/sign-in";
 import { AuthProvider } from "@/auth/auth-context";
 import { RequireAuth } from "@/auth/require-auth";
 import { PublicOnly } from "@/auth/public-only";
+
+// /login is now just a redirect to /sign-in (web light auth redesign
+// brief, Part 1d) -- kept so an old bookmark or an in-flight email
+// link still lands somewhere, preserving ?next= and any other query.
+function LoginRedirect() {
+  const location = useLocation();
+  return <Navigate to={`/sign-in${location.search}`} replace />;
+}
 
 // AuthProvider must be a router descendant (it calls useNavigate/
 // useLocation for the global 401 handler -- web auth UI brief, Part
@@ -37,13 +47,10 @@ const router = createBrowserRouter([
       </AuthProvider>
     ),
     children: [
+      { path: "login", element: <LoginRedirect /> },
       {
         element: <PublicOnly />,
-        children: [
-          { path: "login", element: <Login /> },
-          { path: "register", element: <Register /> },
-          { path: "verify-email", element: <VerifyEmail /> },
-        ],
+        children: [{ path: "sign-in", element: <SignIn /> }],
       },
       {
         element: <RequireAuth />,
