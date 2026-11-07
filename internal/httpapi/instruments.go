@@ -32,7 +32,7 @@ const maxInstrumentsLimit = 500
 // same reason setupsStore exists, so the handler tests below can use
 // a handwritten fake instead of a real database.
 type instrumentsStore interface {
-	ListAllFiltered(ctx context.Context, afterID *int64, limit int32) ([]instruments.Instrument, error)
+	ListAllFiltered(ctx context.Context, afterID *int64, enabled *bool, limit int32) ([]instruments.Instrument, error)
 	GetByID(ctx context.Context, id int64) (instruments.Instrument, error)
 }
 
@@ -43,12 +43,38 @@ var _ instrumentsStore = (*instruments.Store)(nil)
 // pattern as instrumentsStore/setupsStore.
 type candlesStore interface {
 	ListClosedInRangeLimited(ctx context.Context, instrumentID int64, start, end time.Time, limit int32) ([]marketdata.Candle, error)
-	ListClosedInRangeLimitedDesc(ctx context.Context, instrumentID int64, start, end time.Time, limit int32) ([]marketdata.Candle, error)
+	ListClosedInRangeLimitedDesc(ctx context.Context, instrumentID int64, start, end *time.Time, limit int32) ([]marketdata.Candle, error)
 }
 
 var _ candlesStore = (*marketdata.Store)(nil)
 
+// trueVal/falseVal back the enabled=true/false cases below -- a local
+// *bool to pass through to instruments.Store.ListAllFiltered, which
+// takes nil (no filter) vs a pointer (exactly this value) to mean "no
+// ?enabled= query param" is a decision this handler makes, not the
+// store's.
+var trueVal = true
+var falseVal = false
+
 func (h *apiHandler) ListInstruments(ctx context.Context, request ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error) {
+	// Default is "true" (enabled only, web-wiring-polish brief, item 2),
+	// not "no filter": the bug this item fixes is a disabled test/
+	// fixture row filling the capped default page, so omitting the
+	// parameter must not mean the endpoint's old unfiltered behaviour.
+	enabled := &trueVal
+	if request.Params.Enabled != nil {
+		switch *request.Params.Enabled {
+		case True:
+			enabled = &trueVal
+		case False:
+			enabled = &falseVal
+		case All:
+			enabled = nil
+		default:
+			return ListInstruments400JSONResponse(apiError("invalid_argument", "enabled must be true, false, or all")), nil
+		}
+	}
+
 	limit := int32(defaultInstrumentsLimit)
 	if request.Params.Limit != nil {
 		limit = *request.Params.Limit
@@ -57,7 +83,7 @@ func (h *apiHandler) ListInstruments(ctx context.Context, request ListInstrument
 		return ListInstruments400JSONResponse(apiError("invalid_argument", fmt.Sprintf("limit must be between 1 and %d", maxInstrumentsLimit))), nil
 	}
 
-	rows, err := h.instruments.ListAllFiltered(ctx, request.Params.AfterId, limit)
+	rows, err := h.instruments.ListAllFiltered(ctx, request.Params.AfterId, enabled, limit)
 	if err != nil {
 		h.logger.Error("httpapi: list instruments", "error", err)
 		return nil, fmt.Errorf("list instruments: %w", err)
@@ -70,16 +96,6 @@ func (h *apiHandler) ListInstruments(ctx context.Context, request ListInstrument
 }
 
 func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInstrumentCandlesRequestObject) (ListInstrumentCandlesResponseObject, error) {
-	if !request.Params.To.After(request.Params.From) {
-		return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", "to must be after from")), nil
-	}
-	limit := int32(defaultInstrumentCandles)
-	if request.Params.Limit != nil {
-		limit = *request.Params.Limit
-	}
-	if limit < 1 || limit > maxInstrumentCandles {
-		return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", fmt.Sprintf("limit must be between 1 and %d", maxInstrumentCandles))), nil
-	}
 	desc := false
 	if request.Params.Order != nil {
 		switch *request.Params.Order {
@@ -92,6 +108,34 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 		}
 	}
 
+	// from/to are optional in the OpenAPI schema (web-wiring-polish
+	// brief, item 1) so order=desc can mean "the latest N, no range
+	// known or needed". asc (the default) keeps the original contract:
+	// both are required, with the same message oapi-codegen's own
+	// router-level "required" validation used to produce back when
+	// they were required:true in the spec -- that validation no longer
+	// fires for either direction, so this reproduces it here, for asc
+	// only.
+	if !desc {
+		if request.Params.From == nil {
+			return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", "Query argument from is required, but not found")), nil
+		}
+		if request.Params.To == nil {
+			return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", "Query argument to is required, but not found")), nil
+		}
+	}
+	if request.Params.From != nil && request.Params.To != nil && !request.Params.To.After(*request.Params.From) {
+		return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", "to must be after from")), nil
+	}
+
+	limit := int32(defaultInstrumentCandles)
+	if request.Params.Limit != nil {
+		limit = *request.Params.Limit
+	}
+	if limit < 1 || limit > maxInstrumentCandles {
+		return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", fmt.Sprintf("limit must be between 1 and %d", maxInstrumentCandles))), nil
+	}
+
 	inst, err := h.instruments.GetByID(ctx, request.Id)
 	if errors.Is(err, instruments.ErrNotFound) {
 		return ListInstrumentCandles404JSONResponse(apiError("not_found", "instrument not found")), nil
@@ -101,11 +145,12 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 		return nil, fmt.Errorf("get instrument %d: %w", request.Id, err)
 	}
 
-	listFn := h.candles.ListClosedInRangeLimited
+	var rows []marketdata.Candle
 	if desc {
-		listFn = h.candles.ListClosedInRangeLimitedDesc
+		rows, err = h.candles.ListClosedInRangeLimitedDesc(ctx, request.Id, request.Params.From, request.Params.To, limit)
+	} else {
+		rows, err = h.candles.ListClosedInRangeLimited(ctx, request.Id, *request.Params.From, *request.Params.To, limit)
 	}
-	rows, err := listFn(ctx, request.Id, request.Params.From, request.Params.To, limit)
 	if err != nil {
 		h.logger.Error("httpapi: list instrument candles", "instrument_id", request.Id, "error", err)
 		return nil, fmt.Errorf("list candles for instrument %d: %w", request.Id, err)

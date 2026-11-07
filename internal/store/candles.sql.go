@@ -278,32 +278,36 @@ func (q *Queries) ListClosedCandlesInRangeLimited(ctx context.Context, arg ListC
 const listClosedCandlesInRangeLimitedDesc = `-- name: ListClosedCandlesInRangeLimitedDesc :many
 SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
 WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
-  AND open_time >= $2 AND open_time < $3
+  AND ($3::timestamptz IS NULL OR open_time >= $3::timestamptz)
+  AND ($4::timestamptz IS NULL OR open_time < $4::timestamptz)
 ORDER BY open_time DESC
-LIMIT $4
+LIMIT $2
 `
 
 type ListClosedCandlesInRangeLimitedDescParams struct {
-	InstrumentID int64     `json:"instrument_id"`
-	OpenTime     time.Time `json:"open_time"`
-	OpenTime_2   time.Time `json:"open_time_2"`
-	Limit        int32     `json:"limit"`
+	InstrumentID int64        `json:"instrument_id"`
+	Limit        int32        `json:"limit"`
+	FromTime     sql.NullTime `json:"from_time"`
+	ToTime       sql.NullTime `json:"to_time"`
 }
 
 // ListClosedCandlesInRangeLimitedDesc is ListClosedCandlesInRangeLimited's
 // own sibling for GET /instruments/{id}/candles?order=desc (web-wiring-
-// followup brief, Part 4: "give me the most recent N" without already
-// knowing a range). sqlc needs the ORDER BY direction literal in the SQL
-// text itself -- it cannot be a bound parameter -- so this is a second,
-// otherwise-identical query rather than one query with a dynamic order,
-// matching how this file already has no query that varies its own SQL
-// shape by parameter.
+// followup brief, item 1: "give me the most recent N" needs no range at
+// all, not just a wide one). sqlc needs the ORDER BY direction literal in
+// the SQL text itself -- it cannot be a bound parameter -- so this is a
+// second, otherwise-identical query rather than one query with a dynamic
+// order. from_time/to_time are nullable (sqlc.narg): NULL means "no lower/
+// upper bound", which is the whole point here -- a caller asking for the
+// latest N candles should not have to invent a [from, to) range just to
+// satisfy a required parameter. limit is still enforced in the query
+// itself regardless of how open the bounds are.
 func (q *Queries) ListClosedCandlesInRangeLimitedDesc(ctx context.Context, arg ListClosedCandlesInRangeLimitedDescParams) ([]Candle, error) {
 	rows, err := q.db.QueryContext(ctx, listClosedCandlesInRangeLimitedDesc,
 		arg.InstrumentID,
-		arg.OpenTime,
-		arg.OpenTime_2,
 		arg.Limit,
+		arg.FromTime,
+		arg.ToTime,
 	)
 	if err != nil {
 		return nil, err

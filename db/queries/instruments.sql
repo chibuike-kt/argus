@@ -29,9 +29,18 @@ SELECT * FROM instruments ORDER BY provider, native_symbol;
 -- ListAllInstruments's own -- that query is untouched, still available,
 -- still unbounded, in case anything else in this package ever needs
 -- the old order.
+--
+-- enabled_filter (web-wiring-polish brief, item 2) is also nullable:
+-- NULL means no filter at all (every row, enabled or not -- the
+-- "?enabled=all" case); true or false means exactly that value. The
+-- handler's own default (no "enabled" query param given) passes true,
+-- not NULL -- a disabled test/fixture row filling a capped page is
+-- exactly the bug this item fixes, so "no parameter" must not mean
+-- "every row" the way it used to.
 -- name: ListAllInstrumentsPaged :many
 SELECT * FROM instruments
-WHERE sqlc.narg('after_id')::bigint IS NULL OR id > sqlc.narg('after_id')::bigint
+WHERE (sqlc.narg('after_id')::bigint IS NULL OR id > sqlc.narg('after_id')::bigint)
+  AND (sqlc.narg('enabled_filter')::boolean IS NULL OR enabled = sqlc.narg('enabled_filter')::boolean)
 ORDER BY id
 LIMIT $1;
 

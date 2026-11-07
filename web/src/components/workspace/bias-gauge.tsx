@@ -87,7 +87,14 @@ export function BiasGauge({ direction, rr }: { direction: "bullish" | "bearish";
           Bullish
         </text>
       </svg>
-      <p className="-mt-2 text-[13px] font-semibold" style={{ color: marketColor }}>
+      {/* mt-1, not a negative margin: the end labels inside the SVG
+          above (Bearish/Bullish) sit right at the viewBox's own bottom
+          edge (y=CY+16=98 of 100), so pulling this word upward at all
+          collided with them at every value, not just some (web-wiring-
+          polish brief, item 3). A small positive gap keeps this word
+          clear of them regardless of direction/magnitude, which never
+          move either text element's own position. */}
+      <p className="mt-1 text-[13px] font-semibold" style={{ color: marketColor }}>
         {label}
       </p>
     </div>

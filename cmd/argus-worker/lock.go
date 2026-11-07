@@ -3,8 +3,15 @@ package main
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
+	"time"
 )
+
+// releaseTimeout bounds how long release's own unlock query is allowed
+// to take, independent of the caller's own context (web-wiring-polish
+// brief, item 4) -- see release's own doc comment for why.
+const releaseTimeout = 5 * time.Second
 
 // timeframeLockKey maps a timeframe string to a small, stable int32 --
 // the second component of the per-(instrument, timeframe) Postgres
@@ -92,13 +99,40 @@ func acquireInstrumentLock(ctx context.Context, db *sql.DB, instrumentID int64, 
 // still frees the lock. This is what makes the lock's lifetime safe
 // across a crash, not just across a normal or error return from
 // processInstrument.
+//
+// The unlock query runs on context.WithoutCancel(ctx), not ctx itself,
+// with its own short timeout: ctx is the processing run's own context,
+// which processInstrumentLocked's defer still fires under even when ctx
+// is already cancelled (worker shutdown, a deadline). An unlock query
+// issued on an already-cancelled context never reaches Postgres at all,
+// so the session-level lock stays held on this connection -- and
+// returning that connection to the pool afterward (the previous
+// behaviour) would hand out a connection that silently still holds the
+// lock, with nothing left to ever call pg_advisory_unlock on it again:
+// the instrument it locked would be skipped by every worker, forever.
+// If the unlock still fails even on its own detached timeout, this
+// poisons the connection (Raw + driver.ErrBadConn, the standard
+// database/sql way to mark one so Close discards it instead of pooling
+// it) rather than risk that -- Postgres releases every session-level
+// lock a backend held the instant that backend's own connection
+// actually closes, the same guarantee the crash case above already
+// relies on.
 func (l *instrumentLock) release(ctx context.Context) error {
+	unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+
 	var unlocked bool
-	err := l.conn.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1, $2)", l.key1, l.key2).Scan(&unlocked)
-	closeErr := l.conn.Close()
+	err := l.conn.QueryRowContext(unlockCtx, "SELECT pg_advisory_unlock($1, $2)", l.key1, l.key2).Scan(&unlocked)
 	if err != nil {
-		return fmt.Errorf("release instrument lock: pg_advisory_unlock: %w", err)
+		_ = l.conn.Raw(func(any) error { return driver.ErrBadConn })
+		closeErr := l.conn.Close()
+		if closeErr != nil {
+			return fmt.Errorf("release instrument lock: pg_advisory_unlock: %w (discarding the connection also failed: %v)", err, closeErr)
+		}
+		return fmt.Errorf("release instrument lock: pg_advisory_unlock: %w (connection discarded, not returned to the pool)", err)
 	}
+
+	closeErr := l.conn.Close()
 	if !unlocked {
 		return fmt.Errorf("release instrument lock: pg_advisory_unlock reported no lock held for key (%d,%d)", l.key1, l.key2)
 	}

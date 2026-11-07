@@ -156,13 +156,23 @@ func (s *Store) ListAll(ctx context.Context) ([]Instrument, error) {
 // truncating in Go. Ordered by id, not by (provider, native_symbol)
 // the way ListAll's own query is -- a new, separate ordering, not a
 // change to ListAll's.
-func (s *Store) ListAllFiltered(ctx context.Context, afterID *int64, limit int32) ([]Instrument, error) {
+//
+// enabled (web-wiring-polish brief, item 2) is nil for no filter at all
+// (every row); non-nil restricts to exactly that value. The caller
+// (httpapi) is the one that decides what "no ?enabled= query param"
+// should mean by what it passes here -- this method itself has no
+// opinion on a default.
+func (s *Store) ListAllFiltered(ctx context.Context, afterID *int64, enabled *bool, limit int32) ([]Instrument, error) {
 	var after sql.NullInt64
 	if afterID != nil {
 		after = sql.NullInt64{Int64: *afterID, Valid: true}
 	}
+	var enabledFilter sql.NullBool
+	if enabled != nil {
+		enabledFilter = sql.NullBool{Bool: *enabled, Valid: true}
+	}
 	rows, err := s.q.ListAllInstrumentsPaged(ctx, store.ListAllInstrumentsPagedParams{
-		AfterID: after, Limit: limit,
+		AfterID: after, EnabledFilter: enabledFilter, Limit: limit,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instruments: list all filtered: %w", err)

@@ -14,6 +14,7 @@ import {
 import { GearSix, CircleNotch } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { SampleDataBadge } from "@/components/ui/sample-data-badge";
+import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { useFlash } from "@/lib/use-flash";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
@@ -551,23 +552,27 @@ function ChartSurfaceInner({
       </div>
 
       <div className="flex h-8 shrink-0 items-center justify-between border-t border-line px-2">
+        {/* Every one of these buttons did the exact same thing
+            regardless of its own label -- fitContent() plus a bar-
+            spacing reset, not an actual "last 1 day"/"last 5 years"
+            range (web-wiring-polish brief, item 3's own trace). That is
+            not real range selection, so these are disabled with a
+            tooltip rather than left looking functional. */}
         <div className="flex items-center gap-0.5">
-          {RANGES.map((r) => (
-            <button
-              key={r}
-              onClick={() => {
-                const ts = chartRef.current?.timeScale();
-                ts?.fitContent();
-                ts?.applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
-              }}
-              className={cn(
-                "focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors",
-                r === "1D" ? "text-fg" : "text-fg-subtle hover:text-fg",
-              )}
-            >
-              {r}
-            </button>
-          ))}
+          <Tooltip content="Range selection is not built yet">
+            <div className="flex items-center gap-0.5">
+              {RANGES.map((r) => (
+                <button
+                  key={r}
+                  disabled
+                  aria-disabled="true"
+                  className="cursor-not-allowed rounded px-1.5 py-0.5 text-[11px] font-medium text-fg-subtle opacity-50"
+                >
+                  {r}
+                </button>
+              ))}
+            </div>
+          </Tooltip>
         </div>
         <div className="flex items-center gap-1 text-fg-subtle">
           <span className="tnum mr-1 text-[11px]">{fmtLast(last)} · UTC</span>

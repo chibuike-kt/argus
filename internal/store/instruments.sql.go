@@ -225,14 +225,16 @@ func (q *Queries) ListAllInstruments(ctx context.Context) ([]Instrument, error) 
 
 const listAllInstrumentsPaged = `-- name: ListAllInstrumentsPaged :many
 SELECT id, provider, native_symbol, asset_class, base_asset, quote_asset, contract_type, price_precision, quantity_precision, tick_size_deprecated, supported_intervals, enabled, metadata, created_at, updated_at, price_scale, qty_scale, tick_size, qty_step_size, contract_size, pip_size FROM instruments
-WHERE $2::bigint IS NULL OR id > $2::bigint
+WHERE ($2::bigint IS NULL OR id > $2::bigint)
+  AND ($3::boolean IS NULL OR enabled = $3::boolean)
 ORDER BY id
 LIMIT $1
 `
 
 type ListAllInstrumentsPagedParams struct {
-	Limit   int32         `json:"limit"`
-	AfterID sql.NullInt64 `json:"after_id"`
+	Limit         int32         `json:"limit"`
+	AfterID       sql.NullInt64 `json:"after_id"`
+	EnabledFilter sql.NullBool  `json:"enabled_filter"`
 }
 
 // ListAllInstrumentsPaged is GET /instruments' own read path as of the
@@ -247,8 +249,16 @@ type ListAllInstrumentsPagedParams struct {
 // ListAllInstruments's own -- that query is untouched, still available,
 // still unbounded, in case anything else in this package ever needs
 // the old order.
+//
+// enabled_filter (web-wiring-polish brief, item 2) is also nullable:
+// NULL means no filter at all (every row, enabled or not -- the
+// "?enabled=all" case); true or false means exactly that value. The
+// handler's own default (no "enabled" query param given) passes true,
+// not NULL -- a disabled test/fixture row filling a capped page is
+// exactly the bug this item fixes, so "no parameter" must not mean
+// "every row" the way it used to.
 func (q *Queries) ListAllInstrumentsPaged(ctx context.Context, arg ListAllInstrumentsPagedParams) ([]Instrument, error) {
-	rows, err := q.db.QueryContext(ctx, listAllInstrumentsPaged, arg.Limit, arg.AfterID)
+	rows, err := q.db.QueryContext(ctx, listAllInstrumentsPaged, arg.Limit, arg.AfterID, arg.EnabledFilter)
 	if err != nil {
 		return nil, err
 	}

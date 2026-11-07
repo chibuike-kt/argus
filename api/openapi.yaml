@@ -28,10 +28,23 @@ paths:
       operationId: listInstruments
       summary: >
         List every registered instrument -- internal/instruments.Store.ListAllFiltered.
-        Includes disabled rows: nothing in that package can set enabled =
-        TRUE yet (ADR-007), so filtering them out here would just hide every
-        row behind a flag no client can act on.
+        Defaults to enabled rows only (web-wiring-polish brief, item 2):
+        a disabled test/fixture row filling a capped page was hiding the
+        real, enabled instruments. The enabled query parameter can widen
+        or narrow that.
       parameters:
+        - name: enabled
+          in: query
+          required: false
+          description: >
+            true (default): only enabled instruments. false: only
+            disabled. all: every row regardless of enablement (the
+            endpoint's own previous default, before this parameter
+            existed). Any other value is a 400.
+          schema:
+            type: string
+            enum: [true, false, all]
+            default: "true"
         - name: after_id
           in: query
           required: false
@@ -81,6 +94,11 @@ paths:
         first -- internal/marketdata.Store.ListClosedInRangeLimited, the
         same read path cmd/argus-worker's own CandleSource uses. A forming
         candle's own values can still change, so it is never included.
+        from/to are both optional at this schema level so order=desc can
+        mean "the latest N, no range known or needed" (web-wiring-polish
+        brief, item 1); the handler itself still requires both, with the
+        same message as before, when order is asc or omitted -- see its
+        own comment.
       parameters:
         - name: id
           in: path
@@ -90,13 +108,13 @@ paths:
             format: int64
         - name: from
           in: query
-          required: true
+          required: false
           schema:
             type: string
             format: date-time
         - name: to
           in: query
-          required: true
+          required: false
           schema:
             type: string
             format: date-time
