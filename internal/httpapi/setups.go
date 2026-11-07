@@ -2,12 +2,13 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 
+	"github.com/chibuike-kt/argus/internal/instruments"
+	"github.com/chibuike-kt/argus/internal/quant"
 	"github.com/chibuike-kt/argus/internal/setups"
 )
 
@@ -108,20 +109,26 @@ func (h *apiHandler) ListSetups(ctx context.Context, request ListSetupsRequestOb
 		state = &s
 	}
 
+	inst, err := h.instruments.GetByID(ctx, request.Params.InstrumentId)
+	if errors.Is(err, instruments.ErrNotFound) {
+		return ListSetups400JSONResponse(apiError("invalid_argument", "instrument not found")), nil
+	}
+	if err != nil {
+		h.logger.Error("httpapi: get instrument for setups", "instrument_id", request.Params.InstrumentId, "error", err)
+		return nil, fmt.Errorf("get instrument %d: %w", request.Params.InstrumentId, err)
+	}
+
 	rows, err := h.store.ListByInstrumentFiltered(ctx, request.Params.InstrumentId, timeframe, state, limit)
 	if err != nil {
 		h.logger.Error("httpapi: list setups", "instrument_id", request.Params.InstrumentId, "timeframe", timeframe, "error", err)
 		return nil, fmt.Errorf("list setups: %w", err)
 	}
 
+	// inst.PriceScale is fetched once above, not once per row -- the
+	// N+1 the brief's own Part 3 asks to avoid.
 	out := make(ListSetups200JSONResponse, 0, len(rows))
 	for _, row := range rows {
-		s, err := toAPISetup(row)
-		if err != nil {
-			h.logger.Error("httpapi: encode setup", "setup_id", row.ID, "error", err)
-			return nil, fmt.Errorf("encode setup %d: %w", row.ID, err)
-		}
-		out = append(out, s)
+		out = append(out, toAPISetup(row, inst.PriceScale))
 	}
 	return out, nil
 }
@@ -136,12 +143,13 @@ func (h *apiHandler) GetSetup(ctx context.Context, request GetSetupRequestObject
 		return nil, fmt.Errorf("get setup %d: %w", request.Id, err)
 	}
 
-	s, err := toAPISetup(row)
+	inst, err := h.instruments.GetByID(ctx, row.InstrumentID)
 	if err != nil {
-		h.logger.Error("httpapi: encode setup", "setup_id", row.ID, "error", err)
-		return nil, fmt.Errorf("encode setup %d: %w", row.ID, err)
+		h.logger.Error("httpapi: get instrument for setup", "setup_id", request.Id, "instrument_id", row.InstrumentID, "error", err)
+		return nil, fmt.Errorf("get instrument %d: %w", row.InstrumentID, err)
 	}
-	return GetSetup200JSONResponse(s), nil
+
+	return GetSetup200JSONResponse(toAPISetup(row, inst.PriceScale)), nil
 }
 
 func (h *apiHandler) ListSetupEvents(ctx context.Context, request ListSetupEventsRequestObject) (ListSetupEventsResponseObject, error) {
@@ -152,12 +160,19 @@ func (h *apiHandler) ListSetupEvents(ctx context.Context, request ListSetupEvent
 	// such setup at all". Both return the shared 404 shape identically,
 	// but checking existence explicitly is the honest way to produce
 	// that 404, not inferring it from an empty list.
-	if _, err := h.store.GetByID(ctx, request.Id); err != nil {
+	setup, err := h.store.GetByID(ctx, request.Id)
+	if err != nil {
 		if errors.Is(err, setups.ErrSetupNotFound) {
 			return ListSetupEvents404JSONResponse(apiError("not_found", "setup not found")), nil
 		}
 		h.logger.Error("httpapi: get setup for events", "setup_id", request.Id, "error", err)
 		return nil, fmt.Errorf("get setup %d: %w", request.Id, err)
+	}
+
+	inst, err := h.instruments.GetByID(ctx, setup.InstrumentID)
+	if err != nil {
+		h.logger.Error("httpapi: get instrument for setup events", "setup_id", request.Id, "instrument_id", setup.InstrumentID, "error", err)
+		return nil, fmt.Errorf("get instrument %d: %w", setup.InstrumentID, err)
 	}
 
 	rows, err := h.store.ListEvents(ctx, request.Id)
@@ -168,26 +183,19 @@ func (h *apiHandler) ListSetupEvents(ctx context.Context, request ListSetupEvent
 
 	out := make(ListSetupEvents200JSONResponse, 0, len(rows))
 	for _, row := range rows {
-		ev, err := toAPISetupEvent(row)
-		if err != nil {
-			h.logger.Error("httpapi: encode setup event", "event_id", row.ID, "error", err)
-			return nil, fmt.Errorf("encode setup event %d: %w", row.ID, err)
-		}
-		out = append(out, ev)
+		out = append(out, toAPISetupEvent(row, inst.PriceScale))
 	}
 	return out, nil
 }
 
 // toAPISetup converts the domain type to its generated API shape.
-// PlanSnapshot round-trips through JSON rather than being rebuilt
-// field by field: it is deliberately loosely typed in the API contract
-// (map[string]interface{}), so re-deriving its exact shape by hand here
-// would just be a second, driftable copy of types.go's own json tags.
-func toAPISetup(s setups.Setup) (Setup, error) {
-	snapshot, err := toAPIPlanSnapshot(s.Plan)
-	if err != nil {
-		return Setup{}, err
-	}
+// scale is the setup's own instrument's price_scale -- plan_snapshot's
+// price fields are quant.Price, which carries no scale of its own
+// (internal/quant), so every caller must already know which instrument
+// this setup belongs to and look its scale up once (web-wiring-followup
+// brief, Part 3: avoid an N+1 by fetching it once per request, not once
+// per setup, at every call site below).
+func toAPISetup(s setups.Setup, scale quant.Scale) Setup {
 	return Setup{
 		Id:                      s.ID,
 		InstrumentId:            s.InstrumentID,
@@ -198,43 +206,62 @@ func toAPISetup(s setups.Setup) (Setup, error) {
 		StrategyVersion:         s.StrategyVersion,
 		State:                   SetupState(s.State.String()),
 		PoiSourceCandleRevision: s.POISourceCandleRevision,
-		PlanSnapshot:            snapshot,
+		PlanSnapshot:            toAPIPlanSnapshot(s.Plan, scale),
 		LastEventId:             s.LastEventID,
 		EvaluationTime:          s.EvaluationTime,
 		AlgorithmVersion:        s.AlgorithmVersion,
 		CreatedAt:               s.CreatedAt,
 		UpdatedAt:               s.UpdatedAt,
-	}, nil
+	}
 }
 
-func toAPISetupEvent(e setups.SetupEvent) (SetupEvent, error) {
-	snapshot, err := toAPIPlanSnapshot(e.Plan)
-	if err != nil {
-		return SetupEvent{}, err
-	}
+func toAPISetupEvent(e setups.SetupEvent, scale quant.Scale) SetupEvent {
 	return SetupEvent{
 		Id:                      e.ID,
 		SetupId:                 e.SetupID,
 		EventType:               SetupEventEventType(e.Type.String()),
-		PlanSnapshot:            snapshot,
+		PlanSnapshot:            toAPIPlanSnapshot(e.Plan, scale),
 		PoiSourceCandleId:       e.POISourceCandleID,
 		PoiSourceCandleRevision: e.POISourceCandleRevision,
 		EvaluationTime:          e.EvaluationTime,
 		AlgorithmVersion:        e.AlgorithmVersion,
 		CreatedAt:               e.CreatedAt,
-	}, nil
+	}
 }
 
-func toAPIPlanSnapshot(p setups.PlanSnapshot) (PlanSnapshot, error) {
-	b, err := json.Marshal(p)
-	if err != nil {
-		return nil, fmt.Errorf("marshal plan snapshot: %w", err)
+// toAPIPlanSnapshot builds the typed wire shape field by field (not a
+// JSON round-trip: the Go and wire shapes now genuinely differ --
+// entry/stop/targets[].level/poi.low/poi.high are quant.Price on the
+// domain side and decimal strings on the wire, exactly like every other
+// money field this API sends (candle OHLCV, instrument tick_size).
+// RR stays an exact rational string (big.Rat.RatString(), set by
+// setups.newPlanSnapshot) -- untouched here, never reformatted.
+func toAPIPlanSnapshot(p setups.PlanSnapshot, scale quant.Scale) PlanSnapshot {
+	targets := make([]TargetSnapshot, len(p.Targets))
+	for i, t := range p.Targets {
+		targets[i] = TargetSnapshot{Level: t.Level.String(scale), Rr: t.RR}
 	}
-	var out PlanSnapshot
-	if err := json.Unmarshal(b, &out); err != nil {
-		return nil, fmt.Errorf("unmarshal plan snapshot: %w", err)
+	return PlanSnapshot{
+		Status:    p.Status,
+		Direction: p.Direction,
+		Entry:     p.Entry.String(scale),
+		Stop:      p.Stop.String(scale),
+		Targets:   targets,
+		Poi: POISnapshot{
+			Type:                     p.POI.Type,
+			Direction:                p.POI.Direction,
+			Low:                      p.POI.Low.String(scale),
+			High:                     p.POI.High.String(scale),
+			OrderBlockCandleId:       p.POI.OrderBlockCandleID,
+			OrderBlockCandleRevision: p.POI.OrderBlockCandleRevision,
+			OrderBlockOpenTime:       p.POI.OrderBlockOpenTime,
+			QmrFailCandleId:          p.POI.QMRFailCandleID,
+			QmrFailCandleRevision:    p.POI.QMRFailCandleRevision,
+			StructuralSwingId:        p.POI.StructuralSwingID,
+			InDiscount:               p.POI.InDiscount,
+		},
+		ProtectedSwingId: p.ProtectedSwingID,
 	}
-	return out, nil
 }
 
 // apiError builds the shared Error schema's body. code/message are

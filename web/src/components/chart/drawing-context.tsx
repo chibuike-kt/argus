@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
-import { instrument } from "@/mocks/fixtures";
+import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import { useDrawingsStore } from "./drawings/store";
 
 interface DrawingCtx {
@@ -33,13 +33,22 @@ export function DrawingProvider({ children }: { children: ReactNode }) {
   const [stayInDrawingMode, setStayInDrawingMode] = useState(false);
   const [locked, setLocked] = useState(false);
   const [hidden, setHidden] = useState(false);
-  const [timeframe, setTimeframe] = useState("5m");
+  // "1m" is the only timeframe the backend has (ChartToolbar's own
+  // symbol/interval controls lock the UI to it, web-wiring-followup
+  // brief Part 2) -- this default now matches that, not the fixture
+  // era's arbitrary "5m".
+  const [timeframe, setTimeframe] = useState("1m");
 
-  // Scoped by instrument + timeframe (ADR-008): switching either swaps the
-  // visible set. Only one instrument exists in the fixtures today, but the
-  // key already carries both, so wiring a real symbol switcher later is a
-  // data change here, not a structural one.
-  const drawings = useDrawingsStore(`${instrument.symbol}:${timeframe}`);
+  // Scoped by instrument + timeframe (ADR-008): switching either swaps
+  // the visible set. instrument.native_symbol is the real selected
+  // instrument now (GET /instruments, via the workspace this provider
+  // is always mounted inside -- analysis-preview.tsx), not a fixture
+  // import; a page with no instrument resolved yet scopes to a fixed
+  // placeholder key rather than crashing or sharing drawings across
+  // every instrument.
+  const { instrument } = useAnalysisWorkspace();
+  const scopeSymbol = instrument?.native_symbol ?? "unresolved";
+  const drawings = useDrawingsStore(`${scopeSymbol}:${timeframe}`);
 
   return (
     <Ctx.Provider

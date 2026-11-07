@@ -246,3 +246,26 @@ func (s *Store) ListClosedInRangeLimited(ctx context.Context, instrumentID int64
 	}
 	return out, nil
 }
+
+// ListClosedInRangeLimitedDesc is ListClosedInRangeLimited's own
+// sibling, newest first -- GET /instruments/{id}/candles?order=desc
+// (web-wiring-followup brief, Part 4), for a client that wants "the
+// most recent N" without already knowing a [from, to) range narrow
+// enough to contain them. The limit is still enforced in the query
+// itself, for the same reason as the ascending form.
+func (s *Store) ListClosedInRangeLimitedDesc(ctx context.Context, instrumentID int64, start, end time.Time, limit int32) ([]Candle, error) {
+	rows, err := s.q.ListClosedCandlesInRangeLimitedDesc(ctx, store.ListClosedCandlesInRangeLimitedDescParams{
+		InstrumentID: instrumentID,
+		OpenTime:     start,
+		OpenTime_2:   end,
+		Limit:        limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marketdata: list closed candles desc instrument=%d [%s,%s): %w", instrumentID, start, end, err)
+	}
+	out := make([]Candle, len(rows))
+	for i, row := range rows {
+		out[i] = fromCandleRow(row)
+	}
+	return out, nil
+}

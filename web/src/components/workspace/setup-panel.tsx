@@ -28,7 +28,7 @@ export function SetupPanel() {
     return <div className="py-8 text-center text-[13px] text-fg-subtle">No setups yet.</div>;
   }
 
-  const overlay = toPlanOverlay(setup, instrument);
+  const overlay = toPlanOverlay(setup);
   const bull = setup.direction === "bullish";
   const state = mapApiState(setup.state);
   const risk = Math.abs(overlay.entry - overlay.stop);

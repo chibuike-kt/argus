@@ -275,6 +275,74 @@ func (q *Queries) ListClosedCandlesInRangeLimited(ctx context.Context, arg ListC
 	return items, nil
 }
 
+const listClosedCandlesInRangeLimitedDesc = `-- name: ListClosedCandlesInRangeLimitedDesc :many
+SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
+WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+  AND open_time >= $2 AND open_time < $3
+ORDER BY open_time DESC
+LIMIT $4
+`
+
+type ListClosedCandlesInRangeLimitedDescParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	OpenTime     time.Time `json:"open_time"`
+	OpenTime_2   time.Time `json:"open_time_2"`
+	Limit        int32     `json:"limit"`
+}
+
+// ListClosedCandlesInRangeLimitedDesc is ListClosedCandlesInRangeLimited's
+// own sibling for GET /instruments/{id}/candles?order=desc (web-wiring-
+// followup brief, Part 4: "give me the most recent N" without already
+// knowing a range). sqlc needs the ORDER BY direction literal in the SQL
+// text itself -- it cannot be a bound parameter -- so this is a second,
+// otherwise-identical query rather than one query with a dynamic order,
+// matching how this file already has no query that varies its own SQL
+// shape by parameter.
+func (q *Queries) ListClosedCandlesInRangeLimitedDesc(ctx context.Context, arg ListClosedCandlesInRangeLimitedDescParams) ([]Candle, error) {
+	rows, err := q.db.QueryContext(ctx, listClosedCandlesInRangeLimitedDesc,
+		arg.InstrumentID,
+		arg.OpenTime,
+		arg.OpenTime_2,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Candle{}
+	for rows.Next() {
+		var i Candle
+		if err := rows.Scan(
+			&i.ID,
+			&i.InstrumentID,
+			&i.OpenTime,
+			&i.CloseTime,
+			&i.Open,
+			&i.High,
+			&i.Low,
+			&i.Close,
+			&i.Volume,
+			&i.Revision,
+			&i.IsClosed,
+			&i.TickAligned,
+			&i.Provider,
+			&i.IngestedAt,
+			&i.SupersededAt,
+			&i.SupersededBy,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCurrentCandlesInRange = `-- name: ListCurrentCandlesInRange :many
 SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
 WHERE instrument_id = $1 AND superseded_at IS NULL

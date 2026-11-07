@@ -43,6 +43,7 @@ var _ instrumentsStore = (*instruments.Store)(nil)
 // pattern as instrumentsStore/setupsStore.
 type candlesStore interface {
 	ListClosedInRangeLimited(ctx context.Context, instrumentID int64, start, end time.Time, limit int32) ([]marketdata.Candle, error)
+	ListClosedInRangeLimitedDesc(ctx context.Context, instrumentID int64, start, end time.Time, limit int32) ([]marketdata.Candle, error)
 }
 
 var _ candlesStore = (*marketdata.Store)(nil)
@@ -79,6 +80,17 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 	if limit < 1 || limit > maxInstrumentCandles {
 		return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", fmt.Sprintf("limit must be between 1 and %d", maxInstrumentCandles))), nil
 	}
+	desc := false
+	if request.Params.Order != nil {
+		switch *request.Params.Order {
+		case Asc:
+			desc = false
+		case Desc:
+			desc = true
+		default:
+			return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", "order must be asc or desc")), nil
+		}
+	}
 
 	inst, err := h.instruments.GetByID(ctx, request.Id)
 	if errors.Is(err, instruments.ErrNotFound) {
@@ -89,7 +101,11 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 		return nil, fmt.Errorf("get instrument %d: %w", request.Id, err)
 	}
 
-	rows, err := h.candles.ListClosedInRangeLimited(ctx, request.Id, request.Params.From, request.Params.To, limit)
+	listFn := h.candles.ListClosedInRangeLimited
+	if desc {
+		listFn = h.candles.ListClosedInRangeLimitedDesc
+	}
+	rows, err := listFn(ctx, request.Id, request.Params.From, request.Params.To, limit)
 	if err != nil {
 		h.logger.Error("httpapi: list instrument candles", "instrument_id", request.Id, "error", err)
 		return nil, fmt.Errorf("list candles for instrument %d: %w", request.Id, err)

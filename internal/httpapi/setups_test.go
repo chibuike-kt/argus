@@ -9,8 +9,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chibuike-kt/argus/internal/instruments"
+	"github.com/chibuike-kt/argus/internal/quant"
 	"github.com/chibuike-kt/argus/internal/setups"
 )
+
+// setupsTestInstruments is the fakeInstrumentsStore every setups.go
+// handler test below needs once it reaches the instrument-scale lookup
+// (web-wiring-followup brief, Part 3): instrument 42 at
+// testInstrumentDomain's own price_scale 2, matching testSetup()'s own
+// InstrumentID.
+func setupsTestInstruments() *fakeInstrumentsStore {
+	return &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{42: testInstrumentDomain(42)}}
+}
 
 // fakeSetupsStore is the handwritten fake setupsStore's own doc comment
 // promises -- found/not-found/empty-list are pure routing and mapping
@@ -78,6 +89,53 @@ func testSetup() setups.Setup {
 	}
 }
 
+// TestToAPIPlanSnapshot_DecimalStringFormatting is the web-wiring-
+// followup brief's own required proof for Part 3: entry/stop/
+// targets[].level/poi.low/poi.high are emitted as decimal strings built
+// from the setup's instrument price_scale (quant.Price.String(scale)),
+// not bare scaled integers -- at scale 0 (no fractional digits), at
+// scale 2 (the common case), and across a three-target list. rr is an
+// exact rational string, left untouched by this formatting.
+func TestToAPIPlanSnapshot_DecimalStringFormatting(t *testing.T) {
+	plan := setups.PlanSnapshot{
+		Status: "actionable", Direction: "bullish",
+		Entry: quant.Price(10050), Stop: quant.Price(9900),
+		Targets: []setups.TargetSnapshot{
+			{Level: quant.Price(10200), RR: "1/1"},
+			{Level: quant.Price(10400), RR: "3/2"},
+			{Level: quant.Price(10700), RR: "4"},
+		},
+		POI: setups.POISnapshot{
+			Type: "order_block", Direction: "bullish",
+			Low: quant.Price(10000), High: quant.Price(10100),
+		},
+		ProtectedSwingID: 7,
+	}
+
+	atScale2 := toAPIPlanSnapshot(plan, quant.Scale(2))
+	if atScale2.Entry != "100.50" || atScale2.Stop != "99.00" {
+		t.Fatalf("scale 2: entry/stop = %q/%q, want \"100.50\"/\"99.00\"", atScale2.Entry, atScale2.Stop)
+	}
+	if atScale2.Poi.Low != "100.00" || atScale2.Poi.High != "101.00" {
+		t.Fatalf("scale 2: poi low/high = %q/%q, want \"100.00\"/\"101.00\"", atScale2.Poi.Low, atScale2.Poi.High)
+	}
+	wantLevels := []string{"102.00", "104.00", "107.00"}
+	wantRRs := []string{"1/1", "3/2", "4"}
+	if len(atScale2.Targets) != 3 {
+		t.Fatalf("scale 2: got %d targets, want 3", len(atScale2.Targets))
+	}
+	for i, target := range atScale2.Targets {
+		if target.Level != wantLevels[i] || target.Rr != wantRRs[i] {
+			t.Fatalf("scale 2: target[%d] = %+v, want level=%q rr=%q (rr untouched)", i, target, wantLevels[i], wantRRs[i])
+		}
+	}
+
+	atScale0 := toAPIPlanSnapshot(plan, quant.Scale(0))
+	if atScale0.Entry != "10050" || atScale0.Stop != "9900" {
+		t.Fatalf("scale 0: entry/stop = %q/%q, want \"10050\"/\"9900\" (no fractional digits)", atScale0.Entry, atScale0.Stop)
+	}
+}
+
 func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	t.Helper()
 	if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
@@ -86,7 +144,7 @@ func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 }
 
 func TestListSetups_OK(t *testing.T) {
-	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup()}}, logger: slog.Default()}
+	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup()}}, instruments: setupsTestInstruments(), logger: slog.Default()}
 	resp, err := h.ListSetups(context.Background(), ListSetupsRequestObject{Params: ListSetupsParams{InstrumentId: 42}})
 	if err != nil {
 		t.Fatalf("ListSetups: %v", err)
@@ -108,7 +166,7 @@ func TestListSetups_OK(t *testing.T) {
 func TestListSetups_StateFilter(t *testing.T) {
 	triggered := testSetup()
 	triggered.ID, triggered.State = 2, setups.StateTriggered
-	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup(), triggered}}, logger: slog.Default()}
+	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup(), triggered}}, instruments: setupsTestInstruments(), logger: slog.Default()}
 	state := ListSetupsParamsState("triggered")
 	resp, err := h.ListSetups(context.Background(), ListSetupsRequestObject{Params: ListSetupsParams{InstrumentId: 42, State: &state}})
 	if err != nil {
@@ -150,7 +208,7 @@ func TestListSetups_LimitOutOfRange(t *testing.T) {
 }
 
 func TestListSetups_Empty(t *testing.T) {
-	h := &apiHandler{store: &fakeSetupsStore{setups: nil}, logger: slog.Default()}
+	h := &apiHandler{store: &fakeSetupsStore{setups: nil}, instruments: setupsTestInstruments(), logger: slog.Default()}
 	resp, err := h.ListSetups(context.Background(), ListSetupsRequestObject{Params: ListSetupsParams{InstrumentId: 42}})
 	if err != nil {
 		t.Fatalf("ListSetups: %v", err)
@@ -219,7 +277,7 @@ func TestListSetups_MissingRequiredParam(t *testing.T) {
 }
 
 func TestGetSetup_Found(t *testing.T) {
-	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup()}}, logger: slog.Default()}
+	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup()}}, instruments: setupsTestInstruments(), logger: slog.Default()}
 	resp, err := h.GetSetup(context.Background(), GetSetupRequestObject{Id: 1})
 	if err != nil {
 		t.Fatalf("GetSetup: %v", err)
@@ -261,7 +319,7 @@ func TestGetSetup_NotFound(t *testing.T) {
 func TestListSetupEvents_Found(t *testing.T) {
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	ev := setups.SetupEvent{ID: 5, SetupID: 1, Type: setups.EventDetected, Plan: setups.PlanSnapshot{}, EvaluationTime: now, AlgorithmVersion: "v1", CreatedAt: now}
-	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup()}, events: []setups.SetupEvent{ev}}, logger: slog.Default()}
+	h := &apiHandler{store: &fakeSetupsStore{setups: []setups.Setup{testSetup()}, events: []setups.SetupEvent{ev}}, instruments: setupsTestInstruments(), logger: slog.Default()}
 
 	resp, err := h.ListSetupEvents(context.Background(), ListSetupEventsRequestObject{Id: 1})
 	if err != nil {

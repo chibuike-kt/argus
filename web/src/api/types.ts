@@ -1,15 +1,12 @@
 // Wire types mirroring api/openapi.yaml exactly (field names, nullability,
-// enums) plus internal/setups/types.go's PlanSnapshot shape, which the
-// spec itself leaves loosely typed (`additionalProperties: true`) because
-// it is stored as free-form JSONB. These are *wire* shapes: OHLCV and
-// tick_size stay decimal strings exactly as the API sends them (guide 13);
-// plan_snapshot's own entry/stop/targets[].level are scaled integers with
-// NO scale attached to them anywhere in the payload -- that is a real
-// mismatch with the candles/instruments endpoints, which always send a
-// pre-formatted decimal string. Call sites must pair plan_snapshot's
-// numbers with the setup's own instrument's price_scale (fetched
-// separately) before formatting them. See the brief's own report for this
-// gap named explicitly.
+// enums), including internal/setups/types.go's PlanSnapshot shape -- now
+// typed on both sides (web-wiring-followup brief, Part 3): entry/stop/
+// targets[].level/poi.low/poi.high arrive as decimal strings built from
+// the setup's own instrument price_scale, exactly like candle OHLCV and
+// instrument tick_size (guide 13), not the bare scaled integers this API
+// sent before Part 3. No call site needs to pair these with price_scale
+// itself anymore -- Number() on the string is enough, the same as any
+// other already-formatted money field.
 
 export interface ApiError {
   error: {
@@ -46,20 +43,19 @@ export interface ApiCandle {
 }
 
 // TargetSnapshot/POISnapshot/PlanSnapshot mirror internal/setups/types.go
-// field for field (read directly from source, not guessed). `level`,
-// `entry`, `stop`, `low`, `high` are quant.Price's own default JSON
-// encoding: a plain number holding the SCALED INTEGER, not a decimal
-// string -- unlike every other money field this API sends.
+// field for field (read directly from source, not guessed), and now
+// api/openapi.yaml's own typed TargetSnapshot/POISnapshot/PlanSnapshot
+// schemas (Part 3 made them typed rather than a free-form object).
 export interface ApiTargetSnapshot {
-  level: number;
+  level: string;
   rr: string;
 }
 
 export interface ApiPOISnapshot {
   type: string;
   direction: string;
-  low: number;
-  high: number;
+  low: string;
+  high: string;
   order_block_candle_id: number;
   order_block_candle_revision: number;
   order_block_open_time: string;
@@ -72,8 +68,8 @@ export interface ApiPOISnapshot {
 export interface ApiPlanSnapshot {
   status: string;
   direction: string;
-  entry: number;
-  stop: number;
+  entry: string;
+  stop: string;
   targets: ApiTargetSnapshot[];
   poi: ApiPOISnapshot;
   protected_swing_id: number;

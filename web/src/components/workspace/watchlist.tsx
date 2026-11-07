@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Plus, Columns, DotsThree, CaretDown, CircleNotch } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { SampleDataBadge } from "@/components/ui/sample-data-badge";
-import { useInstruments } from "@/api/hooks";
+import { useInstruments, useLatestCloses } from "@/api/hooks";
 import { cn } from "@/lib/cn";
 
 // No forex instrument exists in the dev-fixture dataset this is verified
@@ -83,6 +83,12 @@ function Group({ title, sample, children }: { title: string; sample?: boolean; c
 
 export function Watchlist() {
   const { data: instruments, loading, error } = useInstruments();
+  // Last = the latest closed candle's close, per real instrument
+  // (order=desc&limit=1, web-wiring-followup brief Part 5) -- capped and
+  // parallel (useLatestCloses's own doc comment); Chg/Chg% stay an em
+  // dash (Row's own default), since no 24h reference exists yet and this
+  // brief does not invent one.
+  const { data: latestCloses } = useLatestCloses((instruments ?? []).map((i) => i.id));
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -130,10 +136,12 @@ export function Watchlist() {
           {!loading &&
             !error &&
             (instruments ?? []).map((inst) => (
-              // Symbols are real (GET /instruments); last/Chg/Chg% are
-              // not shown at all for them -- no fabricated price, an em
-              // dash instead (Row's own default when last is omitted).
-              <Row key={inst.id} symbol={inst.native_symbol} />
+              // Symbol and Last are both real now (GET /instruments,
+              // GET .../candles?order=desc&limit=1); Chg/Chg% stay an em
+              // dash -- no 24h reference endpoint exists to compute them
+              // from, so Row's own default renders rather than a
+              // fabricated number.
+              <Row key={inst.id} symbol={inst.native_symbol} last={latestCloses?.get(inst.id)} />
             ))}
           {!loading && !error && (instruments ?? []).length === 0 && (
             <div className="px-2 py-2 text-[12px] text-fg-subtle">No instruments registered.</div>

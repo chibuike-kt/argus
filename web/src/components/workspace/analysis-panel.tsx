@@ -59,7 +59,11 @@ function PerformanceTiles() {
 // real selected setup now; the CHOCH caption the fixture version showed
 // underneath is dropped -- that came from the structure-events
 // annotations, which have no per-setup API source (see chart-surface.tsx
-// and the brief's own report).
+// and the brief's own report). This is not a market-wide sentiment
+// read (no such endpoint exists): the caption under the gauge says so
+// explicitly, naming the selected setup's own direction and R:R as what
+// it is derived from (web-wiring-followup brief, Part 1's own
+// instruction not to leave an unlabelled gauge implying otherwise).
 function BiasLine() {
   const { setup } = useAnalysisWorkspace();
   if (!setup) return null;
@@ -71,6 +75,9 @@ function BiasLine() {
       <ProvenanceChip p="S" className="mt-0.5" />
       <div className="flex-1">
         <BiasGauge direction={direction} rr={rr} />
+        <p className="-mt-1 text-center text-[11px] text-fg-subtle">
+          Derived from the selected setup's direction and R:R, not market-wide sentiment
+        </p>
       </div>
     </div>
   );

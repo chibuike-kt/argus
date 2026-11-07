@@ -11,6 +11,11 @@ export interface ListCandlesParams {
   from: string; // ISO-8601
   to: string; // ISO-8601
   limit?: number; // server caps at 1000 regardless
+  // "desc" is the most-recent-N shortcut (web-wiring-followup brief,
+  // Part 4): newest first, still capped by limit, still enforced in SQL
+  // server-side. Omitted/"asc" is the original, unchanged oldest-first
+  // order.
+  order?: "asc" | "desc";
 }
 
 export function listInstrumentCandles(
@@ -21,7 +26,7 @@ export function listInstrumentCandles(
   if (fixturesEnabled()) return Promise.resolve(fixtureApiCandles());
   return getJSON<ApiCandle[]>(
     `/instruments/${instrumentId}/candles`,
-    { from: params.from, to: params.to, limit: params.limit },
+    { from: params.from, to: params.to, limit: params.limit, order: params.order },
     options,
   );
 }
