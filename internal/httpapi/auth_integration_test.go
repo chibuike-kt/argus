@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -104,15 +105,22 @@ func waitForBody(t *testing.T, mail *recordingMailer, email string) string {
 	}
 }
 
-var tokenMarkerRe = regexp.MustCompile(`verify-email: (\S+)`)
+// tokenMarkerRe matches sendVerificationEmail's own link format (web
+// auth UI brief Part A0 -- a real /verify-email?token=... link, not a
+// bare token to POST by hand).
+var tokenMarkerRe = regexp.MustCompile(`/verify-email\?token=(\S+)`)
 
 func extractVerificationToken(t *testing.T, body string) string {
 	t.Helper()
 	m := tokenMarkerRe.FindStringSubmatch(body)
 	if len(m) != 2 {
-		t.Fatalf("could not find a verification token in body: %q", body)
+		t.Fatalf("could not find a verification link in body: %q", body)
 	}
-	return m[1]
+	raw, err := url.QueryUnescape(m[1])
+	if err != nil {
+		t.Fatalf("unescape token from link: %v", err)
+	}
+	return raw
 }
 
 var authEmailCounter atomic.Int64
@@ -160,7 +168,7 @@ func newAuthTestServer(t *testing.T, policy config.AuthPolicy) *authTestServer {
 	}, policy.ArgonMaxConcurrent)
 	limiter := ratelimit.NewLimiter(rdb, logger, clk)
 	mail := &recordingMailer{}
-	svc := service.New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, policy, logger)
+	svc := service.New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, policy, "http://localhost:5173", logger)
 
 	handler := NewRouter(Deps{
 		Logger: logger, DB: db, Redis: rdb,

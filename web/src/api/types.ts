@@ -16,6 +16,24 @@ export interface ApiError {
   };
 }
 
+// ApiAuthUser/ApiAuthSession mirror api/openapi.yaml's AuthUser/
+// AuthSession schemas exactly (web auth UI brief, Part A).
+export interface ApiAuthUser {
+  id: number;
+  email: string;
+  email_verified: boolean;
+  created_at: string;
+}
+
+export interface ApiAuthSession {
+  id: number;
+  created_at: string;
+  last_seen_at: string;
+  user_agent: string | null;
+  ip: string | null;
+  current: boolean;
+}
+
 export interface ApiInstrument {
   id: number;
   provider: string;

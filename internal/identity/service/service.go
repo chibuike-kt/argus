@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -53,17 +54,18 @@ func (e *RateLimitedError) Error() string {
 
 // Service is the registration/login/logout orchestrator.
 type Service struct {
-	db       *sql.DB
-	users    *identity.Store
-	sessions *session.Store
-	tokens   *tokens.Store
-	hasher   *password.Hasher
-	limiter  *ratelimit.Limiter
-	mail     mailer.Mailer
-	events   *store.Queries
-	clk      clock.Clock
-	policy   config.AuthPolicy
-	logger   *slog.Logger
+	db            *sql.DB
+	users         *identity.Store
+	sessions      *session.Store
+	tokens        *tokens.Store
+	hasher        *password.Hasher
+	limiter       *ratelimit.Limiter
+	mail          mailer.Mailer
+	events        *store.Queries
+	clk           clock.Clock
+	policy        config.AuthPolicy
+	publicBaseURL string
+	logger        *slog.Logger
 }
 
 // New builds a Service from its already-constructed collaborators --
@@ -72,6 +74,10 @@ type Service struct {
 // place they are all wired together. db is kept (not just wrapped
 // into store.Queries) so VerifyEmail can open a transaction spanning
 // both the tokens and users stores (architect review item 9).
+// publicBaseURL is config.Config.PublicBaseURL -- the frontend origin
+// the verification-email link is built against; an implementation
+// setting, not an ADR-015 addendum policy value, so it is its own
+// parameter rather than a field on policy.
 func New(
 	db *sql.DB,
 	users *identity.Store,
@@ -82,12 +88,13 @@ func New(
 	mail mailer.Mailer,
 	clk clock.Clock,
 	policy config.AuthPolicy,
+	publicBaseURL string,
 	logger *slog.Logger,
 ) *Service {
 	return &Service{
 		db: db, users: users, sessions: sessions, tokens: tokens, hasher: hasher,
 		limiter: limiter, mail: mail, events: store.New(db),
-		clk: clk, policy: policy, logger: logger,
+		clk: clk, policy: policy, publicBaseURL: publicBaseURL, logger: logger,
 	}
 }
 
@@ -206,13 +213,15 @@ func (s *Service) sendVerificationEmail(ctx context.Context, u identity.User) {
 		s.logger.Error("service: issue verification token", "user_id", u.ID, "error", err)
 		return
 	}
-	// No frontend route exists yet to build a clickable link against
-	// (out of scope for this brief) -- the token itself is what
-	// POST /auth/verify-email takes, so the email states that
-	// directly rather than inventing a URL shape nothing serves yet.
+	// A frontend /verify-email route now exists (web auth UI brief, Part
+	// A0) -- the email carries a clickable link, not a bare token to
+	// POST by hand. The raw token appears only in this link and (local
+	// development only) through LogMailer's own logging; it is never
+	// logged anywhere else.
+	link := fmt.Sprintf("%s/verify-email?token=%s", s.publicBaseURL, url.QueryEscape(rawToken))
 	body := fmt.Sprintf(
-		"Welcome to ARGUS. To verify your email, submit this token to POST /api/v1/auth/verify-email: %s\n\nThis token expires in %s.",
-		rawToken, s.policy.EmailVerificationTTL,
+		"Welcome to ARGUS. To verify your email, open this link:\n\n%s\n\nThis link expires in %s.",
+		link, s.policy.EmailVerificationTTL,
 	)
 	s.sendAsync(ctx, mailer.Message{To: u.Email, Subject: "Verify your ARGUS email", Body: body})
 }

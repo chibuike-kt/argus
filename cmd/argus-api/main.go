@@ -71,7 +71,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	authSvc := service.New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, cfg.Auth, logger)
+	authSvc := service.New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, cfg.Auth, cfg.PublicBaseURL, logger)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:       logger,

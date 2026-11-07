@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -173,7 +174,7 @@ func newTestService(t *testing.T) *testService {
 	limiter := ratelimit.NewLimiter(rdb, logger, clk)
 	mail := &recordingMailer{}
 
-	svc := New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, policy, logger)
+	svc := New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, policy, "http://localhost:5173", logger)
 	return &testService{Service: svc, mail: mail, clk: clk, db: db, sess: sessions, hasher: hasher, logBuf: &buf}
 }
 
@@ -614,17 +615,24 @@ func TestIntegration_ResendVerification_AccountLimitNeverReturns429(t *testing.T
 
 // extractToken pulls the raw token out of sendVerificationEmail's own
 // body format ("... POST /api/v1/auth/verify-email: <token>\n\n...").
+// extractToken pulls the raw token out of sendVerificationEmail's own
+// link format ("... /verify-email?token=<token>\n\n...", web auth UI
+// brief Part A0 -- a real link now, not a bare token to POST by hand).
 func extractToken(t *testing.T, body string) string {
 	t.Helper()
-	const marker = "verify-email: "
+	const marker = "/verify-email?token="
 	i := strings.Index(body, marker)
 	if i < 0 {
-		t.Fatalf("could not find token marker in body: %q", body)
+		t.Fatalf("could not find a verification link in body: %q", body)
 	}
 	rest := body[i+len(marker):]
 	end := strings.IndexAny(rest, "\n")
 	if end < 0 {
 		end = len(rest)
 	}
-	return strings.TrimSpace(rest[:end])
+	raw, err := url.QueryUnescape(strings.TrimSpace(rest[:end]))
+	if err != nil {
+		t.Fatalf("unescape token from link: %v", err)
+	}
+	return raw
 }
