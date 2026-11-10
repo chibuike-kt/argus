@@ -182,6 +182,23 @@ type SetupEvent struct {
 	CreatedAt               time.Time       `json:"created_at"`
 }
 
+type SignupVerification struct {
+	ID              int64          `json:"id"`
+	Email           string         `json:"email"`
+	EmailNormalized string         `json:"email_normalized"`
+	CodeHash        string         `json:"code_hash"`
+	CodeSentAt      time.Time      `json:"code_sent_at"`
+	CodeExpiresAt   time.Time      `json:"code_expires_at"`
+	WrongGuesses    int32          `json:"wrong_guesses"`
+	VerifiedAt      sql.NullTime   `json:"verified_at"`
+	TicketHash      sql.NullString `json:"ticket_hash"`
+	TicketExpiresAt sql.NullTime   `json:"ticket_expires_at"`
+	TicketUsedAt    sql.NullTime   `json:"ticket_used_at"`
+	TermsAcceptedAt time.Time      `json:"terms_accepted_at"`
+	TermsVersion    string         `json:"terms_version"`
+	CreatedAt       time.Time      `json:"created_at"`
+}
+
 type StructureEvent struct {
 	ID                int64         `json:"id"`
 	InstrumentID      int64         `json:"instrument_id"`
@@ -216,12 +233,24 @@ type StructureState struct {
 }
 
 type User struct {
-	ID              int64        `json:"id"`
-	Email           string       `json:"email"`
-	EmailNormalized string       `json:"email_normalized"`
-	PasswordHash    string       `json:"password_hash"`
-	EmailVerifiedAt sql.NullTime `json:"email_verified_at"`
-	CreatedAt       time.Time    `json:"created_at"`
-	UpdatedAt       time.Time    `json:"updated_at"`
-	DisabledAt      sql.NullTime `json:"disabled_at"`
+	ID                    int64          `json:"id"`
+	Email                 string         `json:"email"`
+	EmailNormalized       string         `json:"email_normalized"`
+	PasswordHash          string         `json:"password_hash"`
+	EmailVerifiedAt       sql.NullTime   `json:"email_verified_at"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
+	DisabledAt            sql.NullTime   `json:"disabled_at"`
+	DisplayName           sql.NullString `json:"display_name"`
+	TermsAcceptedAt       sql.NullTime   `json:"terms_accepted_at"`
+	TermsVersion          sql.NullString `json:"terms_version"`
+	OnboardingCompletedAt sql.NullTime   `json:"onboarding_completed_at"`
+}
+
+type WatchlistItem struct {
+	ID           int64     `json:"id"`
+	UserID       int64     `json:"user_id"`
+	InstrumentID int64     `json:"instrument_id"`
+	Position     int32     `json:"position"`
+	CreatedAt    time.Time `json:"created_at"`
 }

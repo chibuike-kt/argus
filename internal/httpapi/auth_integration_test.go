@@ -5,12 +5,12 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -31,7 +31,11 @@ import (
 	"github.com/chibuike-kt/argus/internal/identity/ratelimit"
 	"github.com/chibuike-kt/argus/internal/identity/service"
 	"github.com/chibuike-kt/argus/internal/identity/session"
+	"github.com/chibuike-kt/argus/internal/identity/signupcode"
 	"github.com/chibuike-kt/argus/internal/identity/tokens"
+	"github.com/chibuike-kt/argus/internal/instruments"
+	"github.com/chibuike-kt/argus/internal/quant"
+	"github.com/chibuike-kt/argus/internal/watchlist"
 )
 
 // Run with (needs a real Postgres with all migrations applied, and a
@@ -87,10 +91,10 @@ func (m *recordingMailer) bodyFor(email string) (string, bool) {
 }
 
 // waitForBody polls bodyFor until a message for email arrives or 2s
-// pass -- Register/ResendVerification now send mail in the background
-// (architect review item 1: the send must not affect response time),
-// so a caller can no longer assume a message has arrived the instant
-// the HTTP call returns.
+// pass -- SignupStart sends mail in the background (architect review
+// item 1: the send must not affect response time), so a caller can no
+// longer assume a message has arrived the instant the HTTP call
+// returns.
 func waitForBody(t *testing.T, mail *recordingMailer, email string) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -99,28 +103,24 @@ func waitForBody(t *testing.T, mail *recordingMailer, email string) string {
 			return body
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no verification email recorded for %s after 2s", email)
+			t.Fatalf("no mail recorded for %s after 2s", email)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
 
-// tokenMarkerRe matches sendVerificationEmail's own link format (web
-// auth UI brief Part A0 -- a real /verify-email?token=... link, not a
-// bare token to POST by hand).
-var tokenMarkerRe = regexp.MustCompile(`/verify-email\?token=(\S+)`)
+// codeMarkerRe matches signupcode's own emailed-code body (ADR-015
+// "Signup and onboarding": Service.SignupStart's "Your ARGUS signup
+// code is ..." message).
+var codeMarkerRe = regexp.MustCompile(`Your ARGUS signup code is (\d{6})`)
 
-func extractVerificationToken(t *testing.T, body string) string {
+func extractSignupCode(t *testing.T, body string) string {
 	t.Helper()
-	m := tokenMarkerRe.FindStringSubmatch(body)
+	m := codeMarkerRe.FindStringSubmatch(body)
 	if len(m) != 2 {
-		t.Fatalf("could not find a verification link in body: %q", body)
+		t.Fatalf("could not find a signup code in body: %q", body)
 	}
-	raw, err := url.QueryUnescape(m[1])
-	if err != nil {
-		t.Fatalf("unescape token from link: %v", err)
-	}
-	return raw
+	return m[1]
 }
 
 var authEmailCounter atomic.Int64
@@ -140,6 +140,7 @@ type authTestServer struct {
 	mail   *recordingMailer
 	policy config.AuthPolicy
 	router chi.Router
+	db     *sql.DB
 }
 
 func newAuthTestServer(t *testing.T, policy config.AuthPolicy) *authTestServer {
@@ -162,17 +163,20 @@ func newAuthTestServer(t *testing.T, policy config.AuthPolicy) *authTestServer {
 	users := identity.NewStore(db)
 	sessions := session.NewStore(db, clk, policy.SessionIdleDuration, policy.SessionAbsoluteDuration)
 	tokenStore := tokens.NewStore(db, clk)
+	signupStore := signupcode.NewStore(db, clk, policy.SignupCodeHMACKey)
+	instrumentsStore := instruments.NewStore(db)
+	watchlistStore := watchlist.NewStore(db, instrumentsStore)
 	hasher := password.NewHasher(password.Params{
 		MemoryKiB: policy.ArgonMemoryKiB, Iterations: policy.ArgonIterations,
 		Parallelism: policy.ArgonParallelism, SaltLen: policy.ArgonSaltLen, KeyLen: policy.ArgonKeyLen,
 	}, policy.ArgonMaxConcurrent)
 	limiter := ratelimit.NewLimiter(rdb, logger, clk)
 	mail := &recordingMailer{}
-	svc := service.New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, policy, "http://localhost:5173", logger)
+	svc := service.New(db, users, sessions, tokenStore, signupStore, watchlistStore, hasher, limiter, mail, clk, policy, logger)
 
 	handler := NewRouter(Deps{
 		Logger: logger, DB: db, Redis: rdb,
-		Auth: svc, Sessions: sessions, Users: users,
+		Auth: svc, Watchlist: watchlistStore, Sessions: sessions, Users: users,
 		AuthPolicy: policy, IsProduction: false, Clock: clk,
 	})
 	router, ok := handler.(chi.Router)
@@ -182,22 +186,27 @@ func newAuthTestServer(t *testing.T, policy config.AuthPolicy) *authTestServer {
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return &authTestServer{Server: srv, mail: mail, policy: policy, router: router}
+	return &authTestServer{Server: srv, mail: mail, policy: policy, router: router, db: db}
 }
 
 // testAuthPolicy mirrors internal/config.AuthPolicy's own envDefault
 // values except for cheap Argon2 (this brief's own "cheaper Argon2
-// params in tests through config only") and a CSRF allow-list that
-// matches this test's own request Origin.
+// params in tests through config only"), generous signup limits (high
+// enough that a single test's own handful of requests never trips
+// them), and a CSRF allow-list that matches this test's own request
+// Origin.
 func testAuthPolicy() config.AuthPolicy {
 	return config.AuthPolicy{
 		ArgonMemoryKiB: 8, ArgonIterations: 1, ArgonParallelism: 1, ArgonSaltLen: 16, ArgonKeyLen: 32, ArgonMaxConcurrent: 4,
 		PasswordMinLength: 12, PasswordMaxLength: 128,
 		SessionIdleDuration: 7 * 24 * time.Hour, SessionAbsoluteDuration: 30 * 24 * time.Hour,
-		SessionTouchThrottle: time.Minute,
-		EmailVerificationTTL: 24 * time.Hour, PasswordResetTTL: time.Hour,
+		SessionTouchThrottle:            time.Minute,
+		PasswordResetTTL:                time.Hour,
 		LoginFailuresPerAccountPer15Min: 5, LoginAttemptsPerIPPer15Min: 1000,
-		RegisterPerIPPerHour: 1000, ResendVerificationPerAccountPerHour: 1000, ResendVerificationPerIPPerHour: 1000,
+		SignupCodeTTL: 10 * time.Minute, SignupCodeMaxWrongGuesses: 5, SignupCodeResendCooldown: time.Millisecond,
+		SignupCodesPerEmailPerHour: 1000, SignupStartsPerIPPerHour: 1000, SignupTicketTTL: 30 * time.Minute,
+		SignupCodeHMACKey:    "test-only-signup-code-hmac-key-not-for-production-use",
+		DisplayNameMaxLength: 60, WatchlistMaxItems: 50, TermsVersion: "1",
 		LoginDelayStep: time.Millisecond, LoginDelayMax: 5 * time.Millisecond,
 		CookieNameProd: "__Host-argus_session", CookieNameLocal: "argus_session",
 		AllowedOrigins: []string{"http://localhost:5173"},
@@ -225,30 +234,64 @@ func authJSONRequest(t *testing.T, method, url string, body any) *http.Request {
 	return r
 }
 
-func registerAndVerify(t *testing.T, srv *authTestServer, email, pw string) {
+// signupStart posts /auth/signup/start and returns the 6-digit code
+// mailed for email -- the shared first step every signup test below
+// needs, whether or not it goes on to verify/complete.
+func signupStart(t *testing.T, srv *authTestServer, email string) string {
 	t.Helper()
-	resp, err := http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/register", RegisterRequest{
-		Email: openapi_types.Email(email), Password: pw,
+	resp, err := http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/signup/start", SignupStartRequest{
+		Email: openapi_types.Email(email), AcceptedTerms: true,
 	}))
 	if err != nil {
-		t.Fatalf("register: %v", err)
+		t.Fatalf("signup start: %v", err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("register status = %d, want 202", resp.StatusCode)
+		t.Fatalf("signup start status = %d, want 202", resp.StatusCode)
 	}
+	return extractSignupCode(t, waitForBody(t, srv.mail, email))
+}
 
-	body := waitForBody(t, srv.mail, email)
-	token := extractVerificationToken(t, body)
+// signupNewUser runs the full start/verify/complete sequence (ADR-015
+// "Signup and onboarding") and returns the session cookie
+// signup/complete itself sets -- it logs the new account in, the same
+// as Login.
+func signupNewUser(t *testing.T, srv *authTestServer, email, pw string) *http.Cookie {
+	t.Helper()
+	code := signupStart(t, srv, email)
 
-	resp, err = http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/verify-email", VerifyEmailRequest{Token: token}))
+	verifyResp, err := http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/signup/verify", SignupVerifyRequest{
+		Email: openapi_types.Email(email), Code: code,
+	}))
 	if err != nil {
-		t.Fatalf("verify-email: %v", err)
+		t.Fatalf("signup verify: %v", err)
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("verify-email status = %d, want 200", resp.StatusCode)
+	defer func() { _ = verifyResp.Body.Close() }()
+	if verifyResp.StatusCode != http.StatusOK {
+		t.Fatalf("signup verify status = %d, want 200", verifyResp.StatusCode)
 	}
+	var verified SignupVerifyResponse
+	if err := json.NewDecoder(verifyResp.Body).Decode(&verified); err != nil {
+		t.Fatalf("decode signup verify response: %v", err)
+	}
+
+	completeResp, err := http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/signup/complete", SignupCompleteRequest{
+		Ticket: verified.Ticket, Password: pw,
+	}))
+	if err != nil {
+		t.Fatalf("signup complete: %v", err)
+	}
+	defer func() { _ = completeResp.Body.Close() }()
+	if completeResp.StatusCode != http.StatusOK {
+		t.Fatalf("signup complete status = %d, want 200", completeResp.StatusCode)
+	}
+	for _, c := range completeResp.Cookies() {
+		if c.Name == "argus_session" {
+			return c
+		}
+	}
+	t.Fatal("signup complete response set no argus_session cookie")
+	return nil
 }
 
 func loginAndGetCookie(t *testing.T, srv *authTestServer, email, pw string) *http.Cookie {
@@ -272,12 +315,41 @@ func loginAndGetCookie(t *testing.T, srv *authTestServer, email, pw string) *htt
 	return nil
 }
 
-func TestIntegration_FullAuthFlow_RegisterVerifyLoginMeLogout(t *testing.T) {
+// testEnabledInstrument creates an instrument and flips it enabled by
+// a direct SQL update -- internal/instruments.Store deliberately has
+// no code path to do that itself while ADR-007 (provider selection and
+// commercial data rights) is open, so a watchlist integration test that
+// needs one goes around the store, test-only, the same way
+// setups_integration_test.go's own testInstrument creates a disabled
+// one for everything that does not need it enabled.
+func testEnabledInstrument(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	priceScale := quant.Scale(0)
+	qtyScale := quant.Scale(0)
+	symbol := fmt.Sprintf("HTTPAPI-WATCHLIST-%s-%d", t.Name(), time.Now().UnixNano())
+	inst, err := instruments.NewStore(db).Insert(context.Background(), instruments.NewInstrumentParams{
+		Provider: "test-provider", NativeSymbol: symbol, AssetClass: "crypto_perp",
+		PriceScale: &priceScale, QtyScale: &qtyScale, TickSize: 1, QtyStepSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("create test instrument: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE instruments SET enabled = true WHERE id = $1`, inst.ID); err != nil {
+		t.Fatalf("enable test instrument: %v", err)
+	}
+	return inst.ID
+}
+
+func TestIntegration_FullAuthFlow_SignupLoginMeLogout(t *testing.T) {
 	srv := newAuthTestServer(t, testAuthPolicy())
 	email := testAuthEmail(t)
 	const pw = "a-perfectly-fine-password-1"
 
-	registerAndVerify(t, srv, email, pw)
+	signupCookie := signupNewUser(t, srv, email, pw)
+	if signupCookie.Value == "" {
+		t.Fatal("signup complete set an empty session cookie")
+	}
+
 	cookie := loginAndGetCookie(t, srv, email, pw)
 
 	// Cookie shape (ADR-015 addendum row 5): HttpOnly, Secure except
@@ -316,6 +388,9 @@ func TestIntegration_FullAuthFlow_RegisterVerifyLoginMeLogout(t *testing.T) {
 	if me.Email != email || !me.EmailVerified {
 		t.Fatalf("/auth/me = %+v", me)
 	}
+	if me.OnboardingCompleted {
+		t.Fatal("/auth/me OnboardingCompleted = true right after signup, want false (no display name/watchlist yet)")
+	}
 
 	logoutReq := authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/logout", nil)
 	logoutReq.AddCookie(cookie)
@@ -340,20 +415,107 @@ func TestIntegration_FullAuthFlow_RegisterVerifyLoginMeLogout(t *testing.T) {
 	}
 }
 
-func TestIntegration_Login_WrongPassword_UnknownEmail_Unverified_AllIdentical(t *testing.T) {
+// TestIntegration_Onboarding_ProfileAndWatchlistCompleteIt covers the
+// "critical journey" ADR-019 names explicitly: signup, then setting a
+// display name and a watchlist, then completing onboarding -- and the
+// negative case, completing before either exists.
+func TestIntegration_Onboarding_ProfileAndWatchlistCompleteIt(t *testing.T) {
+	srv := newAuthTestServer(t, testAuthPolicy())
+	email := testAuthEmail(t)
+	const pw = "a-perfectly-fine-password-1"
+	cookie := signupNewUser(t, srv, email, pw)
+	instrumentID := testEnabledInstrument(t, srv.db)
+
+	// Too early: no display name, no watchlist item yet.
+	tooEarly := authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/me/onboarding/complete", nil)
+	tooEarly.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(tooEarly)
+	if err != nil {
+		t.Fatalf("complete onboarding too early: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("complete onboarding with nothing set status = %d, want 400", resp.StatusCode)
+	}
+
+	profileReq := authJSONRequest(t, http.MethodPut, srv.URL+"/api/v1/me/profile", ProfileUpdateRequest{DisplayName: "Ada"})
+	profileReq.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(profileReq)
+	if err != nil {
+		t.Fatalf("update profile: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("update profile status = %d, want 200", resp.StatusCode)
+	}
+
+	watchlistReq := authJSONRequest(t, http.MethodPut, srv.URL+"/api/v1/watchlist", WatchlistUpdateRequest{InstrumentIds: []int64{instrumentID}})
+	watchlistReq.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(watchlistReq)
+	if err != nil {
+		t.Fatalf("update watchlist: %v", err)
+	}
+	var items []WatchlistItem
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		t.Fatalf("decode watchlist response: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("update watchlist status = %d, want 200", resp.StatusCode)
+	}
+	if len(items) != 1 || items[0].InstrumentId != instrumentID {
+		t.Fatalf("watchlist = %+v, want one item with instrument_id %d", items, instrumentID)
+	}
+
+	getWatchlistReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/watchlist", nil)
+	getWatchlistReq.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(getWatchlistReq)
+	if err != nil {
+		t.Fatalf("get watchlist: %v", err)
+	}
+	var got []WatchlistItem
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode get watchlist response: %v", err)
+	}
+	_ = resp.Body.Close()
+	if len(got) != 1 || got[0].InstrumentId != instrumentID {
+		t.Fatalf("GET watchlist = %+v, want one item with instrument_id %d", got, instrumentID)
+	}
+
+	completeReq := authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/me/onboarding/complete", nil)
+	completeReq.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(completeReq)
+	if err != nil {
+		t.Fatalf("complete onboarding: %v", err)
+	}
+	var completed AuthUser
+	if err := json.NewDecoder(resp.Body).Decode(&completed); err != nil {
+		t.Fatalf("decode complete onboarding response: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("complete onboarding status = %d, want 200", resp.StatusCode)
+	}
+	if !completed.OnboardingCompleted {
+		t.Fatal("complete onboarding response OnboardingCompleted = false, want true")
+	}
+	if completed.DisplayName == nil || *completed.DisplayName != "Ada" {
+		t.Fatalf("complete onboarding response DisplayName = %v, want \"Ada\"", completed.DisplayName)
+	}
+}
+
+func TestIntegration_Login_WrongPassword_UnknownEmail_NeverCompleted_AllIdentical(t *testing.T) {
 	srv := newAuthTestServer(t, testAuthPolicy())
 	verifiedEmail := testAuthEmail(t)
 	const pw = "a-perfectly-fine-password-1"
-	registerAndVerify(t, srv, verifiedEmail, pw)
+	signupNewUser(t, srv, verifiedEmail, pw)
 
-	unverifiedEmail := testAuthEmail(t)
-	resp, err := http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/register", RegisterRequest{
-		Email: openapi_types.Email(unverifiedEmail), Password: pw,
-	}))
-	if err != nil {
-		t.Fatalf("register unverified: %v", err)
-	}
-	_ = resp.Body.Close()
+	// A signup that was started but never verified/completed: no user
+	// row exists for this email at all (ADR-015 "no half accounts"),
+	// structurally identical to "unknown email" from Login's own point
+	// of view.
+	neverCompletedEmail := testAuthEmail(t)
+	signupStart(t, srv, neverCompletedEmail)
 
 	cases := []struct {
 		name  string
@@ -362,7 +524,7 @@ func TestIntegration_Login_WrongPassword_UnknownEmail_Unverified_AllIdentical(t 
 	}{
 		{"unknown email", testAuthEmail(t), pw},
 		{"wrong password", verifiedEmail, "a-wrong-password-entirely"},
-		{"unverified", unverifiedEmail, pw},
+		{"signup started but never completed", neverCompletedEmail, pw},
 	}
 	var bodies []string
 	var statuses []int
@@ -421,15 +583,15 @@ func TestIntegration_CSRF_RejectsMismatchedOriginAndMissingContentType(t *testin
 
 func TestIntegration_RateLimit_Returns429WithRetryAfter(t *testing.T) {
 	policy := testAuthPolicy()
-	policy.RegisterPerIPPerHour = 1
+	policy.SignupStartsPerIPPerHour = 1
 	srv := newAuthTestServer(t, policy)
 
 	req := func() *http.Response {
-		resp, err := http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/register", RegisterRequest{
-			Email: openapi_types.Email(testAuthEmail(t)), Password: "a-perfectly-fine-password-1",
+		resp, err := http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/signup/start", SignupStartRequest{
+			Email: openapi_types.Email(testAuthEmail(t)), AcceptedTerms: true,
 		}))
 		if err != nil {
-			t.Fatalf("register: %v", err)
+			t.Fatalf("signup start: %v", err)
 		}
 		return resp
 	}
@@ -437,13 +599,13 @@ func TestIntegration_RateLimit_Returns429WithRetryAfter(t *testing.T) {
 	first := req()
 	_ = first.Body.Close()
 	if first.StatusCode != http.StatusAccepted {
-		t.Fatalf("first register status = %d, want 202", first.StatusCode)
+		t.Fatalf("first signup start status = %d, want 202", first.StatusCode)
 	}
 
 	second := req()
 	_ = second.Body.Close()
 	if second.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("second register (over RegisterPerIPPerHour=1) status = %d, want 429", second.StatusCode)
+		t.Fatalf("second signup start (over SignupStartsPerIPPerHour=1) status = %d, want 429", second.StatusCode)
 	}
 }
 
@@ -493,7 +655,7 @@ func TestIntegration_Login_OversizePassword_SameGenericError(t *testing.T) {
 	srv := newAuthTestServer(t, testAuthPolicy())
 	email := testAuthEmail(t)
 	const pw = "a-perfectly-fine-password-1"
-	registerAndVerify(t, srv, email, pw)
+	signupNewUser(t, srv, email, pw)
 
 	longPassword := strings.Repeat("a", 129)
 	resp, err := http.DefaultClient.Do(authJSONRequest(t, http.MethodPost, srv.URL+"/api/v1/auth/login", LoginRequest{

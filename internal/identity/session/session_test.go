@@ -49,7 +49,8 @@ func testDB(t *testing.T) *sql.DB {
 func testUser(t *testing.T, db *sql.DB) int64 {
 	t.Helper()
 	email := fmt.Sprintf("session-test-%d@example.com", time.Now().UnixNano())
-	u, err := identity.NewStore(db).Insert(context.Background(), email, "$argon2id$v=19$m=8,t=1,p=1$c2FsdA$aGFzaA")
+	now := time.Now()
+	u, err := identity.NewStore(db).InsertVerified(context.Background(), email, "$argon2id$v=19$m=8,t=1,p=1$c2FsdA$aGFzaA", now, now, "test")
 	if err != nil {
 		t.Fatalf("create test user: %v", err)
 	}

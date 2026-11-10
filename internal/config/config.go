@@ -106,5 +106,12 @@ func (c Config) Validate() error {
 			return fmt.Errorf("ARGUS_ENV=%s requires ARGUS_PUBLIC_BASE_URL to start with https://, got %q", c.Env, c.PublicBaseURL)
 		}
 	}
+	// The signup code's HMAC key is what keeps a database breach from
+	// being brute-forced offline (ADR-015 "Signup and onboarding");
+	// the local-dev placeholder every deployment starts from must
+	// never reach production unreplaced.
+	if c.IsProduction() && (c.Auth.SignupCodeHMACKey == "" || c.Auth.SignupCodeHMACKey == insecureSignupCodeHMACKey) {
+		return errors.New("ARGUS_AUTH_SIGNUP_CODE_HMAC_KEY must be set outside local/test; the local-dev default must not run in production")
+	}
 	return nil
 }

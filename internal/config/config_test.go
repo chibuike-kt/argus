@@ -88,3 +88,24 @@ func TestValidate_ProductionRejectsNonHTTPSPublicBaseURL(t *testing.T) {
 		t.Fatal("Validate() with a non-https PublicBaseURL in production = nil, want an error")
 	}
 }
+
+// TestValidate_ProductionRejectsDefaultOrEmptySignupCodeHMACKey is
+// ADR-015 "Signup and onboarding"'s own test: the local-dev
+// placeholder (or an empty value) must never reach production, since
+// it is what keeps a database breach of signup_verifications from
+// being brute-forced offline.
+func TestValidate_ProductionRejectsDefaultOrEmptySignupCodeHMACKey(t *testing.T) {
+	for _, key := range []string{"", insecureSignupCodeHMACKey} {
+		c := validConfig("staging")
+		c.Auth.SignupCodeHMACKey = key
+		if err := c.Validate(); err == nil {
+			t.Fatalf("Validate() with SignupCodeHMACKey=%q in production = nil, want an error", key)
+		}
+	}
+
+	c := validConfig("staging")
+	c.Auth.SignupCodeHMACKey = "a-real-production-secret-not-the-placeholder"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() with a real SignupCodeHMACKey in production = %v, want nil", err)
+	}
+}

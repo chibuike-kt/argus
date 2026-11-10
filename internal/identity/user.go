@@ -23,14 +23,18 @@ const uniqueViolation = "23505"
 
 // User is the domain view of a users row.
 type User struct {
-	ID              int64
-	Email           string
-	EmailNormalized string
-	PasswordHash    string
-	EmailVerifiedAt *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	DisabledAt      *time.Time
+	ID                    int64
+	Email                 string
+	EmailNormalized       string
+	PasswordHash          string
+	EmailVerifiedAt       *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	DisabledAt            *time.Time
+	DisplayName           *string
+	TermsAcceptedAt       *time.Time
+	TermsVersion          *string
+	OnboardingCompletedAt *time.Time
 }
 
 // EmailVerified reports whether the account has completed email
@@ -40,10 +44,15 @@ func (u User) EmailVerified() bool { return u.EmailVerifiedAt != nil }
 // Disabled reports whether the account is disabled.
 func (u User) Disabled() bool { return u.DisabledAt != nil }
 
+// OnboardingCompleted reports whether the account has a display name
+// and at least one watchlist item recorded (ADR-015 "Signup and
+// onboarding").
+func (u User) OnboardingCompleted() bool { return u.OnboardingCompletedAt != nil }
+
 // NormalizeEmail is the one place "what counts as the same email
 // address" is decided: lowercased and trimmed. Used both to compute
-// email_normalized on registration and to look up an existing account,
-// so the two can never disagree.
+// email_normalized on account creation and to look up an existing
+// account, so the two can never disagree.
 func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
@@ -83,20 +92,57 @@ func (s *Store) WithTx(tx *sql.Tx) *Store {
 	return &Store{q: s.q.WithTx(tx)}
 }
 
-// Insert creates a new, unverified account. ErrAlreadyExists on a
-// duplicate email_normalized -- the unique index is the actual
+// InsertVerified creates a new account, already verified, with its
+// terms acceptance recorded (ADR-015: "no half accounts" -- signup
+// complete, the one caller, has already consumed a signup ticket that
+// only exists once the email's code was verified). ErrAlreadyExists on
+// a duplicate email_normalized -- the unique index is the actual
 // guarantee; this translates its violation into a sentinel the caller
 // can branch on without parsing a driver error string.
-func (s *Store) Insert(ctx context.Context, email, passwordHash string) (User, error) {
-	row, err := s.q.InsertUser(ctx, store.InsertUserParams{
+func (s *Store) InsertVerified(ctx context.Context, email, passwordHash string, verifiedAt, termsAcceptedAt time.Time, termsVersion string) (User, error) {
+	row, err := s.q.InsertVerifiedUser(ctx, store.InsertVerifiedUserParams{
 		Email: email, EmailNormalized: NormalizeEmail(email), PasswordHash: passwordHash,
+		EmailVerifiedAt: sql.NullTime{Time: verifiedAt, Valid: true},
+		TermsAcceptedAt: sql.NullTime{Time: termsAcceptedAt, Valid: true},
+		TermsVersion:    sql.NullString{String: termsVersion, Valid: true},
 	})
 	if err != nil {
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && pqErr.Code == uniqueViolation {
 			return User{}, ErrAlreadyExists
 		}
-		return User{}, fmt.Errorf("identity: insert user: %w", err)
+		return User{}, fmt.Errorf("identity: insert verified user: %w", err)
+	}
+	return fromRow(row), nil
+}
+
+// SetDisplayName sets name (already validated by the caller) on
+// userID's account.
+func (s *Store) SetDisplayName(ctx context.Context, userID int64, name string, now time.Time) (User, error) {
+	row, err := s.q.SetDisplayName(ctx, store.SetDisplayNameParams{
+		ID: userID, DisplayName: sql.NullString{String: name, Valid: true}, UpdatedAt: now,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return User{}, ErrNotFound
+		}
+		return User{}, fmt.Errorf("identity: set display name: %w", err)
+	}
+	return fromRow(row), nil
+}
+
+// MarkOnboardingCompleted sets onboarding_completed_at to now. The
+// caller (internal/identity/service) is responsible for having already
+// checked that userID has a display name and at least one watchlist
+// item -- this method does not check either (ADR-015: that check
+// belongs in one visible place in Go, not duplicated in SQL).
+func (s *Store) MarkOnboardingCompleted(ctx context.Context, userID int64, now time.Time) (User, error) {
+	row, err := s.q.MarkOnboardingCompleted(ctx, store.MarkOnboardingCompletedParams{ID: userID, OnboardingCompletedAt: sql.NullTime{Time: now, Valid: true}})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return User{}, ErrNotFound
+		}
+		return User{}, fmt.Errorf("identity: mark onboarding completed: %w", err)
 	}
 	return fromRow(row), nil
 }
@@ -165,6 +211,22 @@ func fromRow(row store.User) User {
 	if row.DisabledAt.Valid {
 		t := row.DisabledAt.Time
 		u.DisabledAt = &t
+	}
+	if row.DisplayName.Valid {
+		n := row.DisplayName.String
+		u.DisplayName = &n
+	}
+	if row.TermsAcceptedAt.Valid {
+		t := row.TermsAcceptedAt.Time
+		u.TermsAcceptedAt = &t
+	}
+	if row.TermsVersion.Valid {
+		v := row.TermsVersion.String
+		u.TermsVersion = &v
+	}
+	if row.OnboardingCompletedAt.Valid {
+		t := row.OnboardingCompletedAt.Time
+		u.OnboardingCompletedAt = &t
 	}
 	return u
 }

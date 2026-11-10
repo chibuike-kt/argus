@@ -10,78 +10,82 @@ import (
 	"github.com/chibuike-kt/argus/internal/identity/password"
 	"github.com/chibuike-kt/argus/internal/identity/service"
 	"github.com/chibuike-kt/argus/internal/identity/session"
-	"github.com/chibuike-kt/argus/internal/identity/tokens"
+	"github.com/chibuike-kt/argus/internal/identity/signupcode"
 )
 
 // authService is the boundary apiHandler needs from
 // internal/identity/service.Service -- the same consumer-defined-
 // interface pattern as setupsStore/instrumentsStore/candlesStore.
 type authService interface {
-	Register(ctx context.Context, email, pw, ip, userAgent string) error
-	VerifyEmail(ctx context.Context, token, ip, userAgent string) error
-	ResendVerification(ctx context.Context, email, ip, userAgent string) error
+	SignupStart(ctx context.Context, email string, acceptedTerms bool, ip, userAgent string) error
+	SignupVerify(ctx context.Context, email, code, ip, userAgent string) (ticket string, err error)
+	SignupComplete(ctx context.Context, ticket, pw, ip, userAgent string) (string, identity.User, error)
 	Login(ctx context.Context, email, pw, ip, userAgent string) (string, identity.User, error)
 	Logout(ctx context.Context, sessionID, userID int64, ip, userAgent string) error
 	LogoutAll(ctx context.Context, userID int64, ip, userAgent string) error
 	ListSessions(ctx context.Context, userID int64) ([]session.Session, error)
 	RevokeSession(ctx context.Context, sessionID, userID int64, ip, userAgent string) error
+	UpdateProfile(ctx context.Context, userID int64, displayName, ip, userAgent string) (identity.User, error)
+	CompleteOnboarding(ctx context.Context, userID int64, ip, userAgent string) (identity.User, error)
 }
 
 var _ authService = (*service.Service)(nil)
 
-func (h *apiHandler) AuthRegister(ctx context.Context, request AuthRegisterRequestObject) (AuthRegisterResponseObject, error) {
+func (h *apiHandler) AuthSignupStart(ctx context.Context, request AuthSignupStartRequestObject) (AuthSignupStartResponseObject, error) {
 	if request.Body == nil {
-		return AuthRegister400JSONResponse(apiError("invalid_argument", "request body is required")), nil
+		return AuthSignupStart400JSONResponse(apiError("invalid_argument", "request body is required")), nil
 	}
 	ip, userAgent := requestMeta(ctx)
-	err := h.auth.Register(ctx, string(request.Body.Email), request.Body.Password, ip, userAgent)
+	err := h.auth.SignupStart(ctx, string(request.Body.Email), request.Body.AcceptedTerms, ip, userAgent)
 	if err == nil {
-		return AuthRegister202JSONResponse{Status: "accepted"}, nil
+		return AuthSignupStart202JSONResponse{Status: "accepted"}, nil
+	}
+	if errors.Is(err, service.ErrTermsNotAccepted) {
+		return AuthSignupStart400JSONResponse(apiError("invalid_argument", err.Error())), nil
+	}
+	var rl *service.RateLimitedError
+	if errors.As(err, &rl) {
+		return AuthSignupStart429JSONResponse(apiError("rate_limited", rl.Error())), nil
+	}
+	h.logger.Error("httpapi: signup start", "error", err)
+	return nil, fmt.Errorf("signup start: %w", err)
+}
+
+func (h *apiHandler) AuthSignupVerify(ctx context.Context, request AuthSignupVerifyRequestObject) (AuthSignupVerifyResponseObject, error) {
+	if request.Body == nil {
+		return AuthSignupVerify400JSONResponse(apiError("invalid_argument", "request body is required")), nil
+	}
+	ip, userAgent := requestMeta(ctx)
+	ticket, err := h.auth.SignupVerify(ctx, string(request.Body.Email), request.Body.Code, ip, userAgent)
+	if err == nil {
+		return AuthSignupVerify200JSONResponse{Ticket: ticket}, nil
+	}
+	if errors.Is(err, signupcode.ErrInvalidCode) {
+		return AuthSignupVerify400JSONResponse(apiError("invalid_code", "the code is invalid, expired, unknown, or exhausted")), nil
+	}
+	h.logger.Error("httpapi: signup verify", "error", err)
+	return nil, fmt.Errorf("signup verify: %w", err)
+}
+
+func (h *apiHandler) AuthSignupComplete(ctx context.Context, request AuthSignupCompleteRequestObject) (AuthSignupCompleteResponseObject, error) {
+	if request.Body == nil {
+		return AuthSignupComplete400JSONResponse(apiError("invalid_argument", "request body is required")), nil
+	}
+	ip, userAgent := requestMeta(ctx)
+	rawToken, user, err := h.auth.SignupComplete(ctx, request.Body.Ticket, request.Body.Password, ip, userAgent)
+	if err == nil {
+		return authSignupCompleteResponse{user: toAuthUser(user), cookie: h.newSessionCookie(rawToken)}, nil
+	}
+	if errors.Is(err, signupcode.ErrInvalidTicket) {
+		return AuthSignupComplete400JSONResponse(apiError("invalid_ticket", "the ticket is invalid, expired, or already used")), nil
 	}
 	switch {
 	case errors.Is(err, password.ErrTooShort), errors.Is(err, password.ErrTooLong),
 		errors.Is(err, password.ErrCommon), errors.Is(err, password.ErrContainsEmail):
-		return AuthRegister400JSONResponse(apiError("invalid_argument", err.Error())), nil
+		return AuthSignupComplete400JSONResponse(apiError("invalid_argument", err.Error())), nil
 	}
-	var rl *service.RateLimitedError
-	if errors.As(err, &rl) {
-		return AuthRegister429JSONResponse(apiError("rate_limited", rl.Error())), nil
-	}
-	h.logger.Error("httpapi: register", "error", err)
-	return nil, fmt.Errorf("register: %w", err)
-}
-
-func (h *apiHandler) AuthVerifyEmail(ctx context.Context, request AuthVerifyEmailRequestObject) (AuthVerifyEmailResponseObject, error) {
-	if request.Body == nil {
-		return AuthVerifyEmail400JSONResponse(apiError("invalid_argument", "request body is required")), nil
-	}
-	ip, userAgent := requestMeta(ctx)
-	err := h.auth.VerifyEmail(ctx, request.Body.Token, ip, userAgent)
-	if err == nil {
-		return AuthVerifyEmail200JSONResponse{Status: "verified"}, nil
-	}
-	if errors.Is(err, tokens.ErrInvalid) {
-		return AuthVerifyEmail400JSONResponse(apiError("invalid_argument", "token is invalid, already used, or expired")), nil
-	}
-	h.logger.Error("httpapi: verify email", "error", err)
-	return nil, fmt.Errorf("verify email: %w", err)
-}
-
-func (h *apiHandler) AuthResendVerification(ctx context.Context, request AuthResendVerificationRequestObject) (AuthResendVerificationResponseObject, error) {
-	if request.Body == nil {
-		return nil, fmt.Errorf("resend verification: missing body")
-	}
-	ip, userAgent := requestMeta(ctx)
-	err := h.auth.ResendVerification(ctx, string(request.Body.Email), ip, userAgent)
-	if err == nil {
-		return AuthResendVerification202JSONResponse{Status: "accepted"}, nil
-	}
-	var rl *service.RateLimitedError
-	if errors.As(err, &rl) {
-		return AuthResendVerification429JSONResponse(apiError("rate_limited", rl.Error())), nil
-	}
-	h.logger.Error("httpapi: resend verification", "error", err)
-	return nil, fmt.Errorf("resend verification: %w", err)
+	h.logger.Error("httpapi: signup complete", "error", err)
+	return nil, fmt.Errorf("signup complete: %w", err)
 }
 
 func (h *apiHandler) AuthLogin(ctx context.Context, request AuthLoginRequestObject) (AuthLoginResponseObject, error) {
@@ -166,10 +170,12 @@ func (h *apiHandler) AuthRevokeSession(ctx context.Context, request AuthRevokeSe
 
 func toAuthUser(u identity.User) AuthUser {
 	return AuthUser{
-		Id:            u.ID,
-		Email:         u.Email,
-		EmailVerified: u.EmailVerified(),
-		CreatedAt:     u.CreatedAt,
+		Id:                  u.ID,
+		Email:               u.Email,
+		EmailVerified:       u.EmailVerified(),
+		CreatedAt:           u.CreatedAt,
+		DisplayName:         u.DisplayName,
+		OnboardingCompleted: u.OnboardingCompleted(),
 	}
 }
 
@@ -270,6 +276,20 @@ type authLoginResponse struct {
 func (r authLoginResponse) VisitAuthLoginResponse(w http.ResponseWriter) error {
 	http.SetCookie(w, r.cookie)
 	return AuthLogin200JSONResponse(r.user).VisitAuthLoginResponse(w)
+}
+
+// authSignupCompleteResponse is the signup-complete equivalent of
+// authLoginResponse -- same reason, same pattern: it logs the new
+// account in (ADR-015), so it needs the same Set-Cookie header the
+// generated Auth...JSONResponse type alias has no way to add.
+type authSignupCompleteResponse struct {
+	user   AuthUser
+	cookie *http.Cookie
+}
+
+func (r authSignupCompleteResponse) VisitAuthSignupCompleteResponse(w http.ResponseWriter) error {
+	http.SetCookie(w, r.cookie)
+	return AuthSignupComplete200JSONResponse(r.user).VisitAuthSignupCompleteResponse(w)
 }
 
 type authLogoutResponse struct {
