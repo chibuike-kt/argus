@@ -152,3 +152,65 @@ func TestIntegration_Replace_DisabledInstrument_Rejected(t *testing.T) {
 		t.Fatalf("Replace(disabled instrument) = %v, want ErrInstrumentDisabled", err)
 	}
 }
+
+// TestIntegration_Replace_DuplicateInstrument_RejectedAndPreviousListUnchanged
+// is architect review (of Part 2) item 4's own test: UNIQUE(user_id,
+// instrument_id) meant a duplicate id in the request failed on its
+// second INSERT -- after the DELETE had already run -- leaving the
+// user with an empty or partial list and a 500. Duplicates must be
+// rejected before anything is written, and the previous list must
+// still be there afterward.
+func TestIntegration_Replace_DuplicateInstrument_RejectedAndPreviousListUnchanged(t *testing.T) {
+	db := testDB(t)
+	store := NewStore(db, instruments.NewStore(db))
+	userID := testUser(t, db)
+	a := testInstrument(t, db, true)
+	b := testInstrument(t, db, true)
+
+	if _, err := store.Replace(context.Background(), userID, []int64{a}, 50); err != nil {
+		t.Fatalf("baseline Replace: %v", err)
+	}
+
+	if _, err := store.Replace(context.Background(), userID, []int64{b, b}, 50); !errors.Is(err, ErrDuplicateInstrument) {
+		t.Fatalf("Replace([b, b]) = %v, want ErrDuplicateInstrument", err)
+	}
+
+	items, err := store.List(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 || items[0].InstrumentID != a {
+		t.Fatalf("List after a rejected Replace = %+v, want the previous [{%d 0}] unchanged", items, a)
+	}
+}
+
+// TestIntegration_Replace_DisabledInstrument_LeavesPreviousListUnchanged
+// is the same "previous list survives a rejected Replace" property,
+// for the pre-existing disabled-instrument rejection -- both this and
+// the duplicate case above are now rejected before the transactional
+// delete+insert phase ever starts (architect review item 4), so
+// neither can ever leave a partial list; this is the deterministic,
+// non-flaky way to demonstrate that invariant for a case that does
+// not depend on timing or a forced mid-transaction failure.
+func TestIntegration_Replace_DisabledInstrument_LeavesPreviousListUnchanged(t *testing.T) {
+	db := testDB(t)
+	store := NewStore(db, instruments.NewStore(db))
+	userID := testUser(t, db)
+	a := testInstrument(t, db, true)
+	disabled := testInstrument(t, db, false)
+
+	if _, err := store.Replace(context.Background(), userID, []int64{a}, 50); err != nil {
+		t.Fatalf("baseline Replace: %v", err)
+	}
+	if _, err := store.Replace(context.Background(), userID, []int64{disabled}, 50); !errors.Is(err, ErrInstrumentDisabled) {
+		t.Fatalf("Replace(disabled instrument) = %v, want ErrInstrumentDisabled", err)
+	}
+
+	items, err := store.List(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 || items[0].InstrumentID != a {
+		t.Fatalf("List after a rejected Replace = %+v, want the previous [{%d 0}] unchanged", items, a)
+	}
+}

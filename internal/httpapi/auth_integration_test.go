@@ -504,6 +504,70 @@ func TestIntegration_Onboarding_ProfileAndWatchlistCompleteIt(t *testing.T) {
 	}
 }
 
+// TestIntegration_UpdateWatchlist_DuplicateAndOversizeRejected is
+// architect review (of Part 2) item 4's own HTTP-level test: a
+// duplicate instrument id returns 400 and leaves the previous list
+// untouched, and a list over WatchlistMaxItems (set to 2 here) also
+// returns 400 -- both confirmed at the handler, not just the store.
+func TestIntegration_UpdateWatchlist_DuplicateAndOversizeRejected(t *testing.T) {
+	policy := testAuthPolicy()
+	policy.WatchlistMaxItems = 2
+	srv := newAuthTestServer(t, policy)
+	email := testAuthEmail(t)
+	cookie := signupNewUser(t, srv, email, "a-perfectly-fine-password-1")
+	a := testEnabledInstrument(t, srv.db)
+	b := testEnabledInstrument(t, srv.db)
+	c := testEnabledInstrument(t, srv.db)
+
+	baseline := authJSONRequest(t, http.MethodPut, srv.URL+"/api/v1/watchlist", WatchlistUpdateRequest{InstrumentIds: []int64{a}})
+	baseline.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(baseline)
+	if err != nil {
+		t.Fatalf("baseline update watchlist: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("baseline update watchlist status = %d, want 200", resp.StatusCode)
+	}
+
+	dup := authJSONRequest(t, http.MethodPut, srv.URL+"/api/v1/watchlist", WatchlistUpdateRequest{InstrumentIds: []int64{b, b}})
+	dup.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(dup)
+	if err != nil {
+		t.Fatalf("duplicate update watchlist: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("update watchlist with a duplicate id status = %d, want 400", resp.StatusCode)
+	}
+
+	oversize := authJSONRequest(t, http.MethodPut, srv.URL+"/api/v1/watchlist", WatchlistUpdateRequest{InstrumentIds: []int64{a, b, c}})
+	oversize.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(oversize)
+	if err != nil {
+		t.Fatalf("oversize update watchlist: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("update watchlist over the cap (2) status = %d, want 400", resp.StatusCode)
+	}
+
+	getReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/watchlist", nil)
+	getReq.AddCookie(cookie)
+	resp, err = http.DefaultClient.Do(getReq)
+	if err != nil {
+		t.Fatalf("get watchlist: %v", err)
+	}
+	var items []WatchlistItem
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		t.Fatalf("decode get watchlist response: %v", err)
+	}
+	_ = resp.Body.Close()
+	if len(items) != 1 || items[0].InstrumentId != a {
+		t.Fatalf("watchlist after two rejected updates = %+v, want the baseline [{%d 0}] unchanged", items, a)
+	}
+}
+
 func TestIntegration_Login_WrongPassword_UnknownEmail_NeverCompleted_AllIdentical(t *testing.T) {
 	srv := newAuthTestServer(t, testAuthPolicy())
 	verifiedEmail := testAuthEmail(t)

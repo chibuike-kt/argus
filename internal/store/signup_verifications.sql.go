@@ -75,21 +75,88 @@ func (q *Queries) GetSignupVerificationByEmail(ctx context.Context, emailNormali
 	return i, err
 }
 
-const incrementSignupWrongGuesses = `-- name: IncrementSignupWrongGuesses :exec
-UPDATE signup_verifications SET wrong_guesses = wrong_guesses + 1
-WHERE email_normalized = $1
+const getSignupVerificationByTicket = `-- name: GetSignupVerificationByTicket :one
+SELECT id, email, email_normalized, code_hash, code_sent_at, code_expires_at, wrong_guesses, verified_at, ticket_hash, ticket_expires_at, ticket_used_at, terms_accepted_at, terms_version, created_at FROM signup_verifications WHERE ticket_hash = $1
 `
 
-func (q *Queries) IncrementSignupWrongGuesses(ctx context.Context, emailNormalized string) error {
-	_, err := q.db.ExecContext(ctx, incrementSignupWrongGuesses, emailNormalized)
-	return err
+// GetSignupVerificationByTicket is a read-only lookup by ticket hash
+// -- it does not consume the ticket (architect review of Part 2, item
+// 2): SignupComplete needs the row's email to validate the password
+// policy, and must be able to do that before committing to consuming
+// the ticket, so a rejected password never burns it.
+func (q *Queries) GetSignupVerificationByTicket(ctx context.Context, ticketHash sql.NullString) (SignupVerification, error) {
+	row := q.db.QueryRowContext(ctx, getSignupVerificationByTicket, ticketHash)
+	var i SignupVerification
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.EmailNormalized,
+		&i.CodeHash,
+		&i.CodeSentAt,
+		&i.CodeExpiresAt,
+		&i.WrongGuesses,
+		&i.VerifiedAt,
+		&i.TicketHash,
+		&i.TicketExpiresAt,
+		&i.TicketUsedAt,
+		&i.TermsAcceptedAt,
+		&i.TermsVersion,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const incrementSignupWrongGuessesIfEligible = `-- name: IncrementSignupWrongGuessesIfEligible :one
+UPDATE signup_verifications
+SET wrong_guesses = wrong_guesses + 1
+WHERE email_normalized = $1 AND verified_at IS NULL
+    AND code_expires_at > $2 AND wrong_guesses < $3
+RETURNING id, email, email_normalized, code_hash, code_sent_at, code_expires_at, wrong_guesses, verified_at, ticket_hash, ticket_expires_at, ticket_used_at, terms_accepted_at, terms_version, created_at
+`
+
+type IncrementSignupWrongGuessesIfEligibleParams struct {
+	EmailNormalized string    `json:"email_normalized"`
+	CodeExpiresAt   time.Time `json:"code_expires_at"`
+	WrongGuesses    int32     `json:"wrong_guesses"`
+}
+
+// IncrementSignupWrongGuessesIfEligible atomically claims one guess
+// against email_normalized's current code: it increments wrong_guesses
+// and returns the row in the same statement, but only if this attempt
+// is still eligible (not already verified, not expired, strictly under
+// max_wrong_guesses) BEFORE the increment -- one UPDATE, not a
+// separate read-then-increment pair (architect review of Part 2, item
+// 3): N concurrent requests reading the same pre-increment count and
+// all getting a guess is exactly the race this replaces. Zero rows
+// back means this attempt is rejected outright, before the code is
+// even compared -- the caller must not decrement or otherwise "give
+// back" the guess.
+func (q *Queries) IncrementSignupWrongGuessesIfEligible(ctx context.Context, arg IncrementSignupWrongGuessesIfEligibleParams) (SignupVerification, error) {
+	row := q.db.QueryRowContext(ctx, incrementSignupWrongGuessesIfEligible, arg.EmailNormalized, arg.CodeExpiresAt, arg.WrongGuesses)
+	var i SignupVerification
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.EmailNormalized,
+		&i.CodeHash,
+		&i.CodeSentAt,
+		&i.CodeExpiresAt,
+		&i.WrongGuesses,
+		&i.VerifiedAt,
+		&i.TicketHash,
+		&i.TicketExpiresAt,
+		&i.TicketUsedAt,
+		&i.TermsAcceptedAt,
+		&i.TermsVersion,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const markSignupVerified = `-- name: MarkSignupVerified :one
 UPDATE signup_verifications
 SET verified_at = $2, ticket_hash = $3, ticket_expires_at = $4
-WHERE email_normalized = $1 AND verified_at IS NULL
-    AND wrong_guesses < $5 AND code_expires_at > $6
+WHERE email_normalized = $1 AND verified_at IS NULL AND code_expires_at > $5
 RETURNING id, email, email_normalized, code_hash, code_sent_at, code_expires_at, wrong_guesses, verified_at, ticket_hash, ticket_expires_at, ticket_used_at, terms_accepted_at, terms_version, created_at
 `
 
@@ -98,26 +165,30 @@ type MarkSignupVerifiedParams struct {
 	VerifiedAt      sql.NullTime   `json:"verified_at"`
 	TicketHash      sql.NullString `json:"ticket_hash"`
 	TicketExpiresAt sql.NullTime   `json:"ticket_expires_at"`
-	WrongGuesses    int32          `json:"wrong_guesses"`
 	CodeExpiresAt   time.Time      `json:"code_expires_at"`
 }
 
 // MarkSignupVerified issues a ticket and atomically transitions the
 // row to verified, but only if it is still eligible (not already
-// verified, not expired, not exhausted) -- one UPDATE, not a separate
-// check-then-mark pair, so two concurrent correct submissions of the
-// same code can never both receive a valid ticket (the same single-
-// use-token race ConsumeEmailToken's own comment describes). Zero
-// rows back means the caller must treat this as a failed verification,
-// even though the code it already checked (in Go, before calling this)
-// was correct.
+// verified, not expired) -- one UPDATE, not a separate check-then-mark
+// pair, so two concurrent correct submissions of the same code can
+// never both receive a valid ticket (the same single-use-token race
+// ConsumeEmailToken's own comment describes). Zero rows back means the
+// caller must treat this as a failed verification, even though the
+// code it already checked (in Go, before calling this) was correct.
+// Does NOT re-check wrong_guesses (unlike an earlier version of this
+// query): IncrementSignupWrongGuessesIfEligible above already proved,
+// atomically, that the one attempt now being completed was allowed
+// before its own increment -- re-checking the post-increment count
+// here would let a legitimate, correctly-guessed final attempt (e.g.
+// the 5th, exactly at the limit) fail only because of its own guess
+// being counted.
 func (q *Queries) MarkSignupVerified(ctx context.Context, arg MarkSignupVerifiedParams) (SignupVerification, error) {
 	row := q.db.QueryRowContext(ctx, markSignupVerified,
 		arg.EmailNormalized,
 		arg.VerifiedAt,
 		arg.TicketHash,
 		arg.TicketExpiresAt,
-		arg.WrongGuesses,
 		arg.CodeExpiresAt,
 	)
 	var i SignupVerification

@@ -332,6 +332,85 @@ func TestIntegration_SignupVerifyAndComplete_HappyPathThenTicketSingleUse(t *tes
 	}
 }
 
+// TestIntegration_SignupComplete_WeakPassword_DoesNotBurnTicket is
+// architect review (of Part 2) item 2's own test: a password that
+// fails policy must not consume the ticket -- the same ticket then
+// succeeds once a valid password is given, with no new emailed code
+// needed.
+func TestIntegration_SignupComplete_WeakPassword_DoesNotBurnTicket(t *testing.T) {
+	ts := newTestService(t)
+	ctx := context.Background()
+	email := uniqueEmail(t)
+
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
+	}
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	ticket, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupVerify: %v", err)
+	}
+
+	if _, _, err := ts.SignupComplete(ctx, ticket, "too-short", "203.0.113.1", "test-agent"); !errors.Is(err, password.ErrTooShort) {
+		t.Fatalf("SignupComplete(weak password) = %v, want password.ErrTooShort", err)
+	}
+
+	_, user, err := ts.SignupComplete(ctx, ticket, testPassword, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupComplete(same ticket, good password) = %v, want nil (the weak-password attempt must not have burned the ticket)", err)
+	}
+	if user.Email != email {
+		t.Fatalf("user.Email = %q, want %q", user.Email, email)
+	}
+}
+
+// TestIntegration_SignupComplete_FailedInsert_LeavesTicketUsable is
+// architect review (of Part 2) item 2's own second test: forcing
+// InsertVerified to fail (a pre-existing row with the same
+// email_normalized, simulating the "insert fails for some other
+// reason" case) must roll back the ticket consumption too -- the
+// ticket is still usable once the obstruction is removed.
+func TestIntegration_SignupComplete_FailedInsert_LeavesTicketUsable(t *testing.T) {
+	ts := newTestService(t)
+	ctx := context.Background()
+	email := uniqueEmail(t)
+
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
+	}
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	ticket, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupVerify: %v", err)
+	}
+
+	// Obstruct the insert: a row already occupies this email_normalized.
+	normalized := identity.NormalizeEmail(email)
+	if _, err := ts.db.ExecContext(ctx, `
+		INSERT INTO users (email, email_normalized, password_hash, email_verified_at)
+		VALUES ($1, $1, 'x', now())`, normalized); err != nil {
+		t.Fatalf("seed obstructing user: %v", err)
+	}
+
+	if _, _, err := ts.SignupComplete(ctx, ticket, testPassword, "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidTicket) {
+		t.Fatalf("SignupComplete with an obstructed insert = %v, want signupcode.ErrInvalidTicket", err)
+	}
+
+	// Remove the obstruction and retry with the same ticket: it must
+	// still be usable, proving the failed insert rolled the ticket's
+	// consumption back rather than leaving it permanently burned.
+	if _, err := ts.db.ExecContext(ctx, `DELETE FROM users WHERE email_normalized = $1`, normalized); err != nil {
+		t.Fatalf("remove obstructing user: %v", err)
+	}
+	_, user, err := ts.SignupComplete(ctx, ticket, testPassword, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupComplete(same ticket, after removing the obstruction) = %v, want nil", err)
+	}
+	if user.Email != email {
+		t.Fatalf("user.Email = %q, want %q", user.Email, email)
+	}
+}
+
 func TestIntegration_SignupVerify_WrongCode_ExhaustsAfterMaxGuesses(t *testing.T) {
 	ts := newTestService(t)
 	email := uniqueEmail(t)
@@ -358,21 +437,90 @@ func TestIntegration_SignupVerify_WrongCode_ExhaustsAfterMaxGuesses(t *testing.T
 	}
 }
 
-func TestIntegration_SignupStart_ResendCooldown_RateLimited(t *testing.T) {
+// TestIntegration_SignupVerify_ConcurrentWrongGuesses_NeverExceedsMax
+// is architect review (of Part 2) item 3's own test: firing many
+// concurrent wrong guesses against one live code must still cap
+// wrong_guesses at the configured maximum -- a read-then-increment
+// race previously let every one of them "get a guess" regardless of
+// the limit.
+func TestIntegration_SignupVerify_ConcurrentWrongGuesses_NeverExceedsMax(t *testing.T) {
 	ts := newTestService(t)
-	ts.policy.SignupCodeResendCooldown = time.Hour
 	email := uniqueEmail(t)
 	ctx := context.Background()
 
 	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("first SignupStart: %v", err)
+		t.Fatalf("SignupStart: %v", err)
 	}
-	waitForMessages(t, ts.mail, email, 1)
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	wrongCode := "000000"
+	if wrongCode == code {
+		wrongCode = "111111"
+	}
 
-	var rl *RateLimitedError
-	err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent")
-	if !errors.As(err, &rl) {
-		t.Fatalf("second SignupStart within the resend cooldown = %v, want *RateLimitedError", err)
+	// Every one of these returns the same generic ErrInvalidCode
+	// whether this particular call actually claimed a guess (and
+	// compared it, wrongly) or was rejected outright for already being
+	// over the limit -- that genericness is deliberate (ADR-015), so
+	// the race this test is actually proving a fix for is checked
+	// directly on wrong_guesses below, not by distinguishing responses.
+	const concurrency = 50
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for range concurrency {
+		go func() {
+			defer wg.Done()
+			if _, err := ts.SignupVerify(ctx, email, wrongCode, "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidCode) {
+				t.Errorf("concurrent SignupVerify(wrong code) = %v, want signupcode.ErrInvalidCode", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	var wrongGuesses int
+	if err := ts.db.QueryRow(`SELECT wrong_guesses FROM signup_verifications WHERE email_normalized = $1`, identity.NormalizeEmail(email)).Scan(&wrongGuesses); err != nil {
+		t.Fatalf("query wrong_guesses: %v", err)
+	}
+	if wrongGuesses > ts.policy.SignupCodeMaxWrongGuesses {
+		t.Fatalf("wrong_guesses = %d after %d concurrent wrong guesses, want at most %d (the max) -- the attempt limit is not actually limiting anything under concurrency", wrongGuesses, concurrency, ts.policy.SignupCodeMaxWrongGuesses)
+	}
+
+	// The correct code now fails too: the limit is exhausted.
+	if _, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidCode) {
+		t.Fatalf("SignupVerify(correct code, after concurrent wrong guesses exhausted the limit) = %v, want signupcode.ErrInvalidCode", err)
+	}
+}
+
+// TestIntegration_SignupStart_ResendCooldown_NeverReturns429ForEitherEmail
+// is architect review (of Part 2) item 1's own test: a 60s cooldown
+// that 429s for a brand-new email but always 202s for an existing one
+// (which never reaches IssueCode at all) is itself an existence
+// oracle after exactly two calls. Both must return the identical
+// generic success.
+func TestIntegration_SignupStart_ResendCooldown_NeverReturns429ForEitherEmail(t *testing.T) {
+	ts := newTestService(t)
+	ts.policy.SignupCodeResendCooldown = time.Hour
+	ctx := context.Background()
+
+	newEmail := uniqueEmail(t)
+	if err := ts.SignupStart(ctx, newEmail, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("first SignupStart(new): %v", err)
+	}
+	waitForMessages(t, ts.mail, newEmail, 1)
+
+	existingEmail := uniqueEmail(t)
+	signupNewUser(t, ts, existingEmail, testPassword)
+
+	if err := ts.SignupStart(ctx, newEmail, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("second SignupStart(new, within cooldown) = %v, want nil (same generic success as an existing email)", err)
+	}
+	if err := ts.SignupStart(ctx, existingEmail, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("second SignupStart(existing) = %v, want nil", err)
+	}
+
+	// No second code was sent for the new email -- the cooldown means
+	// nothing new went out, not just that the response looked the same.
+	if msgs := ts.mail.messagesTo(newEmail); len(msgs) != 1 {
+		t.Fatalf("got %d messages to the new email after the cooldown call, want still 1 (no new code issued)", len(msgs))
 	}
 }
 

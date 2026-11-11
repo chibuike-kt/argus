@@ -110,6 +110,12 @@ type Querier interface {
 	GetSetupByID(ctx context.Context, id int64) (Setup, error)
 	GetSetupByIdentity(ctx context.Context, arg GetSetupByIdentityParams) (Setup, error)
 	GetSignupVerificationByEmail(ctx context.Context, emailNormalized string) (SignupVerification, error)
+	// GetSignupVerificationByTicket is a read-only lookup by ticket hash
+	// -- it does not consume the ticket (architect review of Part 2, item
+	// 2): SignupComplete needs the row's email to validate the password
+	// policy, and must be able to do that before committing to consuming
+	// the ticket, so a rejected password never burns it.
+	GetSignupVerificationByTicket(ctx context.Context, ticketHash sql.NullString) (SignupVerification, error)
 	GetStructureState(ctx context.Context, arg GetStructureStateParams) (StructureState, error)
 	// GetSwingByID looks up a swing directly by id, regardless of whether it
 	// is current or superseded -- used to resolve a structure_state
@@ -118,7 +124,18 @@ type Querier interface {
 	GetSwingByID(ctx context.Context, id int64) (ConfirmedSwing, error)
 	GetUserByEmailNormalized(ctx context.Context, emailNormalized string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
-	IncrementSignupWrongGuesses(ctx context.Context, emailNormalized string) error
+	// IncrementSignupWrongGuessesIfEligible atomically claims one guess
+	// against email_normalized's current code: it increments wrong_guesses
+	// and returns the row in the same statement, but only if this attempt
+	// is still eligible (not already verified, not expired, strictly under
+	// max_wrong_guesses) BEFORE the increment -- one UPDATE, not a
+	// separate read-then-increment pair (architect review of Part 2, item
+	// 3): N concurrent requests reading the same pre-increment count and
+	// all getting a guess is exactly the race this replaces. Zero rows
+	// back means this attempt is rejected outright, before the code is
+	// even compared -- the caller must not decrement or otherwise "give
+	// back" the guess.
+	IncrementSignupWrongGuessesIfEligible(ctx context.Context, arg IncrementSignupWrongGuessesIfEligibleParams) (SignupVerification, error)
 	InsertAuthEvent(ctx context.Context, arg InsertAuthEventParams) error
 	InsertCorrectingCandle(ctx context.Context, arg InsertCorrectingCandleParams) (Candle, error)
 	InsertEmailToken(ctx context.Context, arg InsertEmailTokenParams) (EmailToken, error)
@@ -346,13 +363,19 @@ type Querier interface {
 	MarkOnboardingCompleted(ctx context.Context, arg MarkOnboardingCompletedParams) (User, error)
 	// MarkSignupVerified issues a ticket and atomically transitions the
 	// row to verified, but only if it is still eligible (not already
-	// verified, not expired, not exhausted) -- one UPDATE, not a separate
-	// check-then-mark pair, so two concurrent correct submissions of the
-	// same code can never both receive a valid ticket (the same single-
-	// use-token race ConsumeEmailToken's own comment describes). Zero
-	// rows back means the caller must treat this as a failed verification,
-	// even though the code it already checked (in Go, before calling this)
-	// was correct.
+	// verified, not expired) -- one UPDATE, not a separate check-then-mark
+	// pair, so two concurrent correct submissions of the same code can
+	// never both receive a valid ticket (the same single-use-token race
+	// ConsumeEmailToken's own comment describes). Zero rows back means the
+	// caller must treat this as a failed verification, even though the
+	// code it already checked (in Go, before calling this) was correct.
+	// Does NOT re-check wrong_guesses (unlike an earlier version of this
+	// query): IncrementSignupWrongGuessesIfEligible above already proved,
+	// atomically, that the one attempt now being completed was allowed
+	// before its own increment -- re-checking the post-increment count
+	// here would let a legitimate, correctly-guessed final attempt (e.g.
+	// the 5th, exactly at the limit) fail only because of its own guess
+	// being counted.
 	MarkSignupVerified(ctx context.Context, arg MarkSignupVerifiedParams) (SignupVerification, error)
 	// RecordCandleGap is idempotent: detecting the same gap twice (a retried
 	// or duplicate-delivered detection event) must not create a second row or

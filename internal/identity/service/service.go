@@ -176,13 +176,19 @@ func (s *Service) SignupStart(ctx context.Context, rawEmail string, acceptedTerm
 	if err != nil {
 		var tooSoon *signupcode.TooSoonError
 		if errors.As(err, &tooSoon) {
-			// The 60s resend cooldown only ever fires for an email that
-			// already has a signup in progress (an existing account's
-			// email never reaches IssueCode at all -- see the branch
-			// above), so unlike the per-email send limit, surfacing
-			// this as 429 discloses nothing about whether any email has
-			// an account.
-			return &RateLimitedError{RetryAfter: tooSoon.RetryAfter}
+			// Architect review (of Part 2) item 1: this WAS mapped to
+			// 429, on the reasoning that the cooldown only ever fires
+			// for an email with a signup already in progress, and an
+			// existing account's email never reaches IssueCode at all.
+			// That reasoning was wrong -- it is exactly the asymmetry
+			// that makes it an oracle: call start twice within 60s and
+			// a new email 429s on the second call while an existing
+			// one always 202s, so the two are distinguishable after
+			// exactly two requests. No new code is issued or sent; the
+			// response is the same silent generic success the per-
+			// email send limit above already uses.
+			s.recordEvent(ctx, nil, "signup_start", ip, userAgent, map[string]any{"outcome": "resend_cooldown"})
+			return nil
 		}
 		return fmt.Errorf("service: signup start: issue code: %w", err)
 	}
@@ -254,7 +260,43 @@ func (s *Service) SignupVerify(ctx context.Context, rawEmail, code, ip, userAgen
 // and only place a users row is created for this flow). On success,
 // logs the new account in, the same as Login.
 func (s *Service) SignupComplete(ctx context.Context, rawTicket, rawPassword, ip, userAgent string) (rawSessionToken string, user identity.User, err error) {
-	verification, err := s.signup.ConsumeTicket(ctx, rawTicket)
+	// Architect review (of Part 2) item 2: this used to consume the
+	// ticket first, then validate the password -- a weak password (or
+	// any other failure past this point) left the ticket already
+	// spent, forcing the user back to a brand new emailed code even
+	// though nothing about the code/ticket itself was wrong. Read-only
+	// lookup first, so a rejected password never burns the ticket.
+	verification, err := s.signup.GetByTicket(ctx, rawTicket)
+	if err != nil {
+		if errors.Is(err, signupcode.ErrInvalidTicket) {
+			return "", identity.User{}, err
+		}
+		return "", identity.User{}, fmt.Errorf("service: signup complete: get ticket: %w", err)
+	}
+
+	if err := password.ValidatePolicy(rawPassword, identity.LocalPart(verification.Email)); err != nil {
+		return "", identity.User{}, err
+	}
+
+	// Hashed before the transaction below opens: Argon2's own cost must
+	// not hold a database transaction open for as long as the hash
+	// takes (architect review item 2).
+	hash, err := s.hasher.Hash(ctx, rawPassword)
+	if err != nil {
+		return "", identity.User{}, fmt.Errorf("service: signup complete: hash password: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", identity.User{}, fmt.Errorf("service: signup complete: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Consuming the ticket and creating the user share one transaction
+	// (architect review item 2): a failed insert now rolls the
+	// ticket's consumption back too, instead of permanently burning it
+	// for a failure that had nothing to do with the code/ticket.
+	consumed, err := s.signup.WithTx(tx).ConsumeTicket(ctx, rawTicket)
 	if err != nil {
 		if errors.Is(err, signupcode.ErrInvalidTicket) {
 			return "", identity.User{}, err
@@ -262,23 +304,28 @@ func (s *Service) SignupComplete(ctx context.Context, rawTicket, rawPassword, ip
 		return "", identity.User{}, fmt.Errorf("service: signup complete: consume ticket: %w", err)
 	}
 
-	if err := password.ValidatePolicy(rawPassword, identity.LocalPart(verification.Email)); err != nil {
-		return "", identity.User{}, err
-	}
-	hash, err := s.hasher.Hash(ctx, rawPassword)
+	now := s.clk.Now()
+	user, err = s.users.WithTx(tx).InsertVerified(ctx, consumed.Email, hash, now, consumed.TermsAcceptedAt, consumed.TermsVersion)
 	if err != nil {
-		return "", identity.User{}, fmt.Errorf("service: signup complete: hash password: %w", err)
+		if errors.Is(err, identity.ErrAlreadyExists) {
+			// Architect review item 5: a user can run start/verify/
+			// complete in one tab while a second tab does the same for
+			// the same email with its own, separately issued ticket --
+			// each ticket is bound to its own signup_verifications row
+			// (ADR-015), so both can reach here, and only one Insert
+			// wins the email_normalized unique constraint. The loser's
+			// ticket is still consumed (rolled back below along with
+			// the rest of this transaction) -- mapped to the same
+			// generic invalid_ticket the HTTP layer already uses for
+			// every other ticket failure, never a 500, and never
+			// disclosing that the email now belongs to an account.
+			return "", identity.User{}, signupcode.ErrInvalidTicket
+		}
+		return "", identity.User{}, fmt.Errorf("service: signup complete: insert user: %w", err)
 	}
 
-	now := s.clk.Now()
-	user, err = s.users.InsertVerified(ctx, verification.Email, hash, now, verification.TermsAcceptedAt, verification.TermsVersion)
-	if err != nil {
-		// ADR-015's own "no half accounts" invariant, plus the ticket's
-		// single-use/email-bound atomicity (signupcode.Store.ConsumeTicket),
-		// make a duplicate-email race here structurally unreachable --
-		// flagged, not engineered around with speculative handling for
-		// a case that cannot occur (guide 17).
-		return "", identity.User{}, fmt.Errorf("service: signup complete: insert user: %w", err)
+	if err := tx.Commit(); err != nil {
+		return "", identity.User{}, fmt.Errorf("service: signup complete: commit: %w", err)
 	}
 
 	token, _, err := s.sessions.Create(ctx, user.ID, userAgent, ip)

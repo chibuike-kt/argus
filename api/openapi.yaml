@@ -288,9 +288,12 @@ paths:
         identical generic body and equal timing whether the email is
         new or already registered -- for an existing account this
         sends a notice instead of a code, and the notice itself is
-        skipped silently (never a 429) if the per-account hourly limit
-        is already spent, so that limit can never disclose that the
-        account exists either. Requires accepted_terms: true.
+        skipped silently (never a 429) if the per-email hourly limit
+        is already spent; a new email within its own 60s resend
+        cooldown gets the same silent 202 with nothing re-sent, so
+        that limit can never disclose that the account exists either.
+        429 is only ever the per-IP limit. Requires accepted_terms:
+        true.
       requestBody:
         required: true
         content:

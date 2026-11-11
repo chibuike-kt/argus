@@ -40,6 +40,7 @@ func (h *apiHandler) UpdateWatchlist(ctx context.Context, request UpdateWatchlis
 	}
 	switch {
 	case errors.Is(err, watchlist.ErrTooManyItems),
+		errors.Is(err, watchlist.ErrDuplicateInstrument),
 		errors.Is(err, watchlist.ErrInstrumentNotFound),
 		errors.Is(err, watchlist.ErrInstrumentDisabled):
 		return UpdateWatchlist400JSONResponse(apiError("invalid_argument", err.Error())), nil

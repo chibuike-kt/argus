@@ -78,6 +78,14 @@ func NewStore(db store.DBTX, clk clock.Clock, hmacKey string) *Store {
 	return &Store{q: store.New(db), clk: clk, hmacKey: []byte(hmacKey)}
 }
 
+// WithTx returns a Store bound to tx -- SignupComplete's own atomic
+// consume-ticket-then-insert-user transaction (architect review of
+// Part 2, item 2) needs ConsumeTicket to run against the same tx as
+// identity.Store's InsertVerified, not its own separate connection.
+func (s *Store) WithTx(tx *sql.Tx) *Store {
+	return &Store{q: s.q.WithTx(tx), clk: s.clk, hmacKey: s.hmacKey}
+}
+
 // IssueCode starts or restarts a signup for email: a fresh 6-digit
 // code, replacing whatever was live before, unless the previous code
 // was sent less than cooldown ago (*TooSoonError). termsAcceptedAt/
@@ -119,28 +127,41 @@ func (s *Store) IssueCode(ctx context.Context, email string, cooldown, ttl time.
 // VerifyCode checks rawCode against whatever is currently live for
 // email and, on a match, returns a fresh single-use ticket valid for
 // ticketTTL. ErrInvalidCode for every failure (see its own doc
-// comment); a wrong code increments the row's wrong_guesses, best
-// effort, so repeated failures eventually exhaust it even if this
-// particular increment call itself fails.
+// comment).
+//
+// Architect review (of Part 2) item 3: this used to read
+// wrong_guesses, compare, and only then increment in a separate
+// statement -- N concurrent requests all read the same pre-increment
+// count and all got a guess, so the limit did not actually limit
+// anything under concurrency. Every attempt now claims its guess
+// atomically first (IncrementSignupWrongGuessesIfEligible), and the
+// code is compared only if that claim succeeds; a correct guess is
+// not given back, so wrong_guesses also counts the one successful
+// guess, if any, once the row is verified -- a column named
+// "wrong_guesses" that also counts a single right one is a minor
+// semantic imprecision, accepted here rather than renaming the column
+// (out of scope for this review; the 5-guess limit itself is
+// unchanged either way).
 func (s *Store) VerifyCode(ctx context.Context, email, rawCode string, maxWrongGuesses int, ticketTTL time.Duration) (rawTicket string, err error) {
 	emailNormalized := normalizeEmail(email)
 	now := s.clk.Now()
 
-	row, err := s.q.GetSignupVerificationByEmail(ctx, emailNormalized)
+	row, err := s.q.IncrementSignupWrongGuessesIfEligible(ctx, store.IncrementSignupWrongGuessesIfEligibleParams{
+		EmailNormalized: emailNormalized,
+		CodeExpiresAt:   now,
+		WrongGuesses:    int32(maxWrongGuesses), //nolint:gosec // a small config policy value (ADR-015 default: 5), never user input
+	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			// Not eligible even before comparing the code: unknown
+			// email, already verified, expired, or already exhausted
+			// -- the same generic failure, never distinguished.
 			return "", ErrInvalidCode
 		}
-		return "", fmt.Errorf("signupcode: verify code: look up: %w", err)
-	}
-	if row.VerifiedAt.Valid || now.After(row.CodeExpiresAt) || int(row.WrongGuesses) >= maxWrongGuesses {
-		return "", ErrInvalidCode
+		return "", fmt.Errorf("signupcode: verify code: claim attempt: %w", err)
 	}
 
 	if !hmac.Equal([]byte(s.hashCode(rawCode)), []byte(row.CodeHash)) {
-		if ierr := s.q.IncrementSignupWrongGuesses(ctx, emailNormalized); ierr != nil {
-			return "", fmt.Errorf("signupcode: verify code: increment wrong guesses: %w", ierr)
-		}
 		return "", ErrInvalidCode
 	}
 
@@ -153,12 +174,11 @@ func (s *Store) VerifyCode(ctx context.Context, email, rawCode string, maxWrongG
 		VerifiedAt:      sql.NullTime{Time: now, Valid: true},
 		TicketHash:      sql.NullString{String: hashTicket(rawTicket), Valid: true},
 		TicketExpiresAt: sql.NullTime{Time: now.Add(ticketTTL), Valid: true},
-		WrongGuesses:    int32(maxWrongGuesses), //nolint:gosec // a small config policy value (ADR-015 default: 5), never user input
 		CodeExpiresAt:   now,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// Row state changed between the read above and this
+			// Row state changed between the claim above and this
 			// atomic transition (a concurrent verify already won, or
 			// the code expired in between) -- the same generic
 			// failure, not a different one (ADR-015).
@@ -167,6 +187,31 @@ func (s *Store) VerifyCode(ctx context.Context, email, rawCode string, maxWrongG
 		return "", fmt.Errorf("signupcode: verify code: mark verified: %w", err)
 	}
 	return rawTicket, nil
+}
+
+// GetByTicket returns the signup rawTicket belongs to, without
+// consuming it (architect review of Part 2, item 2): SignupComplete
+// needs this to validate the password policy against the right email
+// before it commits to consuming the ticket, so a rejected password
+// never burns it. ErrInvalidTicket for "does not exist", "already
+// used" and "expired" alike, the same as ConsumeTicket.
+func (s *Store) GetByTicket(ctx context.Context, rawTicket string) (Verification, error) {
+	row, err := s.q.GetSignupVerificationByTicket(ctx, sql.NullString{String: hashTicket(rawTicket), Valid: true})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Verification{}, ErrInvalidTicket
+		}
+		return Verification{}, fmt.Errorf("signupcode: get by ticket: %w", err)
+	}
+	if row.TicketUsedAt.Valid || !row.TicketExpiresAt.Valid || s.clk.Now().After(row.TicketExpiresAt.Time) {
+		return Verification{}, ErrInvalidTicket
+	}
+	return Verification{
+		Email:           row.Email,
+		EmailNormalized: row.EmailNormalized,
+		TermsAcceptedAt: row.TermsAcceptedAt,
+		TermsVersion:    row.TermsVersion,
+	}, nil
 }
 
 // ConsumeTicket marks rawTicket used and returns the signup it
