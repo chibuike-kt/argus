@@ -705,6 +705,57 @@ Whether it should still be evaluated for `triggered` after its POI is superseded
 evaluate a plan for a POI that is no longer current, which sections 12 to 14 do not define. `[U]`
 Left open on purpose; do not implement or guess.
 
+## 16. Setup outcomes (simulation rules, V1)
+
+_Provenance: [S] finalized candles only, point in time, append only, one module for backtest and paper trading (ADR-011, ADR-019, coding standard); [R] every rule below, approved by the product owner on 11 November 2026; [U] expiry, real cost models, partial exits._
+
+An outcome says what a finalized candle history shows happened to a proposed plan. It is computed only
+from finalized candles with `close_time <= asOf`, never from a forming candle. Outcomes are append only
+and carry the rules version and the candle revision they were computed from. Prices and sizes are exact
+decimals, never floats. R multiples are exact and are shown to two decimals, rounded half away from
+zero. One outcome module serves both the backtest and paper trading, so the two cannot disagree.
+
+Terms (bullish; bearish mirrors): `entry`, `stop`, ordered `targets` come from the trade plan
+(section 14). `tick` is the instrument's price tick.
+
+Fill:
+- The setup status `triggered` (section 14) is unchanged. It is a touch of the entry.
+- A simulated fill requires a finalized candle after the plan was proposed that trades through the
+  entry by at least one tick: bullish, `low <= entry - tick`; bearish, `high >= entry + tick`. [R]
+- The fill price is the entry price. No price improvement is credited when a candle gaps through the
+  entry. [R] (Correction after approval: the proposal text said "fill at the open", which for a limit
+  order would credit a better price than the plan's own entry and inflate R. The conservative rule is
+  fill at the entry.)
+- If the plan is invalidated before the fill candle, the outcome is `never_filled_invalidated`. No
+  trade happened and no loss is recorded. [R]
+
+After the fill:
+- On the fill candle, if the stop level is reached (bullish `low <= stop`), the outcome is `stopped`.
+  Otherwise no target is credited on the fill candle, because the order of events inside the candle
+  is unknown. Targets count from the next candle on. [R]
+- On a later candle, if both the stop and any target are reached, the stop is taken first and the
+  outcome is flagged `ambiguous_resolved_as_stop`. Lower timeframe resolution is not part of V1. [R]
+- Each target is recorded as its own fact, with the candle that first reached it. Tracking for later
+  targets ends at the first candle that reaches the stop level, or at the end of the data. [R]
+- Headline result: `target_1_before_stop` is a win. `stopped` is a loss of exactly 1R in the gross
+  figure. For the R figure, the whole position is assumed closed at the first target, so a win at
+  target i is the plan's R:R for that target. No partial exits, no stop moves (ADR-014). [R]
+- Setups with a fill and no stop or target reached by the end of the data are `open`. [R]
+
+Costs:
+- The headline figure is gross R, labelled "before costs". Stops are assumed to fill at the stop
+  price. No fees, funding, spread or slippage are modelled in V1. [R]
+- Reports include a cost sensitivity table at round trip costs of 5, 10 and 20 basis points of the
+  entry price, labelled illustrative, not measured. [R]
+
+Exclusions and reporting:
+- `never_filled`, `never_filled_invalidated` and `open` are excluded from win rate and reported with
+  their counts, because the share that never fills is itself a measure of POI quality. No expiry is
+  invented here. [R]
+- Every report states: period and instruments, rules version, gross versus cost adjusted, count of
+  `ambiguous_resolved_as_stop`, counts of never filled and open, and the sample size per bucket. A
+  small sample is labelled as such. No result is presented as a forecast. [R]
+
 ## Scope of this version
 
 In scope: single instrument, single timeframe. Batch 1: swing detection, structural
