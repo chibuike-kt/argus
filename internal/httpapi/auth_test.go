@@ -13,6 +13,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/identity"
 	"github.com/chibuike-kt/argus/internal/identity/service"
 	"github.com/chibuike-kt/argus/internal/identity/session"
+	"github.com/chibuike-kt/argus/internal/identity/signupcode"
 )
 
 // fakeAuthService is a hand-written fake implementing authService --
@@ -20,7 +21,14 @@ import (
 // apiHandler's own error-mapping and cookie-setting logic can be unit
 // tested with no database or Redis at all.
 type fakeAuthService struct {
-	registerErr error
+	signupStartErr error
+
+	signupVerifyTicket string
+	signupVerifyErr    error
+
+	signupCompleteToken string
+	signupCompleteUser  identity.User
+	signupCompleteErr   error
 
 	loginToken string
 	loginUser  identity.User
@@ -33,14 +41,22 @@ type fakeAuthService struct {
 	revokeErr     error
 	gotRevokeID   int64
 	gotRevokeUser int64
+
+	updateProfileUser identity.User
+	updateProfileErr  error
+
+	completeOnboardingUser identity.User
+	completeOnboardingErr  error
 }
 
-func (f *fakeAuthService) Register(context.Context, string, string, string, string) error {
-	return f.registerErr
+func (f *fakeAuthService) SignupStart(context.Context, string, bool, string, string) error {
+	return f.signupStartErr
 }
-func (f *fakeAuthService) VerifyEmail(context.Context, string, string, string) error { return nil }
-func (f *fakeAuthService) ResendVerification(context.Context, string, string, string) error {
-	return nil
+func (f *fakeAuthService) SignupVerify(context.Context, string, string, string, string) (string, error) {
+	return f.signupVerifyTicket, f.signupVerifyErr
+}
+func (f *fakeAuthService) SignupComplete(context.Context, string, string, string, string) (string, identity.User, error) {
+	return f.signupCompleteToken, f.signupCompleteUser, f.signupCompleteErr
 }
 func (f *fakeAuthService) Login(context.Context, string, string, string, string) (string, identity.User, error) {
 	return f.loginToken, f.loginUser, f.loginErr
@@ -57,6 +73,12 @@ func (f *fakeAuthService) ListSessions(context.Context, int64) ([]session.Sessio
 func (f *fakeAuthService) RevokeSession(_ context.Context, sessionID, userID int64, _, _ string) error {
 	f.gotRevokeID, f.gotRevokeUser = sessionID, userID
 	return f.revokeErr
+}
+func (f *fakeAuthService) UpdateProfile(context.Context, int64, string, string, string) (identity.User, error) {
+	return f.updateProfileUser, f.updateProfileErr
+}
+func (f *fakeAuthService) CompleteOnboarding(context.Context, int64, string, string) (identity.User, error) {
+	return f.completeOnboardingUser, f.completeOnboardingErr
 }
 
 func newTestHandler(auth authService) *apiHandler {
@@ -223,27 +245,142 @@ func TestAuthMe_ReturnsContextUser(t *testing.T) {
 	}
 }
 
-func TestAuthRegister_RateLimited_Maps429(t *testing.T) {
-	h := newTestHandler(&fakeAuthService{registerErr: &service.RateLimitedError{RetryAfter: time.Minute}})
+func TestAuthSignupStart_Success_Maps202(t *testing.T) {
+	h := newTestHandler(&fakeAuthService{})
 
-	resp, err := h.AuthRegister(context.Background(), AuthRegisterRequestObject{
-		Body: &AuthRegisterJSONRequestBody{Email: openapi_types.Email("a@example.com"), Password: "whatever-12345"},
+	resp, err := h.AuthSignupStart(context.Background(), AuthSignupStartRequestObject{
+		Body: &AuthSignupStartJSONRequestBody{Email: openapi_types.Email("a@example.com"), AcceptedTerms: true},
 	})
 	if err != nil {
-		t.Fatalf("AuthRegister: %v", err)
+		t.Fatalf("AuthSignupStart: %v", err)
 	}
-	if _, ok := resp.(AuthRegister429JSONResponse); !ok {
-		t.Fatalf("AuthRegister returned %T, want AuthRegister429JSONResponse", resp)
+	if _, ok := resp.(AuthSignupStart202JSONResponse); !ok {
+		t.Fatalf("AuthSignupStart returned %T, want AuthSignupStart202JSONResponse", resp)
 	}
 }
 
-func TestAuthRegister_UnexpectedError_IsNotSwallowed(t *testing.T) {
-	h := newTestHandler(&fakeAuthService{registerErr: errors.New("boom")})
+func TestAuthSignupStart_TermsNotAccepted_Maps400(t *testing.T) {
+	h := newTestHandler(&fakeAuthService{signupStartErr: service.ErrTermsNotAccepted})
 
-	_, err := h.AuthRegister(context.Background(), AuthRegisterRequestObject{
-		Body: &AuthRegisterJSONRequestBody{Email: openapi_types.Email("a@example.com"), Password: "whatever-12345"},
+	resp, err := h.AuthSignupStart(context.Background(), AuthSignupStartRequestObject{
+		Body: &AuthSignupStartJSONRequestBody{Email: openapi_types.Email("a@example.com"), AcceptedTerms: false},
+	})
+	if err != nil {
+		t.Fatalf("AuthSignupStart: %v", err)
+	}
+	if _, ok := resp.(AuthSignupStart400JSONResponse); !ok {
+		t.Fatalf("AuthSignupStart returned %T, want AuthSignupStart400JSONResponse", resp)
+	}
+}
+
+func TestAuthSignupStart_RateLimited_Maps429(t *testing.T) {
+	h := newTestHandler(&fakeAuthService{signupStartErr: &service.RateLimitedError{RetryAfter: time.Minute}})
+
+	resp, err := h.AuthSignupStart(context.Background(), AuthSignupStartRequestObject{
+		Body: &AuthSignupStartJSONRequestBody{Email: openapi_types.Email("a@example.com"), AcceptedTerms: true},
+	})
+	if err != nil {
+		t.Fatalf("AuthSignupStart: %v", err)
+	}
+	if _, ok := resp.(AuthSignupStart429JSONResponse); !ok {
+		t.Fatalf("AuthSignupStart returned %T, want AuthSignupStart429JSONResponse", resp)
+	}
+}
+
+func TestAuthSignupStart_UnexpectedError_IsNotSwallowed(t *testing.T) {
+	h := newTestHandler(&fakeAuthService{signupStartErr: errors.New("boom")})
+
+	_, err := h.AuthSignupStart(context.Background(), AuthSignupStartRequestObject{
+		Body: &AuthSignupStartJSONRequestBody{Email: openapi_types.Email("a@example.com"), AcceptedTerms: true},
 	})
 	if err == nil {
-		t.Fatal("AuthRegister swallowed an unexpected error, want it returned so ResponseErrorHandlerFunc maps it to 500")
+		t.Fatal("AuthSignupStart swallowed an unexpected error, want it returned so ResponseErrorHandlerFunc maps it to 500")
+	}
+}
+
+func TestAuthSignupVerify_Success_ReturnsTicket(t *testing.T) {
+	h := newTestHandler(&fakeAuthService{signupVerifyTicket: "the-ticket"})
+
+	resp, err := h.AuthSignupVerify(context.Background(), AuthSignupVerifyRequestObject{
+		Body: &AuthSignupVerifyJSONRequestBody{Email: openapi_types.Email("a@example.com"), Code: "123456"},
+	})
+	if err != nil {
+		t.Fatalf("AuthSignupVerify: %v", err)
+	}
+	verifyResp, ok := resp.(AuthSignupVerify200JSONResponse)
+	if !ok {
+		t.Fatalf("AuthSignupVerify returned %T, want AuthSignupVerify200JSONResponse", resp)
+	}
+	if verifyResp.Ticket != "the-ticket" {
+		t.Fatalf("Ticket = %q, want %q", verifyResp.Ticket, "the-ticket")
+	}
+}
+
+func TestAuthSignupVerify_InvalidCode_MapsGeneric400(t *testing.T) {
+	h := newTestHandler(&fakeAuthService{signupVerifyErr: signupcode.ErrInvalidCode})
+
+	resp, err := h.AuthSignupVerify(context.Background(), AuthSignupVerifyRequestObject{
+		Body: &AuthSignupVerifyJSONRequestBody{Email: openapi_types.Email("a@example.com"), Code: "000000"},
+	})
+	if err != nil {
+		t.Fatalf("AuthSignupVerify: %v", err)
+	}
+	errResp, ok := resp.(AuthSignupVerify400JSONResponse)
+	if !ok {
+		t.Fatalf("AuthSignupVerify returned %T, want AuthSignupVerify400JSONResponse", resp)
+	}
+	if errResp.Error.Code != "invalid_code" {
+		t.Fatalf("error code = %q, want invalid_code", errResp.Error.Code)
+	}
+}
+
+func TestAuthSignupComplete_Success_SetsCookieAndReturnsUser(t *testing.T) {
+	user := identity.User{ID: 7, Email: "a@example.com", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	h := newTestHandler(&fakeAuthService{signupCompleteToken: "session-token", signupCompleteUser: user})
+
+	resp, err := h.AuthSignupComplete(context.Background(), AuthSignupCompleteRequestObject{
+		Body: &AuthSignupCompleteJSONRequestBody{Ticket: "the-ticket", Password: "whatever-12345"},
+	})
+	if err != nil {
+		t.Fatalf("AuthSignupComplete: %v", err)
+	}
+	completeResp, ok := resp.(authSignupCompleteResponse)
+	if !ok {
+		t.Fatalf("AuthSignupComplete returned %T, want authSignupCompleteResponse", resp)
+	}
+	if completeResp.user.Id != 7 {
+		t.Fatalf("user.Id = %d, want 7", completeResp.user.Id)
+	}
+	if completeResp.cookie.Value != "session-token" {
+		t.Fatalf("cookie.Value = %q, want the raw session token", completeResp.cookie.Value)
+	}
+}
+
+func TestAuthSignupComplete_InvalidTicket_MapsGeneric400(t *testing.T) {
+	h := newTestHandler(&fakeAuthService{signupCompleteErr: signupcode.ErrInvalidTicket})
+
+	resp, err := h.AuthSignupComplete(context.Background(), AuthSignupCompleteRequestObject{
+		Body: &AuthSignupCompleteJSONRequestBody{Ticket: "bad-ticket", Password: "whatever-12345"},
+	})
+	if err != nil {
+		t.Fatalf("AuthSignupComplete: %v", err)
+	}
+	errResp, ok := resp.(AuthSignupComplete400JSONResponse)
+	if !ok {
+		t.Fatalf("AuthSignupComplete returned %T, want AuthSignupComplete400JSONResponse", resp)
+	}
+	if errResp.Error.Code != "invalid_ticket" {
+		t.Fatalf("error code = %q, want invalid_ticket", errResp.Error.Code)
+	}
+}
+
+func TestAuthSignupComplete_UnexpectedError_IsNotSwallowed(t *testing.T) {
+	h := newTestHandler(&fakeAuthService{signupCompleteErr: errors.New("boom")})
+
+	_, err := h.AuthSignupComplete(context.Background(), AuthSignupCompleteRequestObject{
+		Body: &AuthSignupCompleteJSONRequestBody{Ticket: "t", Password: "whatever-12345"},
+	})
+	if err == nil {
+		t.Fatal("AuthSignupComplete swallowed an unexpected error, want it returned so ResponseErrorHandlerFunc maps it to 500")
 	}
 }

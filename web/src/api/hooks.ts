@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { getWatchlist } from "./auth";
 import { ApiClientError } from "./client";
 import { listInstrumentCandles, listInstruments, type ListCandlesParams } from "./instruments";
 import { getSetup, listSetupEvents, listSetups, type ListSetupsParams } from "./setups";
@@ -126,6 +127,17 @@ export function useLatestCloses(instrumentIds: number[]): AsyncState<Map<number,
       return new Map(entries.filter((e): e is [number, number] => e !== undefined));
     },
     [capped.join(",")],
+  );
+}
+
+// useWatchlist returns the signed-in user's own saved instrument ids,
+// in their saved order (web light auth redesign brief, Part 3's own
+// terminal integration: the Watchlist panel shows this, not every
+// registered instrument).
+export function useWatchlist(): AsyncState<number[]> {
+  return useAsyncResource(
+    async (signal) => (await getWatchlist({ signal })).map((item) => item.instrument_id),
+    [],
   );
 }
 

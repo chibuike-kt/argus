@@ -43,6 +43,12 @@ type Querier interface {
 	// rows back means "invalid, already used, or expired"; the caller
 	// cannot and does not need to distinguish which.
 	ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (EmailToken, error)
+	// ConsumeSignupTicket marks a ticket used and returns the row,
+	// atomically, only if it exists, has not been used yet, and has not
+	// expired -- the same single-use shape as ConsumeEmailToken.
+	ConsumeSignupTicket(ctx context.Context, arg ConsumeSignupTicketParams) (SignupVerification, error)
+	CountWatchlistItems(ctx context.Context, userID int64) (int64, error)
+	DeleteWatchlistItems(ctx context.Context, userID int64) error
 	// EarliestCurrentSwingAfter finds the swing immediately following a
 	// given pivot_time -- the shape test's up-leg endpoint (spec section 9:
 	// "this low out to the following confirmed swing high"). Strictly
@@ -103,6 +109,13 @@ type Querier interface {
 	GetSessionByTokenHash(ctx context.Context, tokenHash string) (Session, error)
 	GetSetupByID(ctx context.Context, id int64) (Setup, error)
 	GetSetupByIdentity(ctx context.Context, arg GetSetupByIdentityParams) (Setup, error)
+	GetSignupVerificationByEmail(ctx context.Context, emailNormalized string) (SignupVerification, error)
+	// GetSignupVerificationByTicket is a read-only lookup by ticket hash
+	// -- it does not consume the ticket (architect review of Part 2, item
+	// 2): SignupComplete needs the row's email to validate the password
+	// policy, and must be able to do that before committing to consuming
+	// the ticket, so a rejected password never burns it.
+	GetSignupVerificationByTicket(ctx context.Context, ticketHash sql.NullString) (SignupVerification, error)
 	GetStructureState(ctx context.Context, arg GetStructureStateParams) (StructureState, error)
 	// GetSwingByID looks up a swing directly by id, regardless of whether it
 	// is current or superseded -- used to resolve a structure_state
@@ -111,6 +124,18 @@ type Querier interface {
 	GetSwingByID(ctx context.Context, id int64) (ConfirmedSwing, error)
 	GetUserByEmailNormalized(ctx context.Context, emailNormalized string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
+	// IncrementSignupWrongGuessesIfEligible atomically claims one guess
+	// against email_normalized's current code: it increments wrong_guesses
+	// and returns the row in the same statement, but only if this attempt
+	// is still eligible (not already verified, not expired, strictly under
+	// max_wrong_guesses) BEFORE the increment -- one UPDATE, not a
+	// separate read-then-increment pair (architect review of Part 2, item
+	// 3): N concurrent requests reading the same pre-increment count and
+	// all getting a guess is exactly the race this replaces. Zero rows
+	// back means this attempt is rejected outright, before the code is
+	// even compared -- the caller must not decrement or otherwise "give
+	// back" the guess.
+	IncrementSignupWrongGuessesIfEligible(ctx context.Context, arg IncrementSignupWrongGuessesIfEligibleParams) (SignupVerification, error)
 	InsertAuthEvent(ctx context.Context, arg InsertAuthEventParams) error
 	InsertCorrectingCandle(ctx context.Context, arg InsertCorrectingCandleParams) (Candle, error)
 	InsertEmailToken(ctx context.Context, arg InsertEmailTokenParams) (EmailToken, error)
@@ -135,7 +160,14 @@ type Querier interface {
 	InsertStructureEvent(ctx context.Context, arg InsertStructureEventParams) (StructureEvent, error)
 	InsertSweep(ctx context.Context, arg InsertSweepParams) (LiquiditySweep, error)
 	InsertSwing(ctx context.Context, arg InsertSwingParams) (ConfirmedSwing, error)
-	InsertUser(ctx context.Context, arg InsertUserParams) (User, error)
+	// InsertVerifiedUser is the only way a users row is ever created
+	// (ADR-015: "no half accounts" -- signup complete is the one call
+	// site, after the emailed code and the password step). The row is
+	// created already verified, with terms_accepted_at/terms_version
+	// carried over from the signup_verifications row that is consumed
+	// alongside it.
+	InsertVerifiedUser(ctx context.Context, arg InsertVerifiedUserParams) (User, error)
+	InsertWatchlistItem(ctx context.Context, arg InsertWatchlistItemParams) (WatchlistItem, error)
 	// LatestCurrentEventBefore orders by trigger_open_time because "before
 	// a point in time" is meaningful in candle time, not database insertion
 	// order. Used, like LatestCurrentSwingBefore, to reconstruct as-of
@@ -321,7 +353,30 @@ type Querier interface {
 	// itself for the same reason ListClosedCandlesInRangeLimited's own
 	// comment gives.
 	ListSetupsByInstrumentFiltered(ctx context.Context, arg ListSetupsByInstrumentFilteredParams) ([]Setup, error)
+	ListWatchlistItems(ctx context.Context, userID int64) ([]WatchlistItem, error)
 	MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) (User, error)
+	// MarkOnboardingCompleted is unconditional -- the service layer
+	// (not this statement) is what checks display_name and at least one
+	// watchlist item already exist before calling it, so the check stays
+	// in one visible, testable place in Go rather than a SQL WHERE clause
+	// duplicating it.
+	MarkOnboardingCompleted(ctx context.Context, arg MarkOnboardingCompletedParams) (User, error)
+	// MarkSignupVerified issues a ticket and atomically transitions the
+	// row to verified, but only if it is still eligible (not already
+	// verified, not expired) -- one UPDATE, not a separate check-then-mark
+	// pair, so two concurrent correct submissions of the same code can
+	// never both receive a valid ticket (the same single-use-token race
+	// ConsumeEmailToken's own comment describes). Zero rows back means the
+	// caller must treat this as a failed verification, even though the
+	// code it already checked (in Go, before calling this) was correct.
+	// Does NOT re-check wrong_guesses (unlike an earlier version of this
+	// query): IncrementSignupWrongGuessesIfEligible above already proved,
+	// atomically, that the one attempt now being completed was allowed
+	// before its own increment -- re-checking the post-increment count
+	// here would let a legitimate, correctly-guessed final attempt (e.g.
+	// the 5th, exactly at the limit) fail only because of its own guess
+	// being counted.
+	MarkSignupVerified(ctx context.Context, arg MarkSignupVerifiedParams) (SignupVerification, error)
 	// RecordCandleGap is idempotent: detecting the same gap twice (a retried
 	// or duplicate-delivered detection event) must not create a second row or
 	// error. The DO UPDATE is a deliberate no-op (detected_at keeps its
@@ -348,6 +403,7 @@ type Querier interface {
 	// rather than erroring -- logout's own required idempotence, which
 	// DELETE /auth/sessions/{id} gets for free by sharing this query.
 	RevokeSessionForUser(ctx context.Context, arg RevokeSessionForUserParams) (int64, error)
+	SetDisplayName(ctx context.Context, arg SetDisplayNameParams) (User, error)
 	// SetProcessingCursor is a plain upsert: processing_cursors is a
 	// mutable projection, not an evidence record (000009's comment on the
 	// table explains why), so it is written in place rather than through
@@ -395,6 +451,14 @@ type Querier interface {
 	// than as success (guide 16: an upstream data-feed quirk must not
 	// silently become current, accepted data).
 	UpsertLatestQuote(ctx context.Context, arg UpsertLatestQuoteParams) (LatestQuote, error)
+	// UpsertSignupCode starts or restarts a signup: a fresh code, wrong
+	// guesses reset, and any previous verification/ticket cleared, since
+	// every signup/start call issues a brand new code that replaces
+	// whatever was live before (ADR-015: "a new code ... replaces the
+	// previous one"). terms_accepted_at/terms_version are overwritten too
+	// -- accepted_terms is required on every signup/start call, not only
+	// the first.
+	UpsertSignupCode(ctx context.Context, arg UpsertSignupCodeParams) (SignupVerification, error)
 }
 
 var _ Querier = (*Queries)(nil)

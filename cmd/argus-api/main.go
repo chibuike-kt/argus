@@ -18,10 +18,13 @@ import (
 	"github.com/chibuike-kt/argus/internal/identity/ratelimit"
 	"github.com/chibuike-kt/argus/internal/identity/service"
 	"github.com/chibuike-kt/argus/internal/identity/session"
+	"github.com/chibuike-kt/argus/internal/identity/signupcode"
 	"github.com/chibuike-kt/argus/internal/identity/tokens"
+	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/platform/logging"
 	"github.com/chibuike-kt/argus/internal/platform/postgres"
 	"github.com/chibuike-kt/argus/internal/platform/redis"
+	"github.com/chibuike-kt/argus/internal/watchlist"
 )
 
 func main() {
@@ -52,6 +55,9 @@ func main() {
 	users := identity.NewStore(db)
 	sessions := session.NewStore(db, clk, cfg.Auth.SessionIdleDuration, cfg.Auth.SessionAbsoluteDuration)
 	tokenStore := tokens.NewStore(db, clk)
+	signupStore := signupcode.NewStore(db, clk, cfg.Auth.SignupCodeHMACKey)
+	instrumentsStore := instruments.NewStore(db)
+	watchlistStore := watchlist.NewStore(db, instrumentsStore)
 	hasher := password.NewHasher(password.Params{
 		MemoryKiB:   cfg.Auth.ArgonMemoryKiB,
 		Iterations:  cfg.Auth.ArgonIterations,
@@ -71,13 +77,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	authSvc := service.New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, cfg.Auth, logger)
+	authSvc := service.New(db, users, sessions, tokenStore, signupStore, watchlistStore, hasher, limiter, mail, clk, cfg.Auth, logger)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:       logger,
 		DB:           db,
 		Redis:        rdb,
 		Auth:         authSvc,
+		Watchlist:    watchlistStore,
 		Sessions:     sessions,
 		Users:        users,
 		AuthPolicy:   cfg.Auth,

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/identity/password"
 	"github.com/chibuike-kt/argus/internal/identity/ratelimit"
 	"github.com/chibuike-kt/argus/internal/identity/session"
+	"github.com/chibuike-kt/argus/internal/identity/signupcode"
 	"github.com/chibuike-kt/argus/internal/identity/tokens"
 
 	_ "github.com/lib/pq"
@@ -79,8 +81,8 @@ func testRedis(t *testing.T) *redis.Client {
 }
 
 // recordingMailer is a test double for mailer.Mailer: every Send call
-// is appended, under a mutex, so a test can assert what Register/
-// ResendVerification actually sent without a real mail provider.
+// is appended, under a mutex, so a test can assert what SignupStart
+// actually sent without a real mail provider.
 type recordingMailer struct {
 	mu   sync.Mutex
 	sent []mailer.Message
@@ -106,10 +108,10 @@ func (m *recordingMailer) messagesTo(email string) []mailer.Message {
 }
 
 // waitForMessages polls messagesTo until it has at least n messages
-// for email or 2s pass -- Register/ResendVerification now send mail
-// in the background (architect review item 1: the send must not
-// affect response time), so a caller can no longer assume a message
-// has arrived the instant Register/ResendVerification returns.
+// for email or 2s pass -- SignupStart sends mail in the background
+// (architect review item 1: the send must not affect response time),
+// so a caller can no longer assume a message has arrived the instant
+// SignupStart returns.
 func waitForMessages(t *testing.T, mail *recordingMailer, email string, n int) []mailer.Message {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -125,6 +127,20 @@ func waitForMessages(t *testing.T, mail *recordingMailer, email string, n int) [
 	}
 }
 
+// fakeWatchlistCounter is a hand-written fake implementing
+// watchlistCounter -- CompleteOnboarding's own test does not need a
+// real watchlist store, only a count it can set directly.
+type fakeWatchlistCounter struct {
+	counts map[int64]int
+}
+
+func (f *fakeWatchlistCounter) Count(_ context.Context, userID int64) (int, error) {
+	if f.counts == nil {
+		return 0, nil
+	}
+	return f.counts[userID], nil
+}
+
 // testPolicy returns cheap Argon2 parameters (this brief's own
 // "cheaper Argon2 params in tests through config only") and generous
 // rate limits, so a test exercises real business logic without paying
@@ -136,21 +152,25 @@ func testPolicy() config.AuthPolicy {
 		ArgonSaltLen: 16, ArgonKeyLen: 32, ArgonMaxConcurrent: 4,
 		PasswordMinLength: 12, PasswordMaxLength: 128,
 		SessionIdleDuration: 7 * 24 * time.Hour, SessionAbsoluteDuration: 30 * 24 * time.Hour,
-		EmailVerificationTTL: 24 * time.Hour, PasswordResetTTL: time.Hour,
+		PasswordResetTTL:                time.Hour,
 		LoginFailuresPerAccountPer15Min: 5, LoginAttemptsPerIPPer15Min: 1000,
-		RegisterPerIPPerHour: 1000, ResendVerificationPerAccountPerHour: 1000, ResendVerificationPerIPPerHour: 1000,
+		SignupCodeTTL: 10 * time.Minute, SignupCodeMaxWrongGuesses: 5, SignupCodeResendCooldown: time.Millisecond,
+		SignupCodesPerEmailPerHour: 1000, SignupStartsPerIPPerHour: 1000, SignupTicketTTL: 30 * time.Minute,
+		SignupCodeHMACKey:    "test-only-signup-code-hmac-key-not-for-production-use",
+		DisplayNameMaxLength: 60, WatchlistMaxItems: 50, TermsVersion: "1",
 		LoginDelayStep: time.Millisecond, LoginDelayMax: 10 * time.Millisecond,
 	}
 }
 
 type testService struct {
 	*Service
-	mail   *recordingMailer
-	clk    *clock.Mutable
-	db     *sql.DB
-	sess   *session.Store
-	hasher *password.Hasher
-	logBuf *bytes.Buffer
+	mail      *recordingMailer
+	clk       *clock.Mutable
+	db        *sql.DB
+	sess      *session.Store
+	hasher    *password.Hasher
+	watchlist *fakeWatchlistCounter
+	logBuf    *bytes.Buffer
 }
 
 func newTestService(t *testing.T) *testService {
@@ -166,6 +186,8 @@ func newTestService(t *testing.T) *testService {
 	users := identity.NewStore(db)
 	sessions := session.NewStore(db, clk, policy.SessionIdleDuration, policy.SessionAbsoluteDuration)
 	tokenStore := tokens.NewStore(db, clk)
+	signupStore := signupcode.NewStore(db, clk, policy.SignupCodeHMACKey)
+	watchlist := &fakeWatchlistCounter{}
 	hasher := password.NewHasher(password.Params{
 		MemoryKiB: policy.ArgonMemoryKiB, Iterations: policy.ArgonIterations,
 		Parallelism: policy.ArgonParallelism, SaltLen: policy.ArgonSaltLen, KeyLen: policy.ArgonKeyLen,
@@ -173,8 +195,11 @@ func newTestService(t *testing.T) *testService {
 	limiter := ratelimit.NewLimiter(rdb, logger, clk)
 	mail := &recordingMailer{}
 
-	svc := New(db, users, sessions, tokenStore, hasher, limiter, mail, clk, policy, logger)
-	return &testService{Service: svc, mail: mail, clk: clk, db: db, sess: sessions, hasher: hasher, logBuf: &buf}
+	svc := New(db, users, sessions, tokenStore, signupStore, watchlist, hasher, limiter, mail, clk, policy, logger)
+	return &testService{
+		Service: svc, mail: mail, clk: clk, db: db, sess: sessions,
+		hasher: hasher, watchlist: watchlist, logBuf: &buf,
+	}
 }
 
 // emailCounter guarantees uniqueEmail never collides even when called
@@ -199,92 +224,307 @@ func countAuthEvents(t *testing.T, db *sql.DB, userID int64, kind string) int {
 
 const testPassword = "a-perfectly-fine-password-1"
 
-func TestIntegration_Register_NewEmail_SendsVerification(t *testing.T) {
+// signupNewUser runs the full SignupStart/SignupVerify/SignupComplete
+// sequence against ts and returns the resulting identity.User --
+// every test below that just needs a real, verified account uses this
+// rather than repeating the three calls inline.
+func signupNewUser(t *testing.T, ts *testService, email, pw string) identity.User {
+	t.Helper()
+	ctx := context.Background()
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
+	}
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	ticket, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupVerify: %v", err)
+	}
+	_, user, err := ts.SignupComplete(ctx, ticket, pw, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupComplete: %v", err)
+	}
+	return user
+}
+
+func TestIntegration_SignupStart_NewEmail_SendsCode(t *testing.T) {
 	ts := newTestService(t)
 	email := uniqueEmail(t)
 	ctx := context.Background()
 
-	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
 	}
 
-	u, err := identity.NewStore(ts.db).GetByEmail(ctx, email)
-	if err != nil {
-		t.Fatalf("GetByEmail: %v", err)
-	}
-	if u.EmailVerified() {
-		t.Fatal("newly registered user is already verified, want unverified")
+	if _, err := identity.NewStore(ts.db).GetByEmail(ctx, email); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("GetByEmail after SignupStart = %v, want identity.ErrNotFound (no half accounts)", err)
 	}
 
 	msgs := waitForMessages(t, ts.mail, email, 1)
 	if len(msgs) != 1 {
 		t.Fatalf("got %d messages to %s, want 1", len(msgs), email)
 	}
-	if !strings.Contains(msgs[0].Body, "verify") {
-		t.Fatalf("verification email body = %q, want it to mention verification", msgs[0].Body)
-	}
-	if countAuthEvents(t, ts.db, u.ID, "register") != 1 {
-		t.Fatal("expected one register auth_events row")
+	if !strings.Contains(msgs[0].Body, "signup code") {
+		t.Fatalf("signup start email body = %q, want it to mention the signup code", msgs[0].Body)
 	}
 }
 
-func TestIntegration_Register_ExistingVerifiedEmail_SendsNoticeNotToken(t *testing.T) {
+func TestIntegration_SignupStart_ExistingEmail_SendsNoticeNotCode(t *testing.T) {
 	ts := newTestService(t)
 	email := uniqueEmail(t)
 	ctx := context.Background()
+	signupNewUser(t, ts, email, testPassword)
 
-	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("first Register: %v", err)
-	}
-	u, err := identity.NewStore(ts.db).GetByEmail(ctx, email)
-	if err != nil {
-		t.Fatalf("GetByEmail: %v", err)
-	}
-	if _, err := identity.NewStore(ts.db).MarkEmailVerified(ctx, u.ID, ts.clk.Now()); err != nil {
-		t.Fatalf("MarkEmailVerified: %v", err)
-	}
-
-	if err := ts.Register(ctx, email, "a-totally-different-password-2", "203.0.113.2", "test-agent"); err != nil {
-		t.Fatalf("second Register (existing, verified): %v", err)
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.2", "test-agent"); err != nil {
+		t.Fatalf("second SignupStart (existing email): %v", err)
 	}
 
 	msgs := waitForMessages(t, ts.mail, email, 2)
 	if len(msgs) != 2 {
-		t.Fatalf("got %d messages, want 2 (original verification + notice)", len(msgs))
+		t.Fatalf("got %d messages, want 2 (original signup code + notice)", len(msgs))
 	}
-	if strings.Contains(msgs[1].Body, "token") {
-		t.Fatalf("second message to an already-verified email contains a token: %q", msgs[1].Body)
+	if strings.Contains(msgs[1].Body, "signup code") {
+		t.Fatalf("second message to an existing account contains a code: %q", msgs[1].Body)
 	}
 }
 
-func TestIntegration_VerifyEmail_HappyPathThenSingleUse(t *testing.T) {
+func TestIntegration_SignupStart_TermsNotAccepted_Rejected(t *testing.T) {
+	ts := newTestService(t)
+	if err := ts.SignupStart(context.Background(), uniqueEmail(t), false, "203.0.113.1", "test-agent"); !errors.Is(err, ErrTermsNotAccepted) {
+		t.Fatalf("SignupStart(accepted_terms=false) = %v, want ErrTermsNotAccepted", err)
+	}
+}
+
+func TestIntegration_SignupVerifyAndComplete_HappyPathThenTicketSingleUse(t *testing.T) {
 	ts := newTestService(t)
 	email := uniqueEmail(t)
 	ctx := context.Background()
 
-	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
 	}
-	msgs := waitForMessages(t, ts.mail, email, 1)
-	token := extractToken(t, msgs[0].Body)
-
-	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("VerifyEmail: %v", err)
-	}
-	u, err := identity.NewStore(ts.db).GetByEmail(ctx, email)
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	ticket, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent")
 	if err != nil {
-		t.Fatalf("GetByEmail: %v", err)
-	}
-	if !u.EmailVerified() {
-		t.Fatal("user not marked verified after VerifyEmail")
+		t.Fatalf("SignupVerify: %v", err)
 	}
 
-	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); !errors.Is(err, tokens.ErrInvalid) {
-		t.Fatalf("second VerifyEmail (reuse) = %v, want tokens.ErrInvalid", err)
+	// A second verify of the same (still otherwise-valid) code must
+	// fail generically: the row is already verified.
+	if _, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidCode) {
+		t.Fatalf("second SignupVerify (already verified) = %v, want signupcode.ErrInvalidCode", err)
+	}
+
+	_, user, err := ts.SignupComplete(ctx, ticket, testPassword, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupComplete: %v", err)
+	}
+	if !user.EmailVerified() {
+		t.Fatal("user created by SignupComplete is not marked verified")
+	}
+	if user.Email != email {
+		t.Fatalf("user.Email = %q, want %q", user.Email, email)
+	}
+
+	// The ticket is single-use: a second complete with the same ticket
+	// must fail.
+	if _, _, err := ts.SignupComplete(ctx, ticket, "a-different-password-2", "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidTicket) {
+		t.Fatalf("second SignupComplete (ticket reuse) = %v, want signupcode.ErrInvalidTicket", err)
 	}
 }
 
-func TestIntegration_Login_IdenticalErrorForUnknownWrongPasswordAndUnverified(t *testing.T) {
+// TestIntegration_SignupComplete_WeakPassword_DoesNotBurnTicket is
+// architect review (of Part 2) item 2's own test: a password that
+// fails policy must not consume the ticket -- the same ticket then
+// succeeds once a valid password is given, with no new emailed code
+// needed.
+func TestIntegration_SignupComplete_WeakPassword_DoesNotBurnTicket(t *testing.T) {
+	ts := newTestService(t)
+	ctx := context.Background()
+	email := uniqueEmail(t)
+
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
+	}
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	ticket, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupVerify: %v", err)
+	}
+
+	if _, _, err := ts.SignupComplete(ctx, ticket, "too-short", "203.0.113.1", "test-agent"); !errors.Is(err, password.ErrTooShort) {
+		t.Fatalf("SignupComplete(weak password) = %v, want password.ErrTooShort", err)
+	}
+
+	_, user, err := ts.SignupComplete(ctx, ticket, testPassword, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupComplete(same ticket, good password) = %v, want nil (the weak-password attempt must not have burned the ticket)", err)
+	}
+	if user.Email != email {
+		t.Fatalf("user.Email = %q, want %q", user.Email, email)
+	}
+}
+
+// TestIntegration_SignupComplete_FailedInsert_LeavesTicketUsable is
+// architect review (of Part 2) item 2's own second test: forcing
+// InsertVerified to fail (a pre-existing row with the same
+// email_normalized, simulating the "insert fails for some other
+// reason" case) must roll back the ticket consumption too -- the
+// ticket is still usable once the obstruction is removed.
+func TestIntegration_SignupComplete_FailedInsert_LeavesTicketUsable(t *testing.T) {
+	ts := newTestService(t)
+	ctx := context.Background()
+	email := uniqueEmail(t)
+
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
+	}
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	ticket, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupVerify: %v", err)
+	}
+
+	// Obstruct the insert: a row already occupies this email_normalized.
+	normalized := identity.NormalizeEmail(email)
+	if _, err := ts.db.ExecContext(ctx, `
+		INSERT INTO users (email, email_normalized, password_hash, email_verified_at)
+		VALUES ($1, $1, 'x', now())`, normalized); err != nil {
+		t.Fatalf("seed obstructing user: %v", err)
+	}
+
+	if _, _, err := ts.SignupComplete(ctx, ticket, testPassword, "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidTicket) {
+		t.Fatalf("SignupComplete with an obstructed insert = %v, want signupcode.ErrInvalidTicket", err)
+	}
+
+	// Remove the obstruction and retry with the same ticket: it must
+	// still be usable, proving the failed insert rolled the ticket's
+	// consumption back rather than leaving it permanently burned.
+	if _, err := ts.db.ExecContext(ctx, `DELETE FROM users WHERE email_normalized = $1`, normalized); err != nil {
+		t.Fatalf("remove obstructing user: %v", err)
+	}
+	_, user, err := ts.SignupComplete(ctx, ticket, testPassword, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupComplete(same ticket, after removing the obstruction) = %v, want nil", err)
+	}
+	if user.Email != email {
+		t.Fatalf("user.Email = %q, want %q", user.Email, email)
+	}
+}
+
+func TestIntegration_SignupVerify_WrongCode_ExhaustsAfterMaxGuesses(t *testing.T) {
+	ts := newTestService(t)
+	email := uniqueEmail(t)
+	ctx := context.Background()
+
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
+	}
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	wrongCode := "000000"
+	if wrongCode == code {
+		wrongCode = "111111"
+	}
+
+	for i := range ts.policy.SignupCodeMaxWrongGuesses {
+		if _, err := ts.SignupVerify(ctx, email, wrongCode, "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidCode) {
+			t.Fatalf("SignupVerify(wrong code) attempt %d = %v, want signupcode.ErrInvalidCode", i, err)
+		}
+	}
+
+	// The real code no longer works either: wrong_guesses is exhausted.
+	if _, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidCode) {
+		t.Fatalf("SignupVerify(correct code, after exhausting wrong guesses) = %v, want signupcode.ErrInvalidCode", err)
+	}
+}
+
+// TestIntegration_SignupVerify_ConcurrentWrongGuesses_NeverExceedsMax
+// is architect review (of Part 2) item 3's own test: firing many
+// concurrent wrong guesses against one live code must still cap
+// wrong_guesses at the configured maximum -- a read-then-increment
+// race previously let every one of them "get a guess" regardless of
+// the limit.
+func TestIntegration_SignupVerify_ConcurrentWrongGuesses_NeverExceedsMax(t *testing.T) {
+	ts := newTestService(t)
+	email := uniqueEmail(t)
+	ctx := context.Background()
+
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
+	}
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	wrongCode := "000000"
+	if wrongCode == code {
+		wrongCode = "111111"
+	}
+
+	// Every one of these returns the same generic ErrInvalidCode
+	// whether this particular call actually claimed a guess (and
+	// compared it, wrongly) or was rejected outright for already being
+	// over the limit -- that genericness is deliberate (ADR-015), so
+	// the race this test is actually proving a fix for is checked
+	// directly on wrong_guesses below, not by distinguishing responses.
+	const concurrency = 50
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for range concurrency {
+		go func() {
+			defer wg.Done()
+			if _, err := ts.SignupVerify(ctx, email, wrongCode, "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidCode) {
+				t.Errorf("concurrent SignupVerify(wrong code) = %v, want signupcode.ErrInvalidCode", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	var wrongGuesses int
+	if err := ts.db.QueryRow(`SELECT wrong_guesses FROM signup_verifications WHERE email_normalized = $1`, identity.NormalizeEmail(email)).Scan(&wrongGuesses); err != nil {
+		t.Fatalf("query wrong_guesses: %v", err)
+	}
+	if wrongGuesses > ts.policy.SignupCodeMaxWrongGuesses {
+		t.Fatalf("wrong_guesses = %d after %d concurrent wrong guesses, want at most %d (the max) -- the attempt limit is not actually limiting anything under concurrency", wrongGuesses, concurrency, ts.policy.SignupCodeMaxWrongGuesses)
+	}
+
+	// The correct code now fails too: the limit is exhausted.
+	if _, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent"); !errors.Is(err, signupcode.ErrInvalidCode) {
+		t.Fatalf("SignupVerify(correct code, after concurrent wrong guesses exhausted the limit) = %v, want signupcode.ErrInvalidCode", err)
+	}
+}
+
+// TestIntegration_SignupStart_ResendCooldown_NeverReturns429ForEitherEmail
+// is architect review (of Part 2) item 1's own test: a 60s cooldown
+// that 429s for a brand-new email but always 202s for an existing one
+// (which never reaches IssueCode at all) is itself an existence
+// oracle after exactly two calls. Both must return the identical
+// generic success.
+func TestIntegration_SignupStart_ResendCooldown_NeverReturns429ForEitherEmail(t *testing.T) {
+	ts := newTestService(t)
+	ts.policy.SignupCodeResendCooldown = time.Hour
+	ctx := context.Background()
+
+	newEmail := uniqueEmail(t)
+	if err := ts.SignupStart(ctx, newEmail, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("first SignupStart(new): %v", err)
+	}
+	waitForMessages(t, ts.mail, newEmail, 1)
+
+	existingEmail := uniqueEmail(t)
+	signupNewUser(t, ts, existingEmail, testPassword)
+
+	if err := ts.SignupStart(ctx, newEmail, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("second SignupStart(new, within cooldown) = %v, want nil (same generic success as an existing email)", err)
+	}
+	if err := ts.SignupStart(ctx, existingEmail, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("second SignupStart(existing) = %v, want nil", err)
+	}
+
+	// No second code was sent for the new email -- the cooldown means
+	// nothing new went out, not just that the response looked the same.
+	if msgs := ts.mail.messagesTo(newEmail); len(msgs) != 1 {
+		t.Fatalf("got %d messages to the new email after the cooldown call, want still 1 (no new code issued)", len(msgs))
+	}
+}
+
+func TestIntegration_Login_IdenticalErrorForUnknownWrongPasswordAndNeverCompleted(t *testing.T) {
 	ts := newTestService(t)
 	ctx := context.Background()
 
@@ -294,26 +534,20 @@ func TestIntegration_Login_IdenticalErrorForUnknownWrongPasswordAndUnverified(t 
 		t.Fatalf("Login(unknown email) = %v, want ErrInvalidCredentials", err)
 	}
 
-	// Registered but unverified, right password.
-	unverifiedEmail := uniqueEmail(t)
-	if err := ts.Register(ctx, unverifiedEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
+	// Signup started but never verified/completed: no user row exists
+	// (ADR-015 "no half accounts").
+	neverCompletedEmail := uniqueEmail(t)
+	if err := ts.SignupStart(ctx, neverCompletedEmail, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
 	}
-	_, _, err = ts.Login(ctx, unverifiedEmail, testPassword, "203.0.113.9", "test-agent")
+	_, _, err = ts.Login(ctx, neverCompletedEmail, testPassword, "203.0.113.9", "test-agent")
 	if !errors.Is(err, ErrInvalidCredentials) {
-		t.Fatalf("Login(unverified, right password) = %v, want ErrInvalidCredentials", err)
+		t.Fatalf("Login(never completed signup, right password) = %v, want ErrInvalidCredentials", err)
 	}
 
 	// Verified, wrong password.
 	verifiedEmail := uniqueEmail(t)
-	if err := ts.Register(ctx, verifiedEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	msgs := waitForMessages(t, ts.mail, verifiedEmail, 1)
-	token := extractToken(t, msgs[0].Body)
-	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("VerifyEmail: %v", err)
-	}
+	signupNewUser(t, ts, verifiedEmail, testPassword)
 	_, _, err = ts.Login(ctx, verifiedEmail, "wrong-password-entirely", "203.0.113.9", "test-agent")
 	if !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("Login(verified, wrong password) = %v, want ErrInvalidCredentials", err)
@@ -324,15 +558,7 @@ func TestIntegration_Login_Success_CreatesResolvableSession(t *testing.T) {
 	ts := newTestService(t)
 	ctx := context.Background()
 	email := uniqueEmail(t)
-
-	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	msgs := waitForMessages(t, ts.mail, email, 1)
-	token := extractToken(t, msgs[0].Body)
-	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("VerifyEmail: %v", err)
-	}
+	signupNewUser(t, ts, email, testPassword)
 
 	rawSession, u, err := ts.Login(ctx, email, testPassword, "203.0.113.9", "test-agent")
 	if err != nil {
@@ -357,14 +583,8 @@ func TestIntegration_Logout_RevokesSession(t *testing.T) {
 	ts := newTestService(t)
 	ctx := context.Background()
 	email := uniqueEmail(t)
+	signupNewUser(t, ts, email, testPassword)
 
-	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	token := extractToken(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
-	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("VerifyEmail: %v", err)
-	}
 	rawSession, u, err := ts.Login(ctx, email, testPassword, "203.0.113.9", "test-agent")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
@@ -387,15 +607,9 @@ func TestIntegration_RevokeSession_AnotherUsersSessionIsNotFound(t *testing.T) {
 	ctx := context.Background()
 
 	ownerEmail, otherEmail := uniqueEmail(t), uniqueEmail(t)
-	for _, email := range []string{ownerEmail, otherEmail} {
-		if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
-			t.Fatalf("Register(%s): %v", email, err)
-		}
-		token := extractToken(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
-		if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
-			t.Fatalf("VerifyEmail(%s): %v", email, err)
-		}
-	}
+	signupNewUser(t, ts, ownerEmail, testPassword)
+	signupNewUser(t, ts, otherEmail, testPassword)
+
 	_, owner, err := ts.Login(ctx, ownerEmail, testPassword, "203.0.113.9", "test-agent")
 	if err != nil {
 		t.Fatalf("Login(owner): %v", err)
@@ -422,10 +636,11 @@ func TestIntegration_RevokeSession_AnotherUsersSessionIsNotFound(t *testing.T) {
 }
 
 // TestIntegration_SecretsNeverAppearInLogs is this brief's own
-// explicit requirement: capture every log line Register+Login produce
-// for a real password and a real issued verification token, and prove
-// neither ever appears in them (CLAUDE.md rule 3 / this brief's own
-// rule 3 -- redact at the logging boundary, never log a password or
+// explicit requirement: capture every log line SignupStart/SignupVerify/
+// SignupComplete/Login produce for a real password, a real signup
+// code and a real signup ticket, and prove none of them ever appears
+// in those logs (CLAUDE.md rule 3 / this brief's own rule 3 --
+// redact at the logging boundary, never log a password, code or
 // token).
 func TestIntegration_SecretsNeverAppearInLogs(t *testing.T) {
 	ts := newTestService(t)
@@ -433,12 +648,16 @@ func TestIntegration_SecretsNeverAppearInLogs(t *testing.T) {
 	email := uniqueEmail(t)
 	const secretPassword = "a-very-specific-secret-password-99"
 
-	if err := ts.Register(ctx, email, secretPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
+	if err := ts.SignupStart(ctx, email, true, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupStart: %v", err)
 	}
-	token := extractToken(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
-	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("VerifyEmail: %v", err)
+	code := extractCode(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
+	ticket, err := ts.SignupVerify(ctx, email, code, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("SignupVerify: %v", err)
+	}
+	if _, _, err := ts.SignupComplete(ctx, ticket, secretPassword, "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("SignupComplete: %v", err)
 	}
 	if _, _, err := ts.Login(ctx, email, secretPassword, "203.0.113.9", "test-agent"); err != nil {
 		t.Fatalf("Login: %v", err)
@@ -457,78 +676,20 @@ func TestIntegration_SecretsNeverAppearInLogs(t *testing.T) {
 	if strings.Contains(logs, "a-wrong-password-entirely") {
 		t.Fatalf("log output contains the wrong-password attempt:\n%s", logs)
 	}
-	if strings.Contains(logs, token) {
-		t.Fatalf("log output contains the raw verification token:\n%s", logs)
+	if strings.Contains(logs, code) {
+		t.Fatalf("log output contains the raw signup code:\n%s", logs)
+	}
+	if strings.Contains(logs, ticket) {
+		t.Fatalf("log output contains the raw signup ticket:\n%s", logs)
 	}
 }
 
-// TestIntegration_Register_ExistingAndNewPaths_SameHasherOpCount is
-// architect review item 1's own test: every Register path that does
-// not insert a new user (existing verified, existing unverified) must
-// still pay exactly one real Argon2 operation, matching the new-user
-// path's own Hash call -- counted through Hasher.Ops, never wall-clock
-// time (inherently flaky).
-func TestIntegration_Register_ExistingAndNewPaths_SameHasherOpCount(t *testing.T) {
-	ts := newTestService(t)
-	ctx := context.Background()
-
-	newEmail := uniqueEmail(t)
-	before := ts.hasher.Ops()
-	if err := ts.Register(ctx, newEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register(new): %v", err)
-	}
-	if got := ts.hasher.Ops() - before; got != 1 {
-		t.Fatalf("new email: hasher performed %d operations, want exactly 1", got)
-	}
-
-	verifiedEmail := uniqueEmail(t)
-	if err := ts.Register(ctx, verifiedEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register(seed existing-verified): %v", err)
-	}
-	u, err := identity.NewStore(ts.db).GetByEmail(ctx, verifiedEmail)
-	if err != nil {
-		t.Fatalf("GetByEmail: %v", err)
-	}
-	if _, err := identity.NewStore(ts.db).MarkEmailVerified(ctx, u.ID, ts.clk.Now()); err != nil {
-		t.Fatalf("MarkEmailVerified: %v", err)
-	}
-
-	before = ts.hasher.Ops()
-	if err := ts.Register(ctx, verifiedEmail, "a-different-password-2", "203.0.113.2", "test-agent"); err != nil {
-		t.Fatalf("Register(existing verified): %v", err)
-	}
-	if got := ts.hasher.Ops() - before; got != 1 {
-		t.Fatalf("existing verified email: hasher performed %d operations, want exactly 1 (same as the new-email path)", got)
-	}
-
-	before = ts.hasher.Ops()
-	if err := ts.Register(ctx, newEmail, "another-password-3", "203.0.113.3", "test-agent"); err != nil {
-		t.Fatalf("Register(existing unverified): %v", err)
-	}
-	if got := ts.hasher.Ops() - before; got != 1 {
-		t.Fatalf("existing unverified email: hasher performed %d operations, want exactly 1 (same as the new-email path)", got)
-	}
-}
-
-// TestIntegration_Login_ProgressiveDelay_SameCounterForUnknownAndKnownEmail
-// is architect review item 2's own test: the progressive-delay counter
-// is keyed on the normalized email's hash and incremented before the
-// user lookup, so an unknown email accrues the exact same counter an
-// otherwise-identical known one would -- proven directly on the
-// counter (loginFailureKey, same package) rather than by comparing
-// wall-clock delays, which would make this test flaky under load.
 func TestIntegration_Login_ProgressiveDelay_SameCounterForUnknownAndKnownEmail(t *testing.T) {
 	ts := newTestService(t)
 	ctx := context.Background()
 
 	knownEmail := uniqueEmail(t)
-	if err := ts.Register(ctx, knownEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	token := extractToken(t, waitForMessages(t, ts.mail, knownEmail, 1)[0].Body)
-	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("VerifyEmail: %v", err)
-	}
+	signupNewUser(t, ts, knownEmail, testPassword)
 	unknownEmail := uniqueEmail(t)
 
 	const attempts = 3
@@ -554,29 +715,13 @@ func TestIntegration_Login_ProgressiveDelay_SameCounterForUnknownAndKnownEmail(t
 	}
 }
 
-// TestIntegration_Login_DisabledAccount_SameGenericError is architect
-// review item 3's own service-level test: a disabled account's login
-// gets the same ErrInvalidCredentials every other failure case does.
-// The middleware's own "an existing session stops working" half of
-// item 3 is tested in internal/httpapi (auth_middleware_test.go),
-// since it needs the session-resolution middleware, not this package.
 func TestIntegration_Login_DisabledAccount_SameGenericError(t *testing.T) {
 	ts := newTestService(t)
 	ctx := context.Background()
 	email := uniqueEmail(t)
+	user := signupNewUser(t, ts, email, testPassword)
 
-	if err := ts.Register(ctx, email, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	token := extractToken(t, waitForMessages(t, ts.mail, email, 1)[0].Body)
-	if err := ts.VerifyEmail(ctx, token, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("VerifyEmail: %v", err)
-	}
-	u, err := identity.NewStore(ts.db).GetByEmail(ctx, email)
-	if err != nil {
-		t.Fatalf("GetByEmail: %v", err)
-	}
-	if _, err := ts.db.ExecContext(ctx, `UPDATE users SET disabled_at = now() WHERE id = $1`, u.ID); err != nil {
+	if _, err := ts.db.ExecContext(ctx, `UPDATE users SET disabled_at = now() WHERE id = $1`, user.ID); err != nil {
 		t.Fatalf("disable user: %v", err)
 	}
 
@@ -585,46 +730,91 @@ func TestIntegration_Login_DisabledAccount_SameGenericError(t *testing.T) {
 	}
 }
 
-// TestIntegration_ResendVerification_AccountLimitNeverReturns429 is
-// architect review item 6's own test: the 6th resend within the hour
-// (per-account limit is 5, set via testPolicy's own override below)
-// returns the identical generic 202-equivalent (nil error) for a
-// known, unverified account as for an unknown one -- a 429 only for
-// accounts that exist would itself disclose existence.
-func TestIntegration_ResendVerification_AccountLimitNeverReturns429(t *testing.T) {
+// TestIntegration_SignupStart_PerEmailSendLimit_NeverReturns429ForEitherBranch
+// is this package's own equivalent of architect review item 6's test:
+// exceeding the per-email send limit (ADR-015: "5 codes per email per
+// hour") is folded into the same generic success for BOTH the new-
+// email (code) and existing-email (notice) branches -- symmetrically,
+// so neither branch can be distinguished from the other by whether it
+// ever 429s (service.go's own SignupStart comment on why).
+func TestIntegration_SignupStart_PerEmailSendLimit_NeverReturns429ForEitherBranch(t *testing.T) {
 	ts := newTestService(t)
-	ts.policy.ResendVerificationPerAccountPerHour = 5
+	ts.policy.SignupCodesPerEmailPerHour = 5
+	ts.policy.SignupCodeResendCooldown = 0
 	ctx := context.Background()
 
-	knownEmail := uniqueEmail(t)
-	if err := ts.Register(ctx, knownEmail, testPassword, "203.0.113.1", "test-agent"); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	unknownEmail := uniqueEmail(t)
+	existingEmail := uniqueEmail(t)
+	signupNewUser(t, ts, existingEmail, testPassword)
+	newEmail := uniqueEmail(t)
 
 	for i := range 6 {
-		if err := ts.ResendVerification(ctx, knownEmail, "203.0.113.1", "test-agent"); err != nil {
-			t.Fatalf("ResendVerification(known) call %d = %v, want nil (never 429, architect review item 6)", i, err)
+		if err := ts.SignupStart(ctx, existingEmail, true, "203.0.113.1", "test-agent"); err != nil {
+			t.Fatalf("SignupStart(existing) call %d = %v, want nil (never 429, send limit is silent)", i, err)
 		}
-		if err := ts.ResendVerification(ctx, unknownEmail, "203.0.113.1", "test-agent"); err != nil {
-			t.Fatalf("ResendVerification(unknown) call %d = %v, want nil", i, err)
+		if err := ts.SignupStart(ctx, newEmail, true, "203.0.113.1", "test-agent"); err != nil {
+			t.Fatalf("SignupStart(new) call %d = %v, want nil (never 429, send limit is silent)", i, err)
 		}
 	}
 }
 
-// extractToken pulls the raw token out of sendVerificationEmail's own
-// body format ("... POST /api/v1/auth/verify-email: <token>\n\n...").
-func extractToken(t *testing.T, body string) string {
+func TestIntegration_UpdateProfile_TrimsAndValidates(t *testing.T) {
+	ts := newTestService(t)
+	ctx := context.Background()
+	user := signupNewUser(t, ts, uniqueEmail(t), testPassword)
+
+	updated, err := ts.UpdateProfile(ctx, user.ID, "  Ada Lovelace  ", "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("UpdateProfile: %v", err)
+	}
+	if updated.DisplayName == nil || *updated.DisplayName != "Ada Lovelace" {
+		t.Fatalf("DisplayName = %v, want trimmed \"Ada Lovelace\"", updated.DisplayName)
+	}
+
+	if _, err := ts.UpdateProfile(ctx, user.ID, "   ", "203.0.113.1", "test-agent"); !errors.Is(err, identity.ErrDisplayNameEmpty) {
+		t.Fatalf("UpdateProfile(blank) = %v, want identity.ErrDisplayNameEmpty", err)
+	}
+	if _, err := ts.UpdateProfile(ctx, user.ID, strings.Repeat("a", 61), "203.0.113.1", "test-agent"); !errors.Is(err, identity.ErrDisplayNameTooLong) {
+		t.Fatalf("UpdateProfile(61 chars) = %v, want identity.ErrDisplayNameTooLong", err)
+	}
+}
+
+func TestIntegration_CompleteOnboarding_RequiresDisplayNameAndWatchlistItem(t *testing.T) {
+	ts := newTestService(t)
+	ctx := context.Background()
+	user := signupNewUser(t, ts, uniqueEmail(t), testPassword)
+
+	if _, err := ts.CompleteOnboarding(ctx, user.ID, "203.0.113.1", "test-agent"); !errors.Is(err, ErrOnboardingIncomplete) {
+		t.Fatalf("CompleteOnboarding(no display name, no watchlist) = %v, want ErrOnboardingIncomplete", err)
+	}
+
+	if _, err := ts.UpdateProfile(ctx, user.ID, "Ada", "203.0.113.1", "test-agent"); err != nil {
+		t.Fatalf("UpdateProfile: %v", err)
+	}
+	if _, err := ts.CompleteOnboarding(ctx, user.ID, "203.0.113.1", "test-agent"); !errors.Is(err, ErrOnboardingIncomplete) {
+		t.Fatalf("CompleteOnboarding(display name set, no watchlist) = %v, want ErrOnboardingIncomplete", err)
+	}
+
+	ts.watchlist.counts = map[int64]int{user.ID: 1}
+	completed, err := ts.CompleteOnboarding(ctx, user.ID, "203.0.113.1", "test-agent")
+	if err != nil {
+		t.Fatalf("CompleteOnboarding(display name + watchlist item) = %v, want nil", err)
+	}
+	if !completed.OnboardingCompleted() {
+		t.Fatal("CompleteOnboarding did not set onboarding_completed_at")
+	}
+	if countAuthEvents(t, ts.db, user.ID, "onboarding_complete") != 1 {
+		t.Fatal("expected one onboarding_complete auth_events row")
+	}
+}
+
+// codeMarkerRe matches SignupStart's own emailed-code body.
+var codeMarkerRe = regexp.MustCompile(`Your ARGUS signup code is (\d{6})`)
+
+func extractCode(t *testing.T, body string) string {
 	t.Helper()
-	const marker = "verify-email: "
-	i := strings.Index(body, marker)
-	if i < 0 {
-		t.Fatalf("could not find token marker in body: %q", body)
+	m := codeMarkerRe.FindStringSubmatch(body)
+	if len(m) != 2 {
+		t.Fatalf("could not find a signup code in body: %q", body)
 	}
-	rest := body[i+len(marker):]
-	end := strings.IndexAny(rest, "\n")
-	if end < 0 {
-		end = len(rest)
-	}
-	return strings.TrimSpace(rest[:end])
+	return m[1]
 }

@@ -33,6 +33,16 @@ pnpm run build
 - `mappers.ts` -- wire shapes -> this app's existing display types
   (`@/types/domain`), so already-built components keep their props.
 
+## Dev server port is pinned
+
+`vite.config.ts` sets `server.port = 5173` with `strictPort: true`. The
+backend's CSRF rule (`ARGUS_AUTH_ALLOWED_ORIGINS`) allows exactly
+`http://localhost:5173` and `http://127.0.0.1:5173` by default -- if
+something else is already using 5173, `pnpm dev` refuses to start
+rather than silently moving to the next free port, which would
+otherwise make every POST/PUT/PATCH/DELETE fail with `csrf_rejected`
+for a reason that isn't obvious from the error alone.
+
 ## Environment variables
 
 See `.env.example`. `VITE_API_BASE_URL` (default a relative `/api/v1`, proxied

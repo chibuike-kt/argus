@@ -72,14 +72,57 @@
   --color-prov-r: #f5b461;
   --color-prov-u: #f0616d;
 
-  /* Type: Montserrat for UI text, IBM Plex Mono for every number. */
-  --font-sans: "Montserrat", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Type: Onest for UI text (body, labels, inputs, buttons, terminal UI
+     text), Archivo for headings/panel titles/large display text, IBM
+     Plex Mono for every number and code. Montserrat is retired (web
+     light auth redesign brief, Part 1a). */
+  --font-sans: "Onest", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-heading: "Archivo", "Onest", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
   /* Astron Valley: display face for the ARGUS logo mark and wordmark only
      (landing/auth) -- the analysis workspace itself carries no brand
-     header. Falls back to Montserrat until the file is added to
-     public/fonts/. */
-  --font-display: "Astron Valley", "Montserrat", system-ui, sans-serif;
+     header. Falls back to Onest (not Montserrat, which no longer loads)
+     until the file is added to public/fonts/. */
+  --font-display: "Astron Valley", "Onest", system-ui, sans-serif;
+
+  /* Light pages ONLY (sign-in, sign-up, onboarding, /terms, /privacy,
+     the future landing page) -- a second, entirely separate token set,
+     every name "light"-prefixed so it can never be confused with or
+     accidentally applied to the terminal's own dark tokens above
+     (web light auth redesign brief, Part 1b). The terminal
+     (/analysis, /setups, /account) never reads these; light pages
+     never read --color-base/etc above.
+     Superseded mid-build: the reference screenshots' own navy/blue
+     palette (sampled with a pixel eyedropper: #032b69 navy, #0166f4
+     primary) was built first, per the brief's own explicit
+     instruction to sample it -- then replaced on direct product
+     feedback with ARGUS's own existing brand colour instead of a
+     new one borrowed from the reference product's screenshots.
+     --color-light-primary is now literally --color-accent, the same
+     indigo hex the terminal uses (its own doc comment above reserves
+     that hue for chart marks there specifically, not generic chrome --
+     but it is still ARGUS's one brand accent, and these pages have no
+     chart to compete with it); --color-light-text reuses
+     --color-accent-foreground. Page/surface/fill/line/muted stay
+     neutral greys (no hue to borrow or reuse for those). Disabled
+     primary buttons dim the same solid fill (PrimaryButton's own
+     disabled:opacity-*), the same treatment the terminal's own Button
+     component uses, rather than a separate lightened/pastel colour --
+     which is also why a disabled Continue no longer reads as the pale
+     blue sampled from the reference screenshot. */
+  --color-light-page: #fbfbfb;
+  --color-light-surface: #ffffff;
+  --color-light-text: var(--color-accent-foreground);
+  --color-light-muted: #6b7280;
+  --color-light-line: #e5e7eb;
+  --color-light-fill: #eeeeee;
+  --color-light-primary: var(--color-accent);
+  --color-light-primary-strong: var(--color-accent-strong);
+  /* Not shown in any reference screenshot (none has an error state) --
+     a standard WCAG AA-contrast red against white/the light surfaces,
+     chosen rather than sampled. */
+  --color-light-error: #dc2626;
+  --color-light-focus: var(--color-accent);
 
   /* Radii: tight, engineered. */
   --radius-sm: 4px;
@@ -140,6 +183,23 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
+  }
+
+  /* Scope wrapper for every light page (AuthShell renders this) --
+     color-scheme: light so native form controls/scrollbars render
+     light, its own background + full-viewport min-height so the
+     terminal's black body background never shows at the edges, on
+     overscroll, or behind the mobile keyboard pushing the viewport
+     short, and its own default text colour (body's own --color-fg
+     default is a near-white meant for a dark background, wrong here)
+     (web light auth redesign brief, Part 1b). font-family stays
+     --font-sans (Onest) -- shared with the terminal, not a light-only
+     token. */
+  .theme-light {
+    color-scheme: light;
+    background-color: var(--color-light-page);
+    color: var(--color-light-text);
+    min-height: 100dvh;
   }
 
   ::selection {
@@ -222,6 +282,50 @@
     outline-offset: 2px;
   }
 
+  /* Light pages' own focus ring -- the primary blue, not the
+     terminal's neutral --color-chrome-active (web light auth redesign
+     brief, Part 1b/1c). */
+  .focus-ring-light {
+    outline: none;
+  }
+  .focus-ring-light:focus-visible {
+    outline: 2px solid var(--color-light-focus);
+    outline-offset: 2px;
+  }
+
+  /* PrimaryButton's own loading state: a quiet indeterminate sweep,
+     not a spinner glyph (brief's "Motion and feel" section).
+     Transform/opacity only; off under reduced motion below. */
+  .light-progress-sweep {
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in oklab, white 25%, transparent) 50%,
+      transparent 100%
+    );
+    animation: light-progress-sweep 1.2s ease-in-out infinite;
+  }
+
+  /* Step content transition (sign-up/onboarding step changes): an
+     8px slide plus fade, 200ms (brief's "Motion and feel" section). */
+  .light-step-in {
+    animation: light-step-in 0.2s var(--ease-out) both;
+  }
+
+  /* A single 4px, two-oscillation nudge on a failed submit (brief's
+     "Motion and feel" section) -- applied once, not looping. */
+  .light-shake {
+    animation: light-shake 0.2s ease-in-out;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .light-progress-sweep,
+    .light-step-in,
+    .light-shake {
+      animation: none;
+    }
+  }
+
   /* Base interactive transition -- hover/active/selection state on
      buttons, links, tabs, inputs. Transform/opacity/colour only, so it
      never causes layout thrash (e.g. during chart pan/zoom nearby). */
@@ -291,6 +395,39 @@
   }
   50% {
     opacity: 0.35;
+  }
+}
+
+@keyframes light-progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes light-step-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes light-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  75% {
+    transform: translateX(4px);
   }
 }
 

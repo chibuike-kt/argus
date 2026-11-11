@@ -78,6 +78,7 @@ type apiHandler struct {
 	instruments  instrumentsStore
 	candles      candlesStore
 	auth         authService
+	watchlist    watchlistStore
 	authPolicy   config.AuthPolicy
 	isProduction bool
 	logger       *slog.Logger

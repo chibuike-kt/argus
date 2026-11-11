@@ -279,20 +279,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /auth/register:
+  /auth/signup/start:
     post:
-      operationId: authRegister
+      operationId: authSignupStart
       summary: >
-        Creates an unverified account and sends a verification email
-        (ADR-015). Always responds 202 with the identical generic body
-        whether the email was already registered or not -- the body
-        itself never distinguishes the two cases.
+        Starts or restarts a signup: sends a 6-digit emailed code
+        (ADR-015 "Signup and onboarding"). Always 202 with the
+        identical generic body and equal timing whether the email is
+        new or already registered -- for an existing account this
+        sends a notice instead of a code, and the notice itself is
+        skipped silently (never a 429) if the per-email hourly limit
+        is already spent; a new email within its own 60s resend
+        cooldown gets the same silent 202 with nothing re-sent, so
+        that limit can never disclose that the account exists either.
+        429 is only ever the per-IP limit. Requires accepted_terms:
+        true.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/RegisterRequest"
+              $ref: "#/components/schemas/SignupStartRequest"
       responses:
         "202":
           description: Accepted
@@ -312,52 +319,58 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /auth/verify-email:
+  /auth/signup/verify:
     post:
-      operationId: authVerifyEmail
+      operationId: authSignupVerify
       summary: >
-        Consumes a single-use, 24-hour email verification token
-        (ADR-015). Does not create a session.
+        Checks a 6-digit code and, if correct, returns a single-use
+        signup ticket valid for 30 minutes (ADR-015). One generic
+        invalid_code for a wrong, expired, unknown or exhausted code --
+        none of those is distinguished for the caller.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/VerifyEmailRequest"
+              $ref: "#/components/schemas/SignupVerifyRequest"
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GenericAccepted"
+                $ref: "#/components/schemas/SignupVerifyResponse"
         "400":
           description: Bad Request
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-  /auth/resend-verification:
+  /auth/signup/complete:
     post:
-      operationId: authResendVerification
+      operationId: authSignupComplete
       summary: >
-        Generic 202, rate limited per account and per IP, whether or
-        not the email exists or is already verified (ADR-015).
+        Consumes a signup ticket and creates the account, already
+        verified (ADR-015: "no half accounts") -- the first and only
+        point a users row is created for this flow. terms_accepted_at/
+        terms_version are copied from the signup start this ticket
+        descends from. On success, sets the session cookie and returns
+        the user, the same as login.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ResendVerificationRequest"
+              $ref: "#/components/schemas/SignupCompleteRequest"
       responses:
-        "202":
-          description: Accepted
+        "200":
+          description: OK
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GenericAccepted"
-        "429":
-          description: Too Many Requests
+                $ref: "#/components/schemas/AuthUser"
+        "400":
+          description: Bad Request
           content:
             application/json:
               schema:
@@ -455,6 +468,90 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /me/profile:
+    put:
+      operationId: updateProfile
+      summary: Sets the authenticated user's display name.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfileUpdateRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthUser"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /me/onboarding/complete:
+    post:
+      operationId: completeOnboarding
+      summary: >
+        Records onboarding_completed_at (ADR-015), but only once the
+        authenticated user already has a display name and at least one
+        watchlist item -- 409 onboarding_incomplete otherwise: the
+        request itself is well formed, the account's current state is
+        just not yet eligible.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthUser"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /watchlist:
+    get:
+      operationId: getWatchlist
+      summary: The authenticated user's own watchlist, in order (ADR-016 -- watchlists are private).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WatchlistItem"
+    put:
+      operationId: updateWatchlist
+      summary: >
+        Replaces the authenticated user's whole watchlist at once, in
+        the given order (ADR-015: enabled instruments, maximum 50).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WatchlistUpdateRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WatchlistItem"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   schemas:
     Error:
@@ -471,28 +568,64 @@ components:
               type: string
             request_id:
               type: string
-    RegisterRequest:
+    SignupStartRequest:
       type: object
-      required: [email, password]
+      required: [email, accepted_terms]
       properties:
         email:
           type: string
           format: email
+        accepted_terms:
+          type: boolean
+    SignupVerifyRequest:
+      type: object
+      required: [email, code]
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+    SignupVerifyResponse:
+      type: object
+      required: [ticket]
+      properties:
+        ticket:
+          type: string
+    SignupCompleteRequest:
+      type: object
+      required: [ticket, password]
+      properties:
+        ticket:
+          type: string
         password:
           type: string
-    VerifyEmailRequest:
+    ProfileUpdateRequest:
       type: object
-      required: [token]
+      required: [display_name]
       properties:
-        token:
+        display_name:
           type: string
-    ResendVerificationRequest:
+    WatchlistItem:
       type: object
-      required: [email]
+      required: [instrument_id, position]
       properties:
-        email:
-          type: string
-          format: email
+        instrument_id:
+          type: integer
+          format: int64
+        position:
+          type: integer
+          format: int32
+    WatchlistUpdateRequest:
+      type: object
+      required: [instrument_ids]
+      properties:
+        instrument_ids:
+          type: array
+          description: Order in this array becomes each item's position.
+          items:
+            type: integer
+            format: int64
     LoginRequest:
       type: object
       required: [email, password]
@@ -515,7 +648,7 @@ components:
           type: string
     AuthUser:
       type: object
-      required: [id, email, email_verified, created_at]
+      required: [id, email, email_verified, created_at, onboarding_completed]
       properties:
         id:
           type: integer
@@ -527,6 +660,11 @@ components:
         created_at:
           type: string
           format: date-time
+        display_name:
+          type: string
+          nullable: true
+        onboarding_completed:
+          type: boolean
     AuthSession:
       type: object
       required: [id, created_at, last_seen_at, current]

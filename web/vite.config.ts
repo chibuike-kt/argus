@@ -13,10 +13,18 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // The backend's CSRF rule allows exactly http://localhost:5173 and
+    // http://127.0.0.1:5173 by default (ARGUS_AUTH_ALLOWED_ORIGINS) --
+    // if 5173 is taken, Vite would otherwise silently pick the next
+    // free port, and every POST/PUT/PATCH/DELETE would then fail with
+    // csrf_rejected for a reason that isn't obvious from the error
+    // alone. strictPort makes that failure loud instead (Vite refuses
+    // to start) -- see web/README.md.
+    strictPort: true,
     proxy: {
-      "/api": "http://localhost:8080",
-      "/healthz": "http://localhost:8080",
-      "/readyz": "http://localhost:8080",
+      "/api": "http://127.0.0.1:8080",
+      "/healthz": "http://127.0.0.1:8080",
+      "/readyz": "http://127.0.0.1:8080",
     },
   },
 });

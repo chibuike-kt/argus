@@ -1,9 +1,9 @@
-// Package service orchestrates registration, login and logout
-// (ADR-015 Part 1): the one place internal/identity's password,
-// session, tokens, ratelimit and mailer packages are composed, so each
-// of those stays small and independently testable while this package
-// owns the actual business rules (generic responses, rate limiting,
-// rehashing, auditing).
+// Package service orchestrates signup, login and logout (ADR-015
+// "Signup and onboarding"): the one place internal/identity's
+// password, session, tokens, signupcode, ratelimit and mailer packages
+// are composed, so each of those stays small and independently
+// testable while this package owns the actual business rules (generic
+// responses, rate limiting, rehashing, auditing).
 package service
 
 import (
@@ -25,6 +25,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/identity/password"
 	"github.com/chibuike-kt/argus/internal/identity/ratelimit"
 	"github.com/chibuike-kt/argus/internal/identity/session"
+	"github.com/chibuike-kt/argus/internal/identity/signupcode"
 	"github.com/chibuike-kt/argus/internal/identity/tokens"
 	"github.com/chibuike-kt/argus/internal/store"
 )
@@ -40,6 +41,14 @@ const mailSendTimeout = 10 * time.Second
 // response must not reveal which").
 var ErrInvalidCredentials = errors.New("service: invalid credentials")
 
+// ErrTermsNotAccepted is SignupStart's own rejection when
+// accepted_terms is not true (ADR-015 "Signup and onboarding":
+// "Signup start requires accepted_terms: true"). The HTTP layer maps
+// this to 400, not a generic response -- unlike an unknown/known
+// email, whether terms were accepted discloses nothing about any
+// account, so there is nothing to protect by making this generic.
+var ErrTermsNotAccepted = errors.New("service: accepted_terms must be true")
+
 // RateLimitedError is returned by any method that hit a rate limit
 // (ADR-015 addendum row 12). The HTTP layer turns this into 429 with
 // Retry-After.
@@ -51,32 +60,47 @@ func (e *RateLimitedError) Error() string {
 	return fmt.Sprintf("service: rate limited, retry after %s", e.RetryAfter)
 }
 
-// Service is the registration/login/logout orchestrator.
+// watchlistCounter is the slice of *internal/watchlist.Store
+// CompleteOnboarding actually needs -- a consumer-defined interface
+// (this brief's own rule 7) so this package does not import
+// internal/watchlist just for a type name, and so a test can satisfy
+// it with a hand-written fake instead of a real Postgres connection.
+type watchlistCounter interface {
+	Count(ctx context.Context, userID int64) (int, error)
+}
+
+// Service is the signup/login/logout orchestrator.
 type Service struct {
-	db       *sql.DB
-	users    *identity.Store
-	sessions *session.Store
-	tokens   *tokens.Store
-	hasher   *password.Hasher
-	limiter  *ratelimit.Limiter
-	mail     mailer.Mailer
-	events   *store.Queries
-	clk      clock.Clock
-	policy   config.AuthPolicy
-	logger   *slog.Logger
+	db        *sql.DB
+	users     *identity.Store
+	sessions  *session.Store
+	tokens    *tokens.Store
+	signup    *signupcode.Store
+	watchlist watchlistCounter
+	hasher    *password.Hasher
+	limiter   *ratelimit.Limiter
+	mail      mailer.Mailer
+	events    *store.Queries
+	clk       clock.Clock
+	policy    config.AuthPolicy
+	logger    *slog.Logger
 }
 
 // New builds a Service from its already-constructed collaborators --
 // this package does not build any of them itself, so each stays
 // independently testable and cmd/argus-api/main.go stays the one
-// place they are all wired together. db is kept (not just wrapped
-// into store.Queries) so VerifyEmail can open a transaction spanning
-// both the tokens and users stores (architect review item 9).
+// place they are all wired together. tokens is kept for the password
+// reset flow (internal/identity/tokens' own doc comment) even though
+// nothing in this package calls it yet; db is kept (not just wrapped
+// into store.Queries) for the same future transaction-spanning need
+// VerifyEmail used to have (architect review item 9).
 func New(
 	db *sql.DB,
 	users *identity.Store,
 	sessions *session.Store,
 	tokens *tokens.Store,
+	signup *signupcode.Store,
+	watchlist watchlistCounter,
 	hasher *password.Hasher,
 	limiter *ratelimit.Limiter,
 	mail mailer.Mailer,
@@ -85,147 +109,124 @@ func New(
 	logger *slog.Logger,
 ) *Service {
 	return &Service{
-		db: db, users: users, sessions: sessions, tokens: tokens, hasher: hasher,
+		db: db, users: users, sessions: sessions, tokens: tokens,
+		signup: signup, watchlist: watchlist, hasher: hasher,
 		limiter: limiter, mail: mail, events: store.New(db),
 		clk: clk, policy: policy, logger: logger,
 	}
 }
 
-// Register validates the password policy, then creates an unverified
-// account and sends a verification email -- unless the email is
-// already registered, in which case nothing new is created, but the
-// caller still gets the same success result either way (ADR-015:
-// "Always responds with the same generic 202 body whether the email
-// already existed or not").
-func (s *Service) Register(ctx context.Context, rawEmail, rawPassword, ip, userAgent string) error {
+// SignupStart begins or restarts a signup: sends a 6-digit emailed
+// code to a new email, or a notice to an existing account's email
+// (ADR-015 "Signup and onboarding"). Always the same generic success
+// from the caller's point of view, with equal timing -- neither branch
+// does the kind of expensive work (Argon2 hashing) Register used to
+// need VerifyDummy to match, so there is no separate dummy-cost call
+// here; both branches do one user lookup plus one rate-limit check
+// plus one async send, the same shape either way.
+func (s *Service) SignupStart(ctx context.Context, rawEmail string, acceptedTerms bool, ip, userAgent string) error {
+	if !acceptedTerms {
+		return ErrTermsNotAccepted
+	}
 	email := strings.TrimSpace(rawEmail)
-	if err := password.ValidatePolicy(rawPassword, identity.LocalPart(email)); err != nil {
-		return err
+
+	ipResult, err := s.limiter.Allow(ctx, "signup:start:ip:"+ip, s.policy.SignupStartsPerIPPerHour, time.Hour)
+	if err != nil {
+		return fmt.Errorf("service: signup start: ip rate limit: %w", err)
+	}
+	if !ipResult.Allowed {
+		return &RateLimitedError{RetryAfter: ipResult.RetryAfter}
 	}
 
-	result, err := s.limiter.Allow(ctx, "register:ip:"+ip, s.policy.RegisterPerIPPerHour, time.Hour)
-	if err != nil {
-		return fmt.Errorf("service: register: rate limit: %w", err)
-	}
-	if !result.Allowed {
-		return &RateLimitedError{RetryAfter: result.RetryAfter}
-	}
+	// Per-email send limit (ADR-015: "At most 5 codes per email per
+	// hour"), shared by both branches below. Checked once, before
+	// either branch, and always folded into the same generic success
+	// on exceed -- never surfaced as 429 for the new-email branch
+	// either (not addendum-specified in so many words for that
+	// branch; applied symmetrically here, flagged in the report):
+	// a 429 that only ever happened on one branch would itself
+	// disclose, after enough probes, whether a guessed email already
+	// has an account -- exactly the oracle this whole ADR closes
+	// everywhere else.
+	sendAllowed := s.emailSendAllowed(ctx, email)
 
 	existing, err := s.users.GetByEmail(ctx, email)
 	if err == nil {
-		// Architect review item 1: every non-hashing path below must
-		// cost the same as the real Insert+Hash path does, or response
-		// time itself discloses that the email already exists (measured
-		// at ~3ms for this branch versus ~150ms for a real Argon2 hash).
-		// VerifyDummy pays that same Argon2 cost against a fixed,
-		// never-secret hash.
-		if verr := s.hasher.VerifyDummy(ctx, rawPassword); verr != nil {
-			s.logger.Warn("service: register: dummy verify failed", "error", verr)
+		if sendAllowed {
+			s.sendAsync(ctx, mailer.Message{
+				To:      existing.Email,
+				Subject: "Someone tried to sign up with your email",
+				Body:    "Someone tried to create an ARGUS account with your email address. If this was not you, no action is needed -- your existing account is unaffected.",
+			})
 		}
-		// Architect review item 6: without its own limit, this branch
-		// lets an attacker with many source IPs (each under the
-		// register:ip limit) flood a victim's inbox -- reusing the same
-		// per-account counter ResendVerification uses, so the two
-		// cannot be used to bypass each other.
-		if s.accountSendAllowed(ctx, existing.ID) {
-			if existing.EmailVerified() {
-				// Do not send a verification link to an already-verified
-				// account (ADR-015); a "someone tried to register" notice
-				// instead, so the real owner learns about the attempt.
-				s.sendAsync(ctx, mailer.Message{
-					To:      existing.Email,
-					Subject: "Someone tried to register with your email",
-					Body:    "Someone tried to create an ARGUS account with your email address. If this was not you, no action is needed -- your existing account is unaffected.",
-				})
-			} else {
-				// Not addendum-specified: resending the verification link
-				// for an existing, unverified account on a repeat register
-				// attempt (the person most likely forgot they already
-				// signed up) -- flagged in the report.
-				s.sendVerificationEmail(ctx, existing)
-			}
-		}
-		s.recordEvent(ctx, nil, "register", ip, userAgent, map[string]any{"outcome": "existing_email"})
+		s.recordEvent(ctx, &existing.ID, "signup_start", ip, userAgent, map[string]any{"outcome": "existing_email"})
 		return nil
 	}
 	if !errors.Is(err, identity.ErrNotFound) {
-		return fmt.Errorf("service: register: look up existing user: %w", err)
+		return fmt.Errorf("service: signup start: look up existing user: %w", err)
 	}
 
-	hash, err := s.hasher.Hash(ctx, rawPassword)
-	if err != nil {
-		return fmt.Errorf("service: register: hash password: %w", err)
+	if !sendAllowed {
+		s.recordEvent(ctx, nil, "signup_start", ip, userAgent, map[string]any{"outcome": "code_send_limited"})
+		return nil
 	}
-	user, err := s.users.Insert(ctx, email, hash)
+
+	now := s.clk.Now()
+	code, err := s.signup.IssueCode(ctx, email, s.policy.SignupCodeResendCooldown, s.policy.SignupCodeTTL, now, s.policy.TermsVersion)
 	if err != nil {
-		if errors.Is(err, identity.ErrAlreadyExists) {
-			// A concurrent registration won the race between our own
-			// GetByEmail and this Insert -- still a success response,
-			// same as the "existing" branch above, and still no
-			// verification email (we cannot tell from here whether
-			// that concurrent registration already sent one; sending a
-			// second could just as easily mean the real owner gets two
-			// -- accepted as a rare, harmless edge case rather than a
-			// reason to make this read-then-write non-atomic any more
-			// complex than it already is). The hash above already ran,
-			// so this path's own cost matches the "existing" branch's
-			// dummy verify closely enough -- no second dummy verify
-			// needed here.
-			s.recordEvent(ctx, nil, "register", ip, userAgent, map[string]any{"outcome": "race_existing_email"})
+		var tooSoon *signupcode.TooSoonError
+		if errors.As(err, &tooSoon) {
+			// Architect review (of Part 2) item 1: this WAS mapped to
+			// 429, on the reasoning that the cooldown only ever fires
+			// for an email with a signup already in progress, and an
+			// existing account's email never reaches IssueCode at all.
+			// That reasoning was wrong -- it is exactly the asymmetry
+			// that makes it an oracle: call start twice within 60s and
+			// a new email 429s on the second call while an existing
+			// one always 202s, so the two are distinguishable after
+			// exactly two requests. No new code is issued or sent; the
+			// response is the same silent generic success the per-
+			// email send limit above already uses.
+			s.recordEvent(ctx, nil, "signup_start", ip, userAgent, map[string]any{"outcome": "resend_cooldown"})
 			return nil
 		}
-		return fmt.Errorf("service: register: insert user: %w", err)
+		return fmt.Errorf("service: signup start: issue code: %w", err)
 	}
 
-	s.sendVerificationEmail(ctx, user)
-	s.recordEvent(ctx, &user.ID, "register", ip, userAgent, map[string]any{"outcome": "created"})
+	s.sendAsync(ctx, mailer.Message{
+		To:      email,
+		Subject: "Your ARGUS signup code",
+		Body:    fmt.Sprintf("Your ARGUS signup code is %s. It expires in %s.", code, s.policy.SignupCodeTTL),
+	})
+	s.recordEvent(ctx, nil, "signup_start", ip, userAgent, map[string]any{"outcome": "code_sent"})
 	return nil
 }
 
-// accountSendAllowed is the per-account email-sending limit shared by
-// Register's existing-email branches and ResendVerification (architect
-// review item 6): the same "resend:account:<id>" counter, so an
-// attacker cannot bypass one path's limit by going through the other.
-// Fails open on a Limiter error (which in practice Allow never
-// actually returns -- it falls back to an in-process counter instead
-// -- so this is defensive, not a real escape hatch): a bug in our own
-// rate-limit bookkeeping must not silently block a legitimate
-// registration or verification flow.
-func (s *Service) accountSendAllowed(ctx context.Context, userID int64) bool {
-	result, err := s.limiter.Allow(ctx, fmt.Sprintf("resend:account:%d", userID), s.policy.ResendVerificationPerAccountPerHour, time.Hour)
+// emailSendAllowed is SignupStart's own per-email send limit (ADR-015:
+// "5 codes per email per hour"), keyed on the SHA-256 of the
+// normalized email -- never the raw address in a Redis key/log, the
+// same convention loginFailureKey already uses. Fails open on a
+// Limiter error, the same defensive (not a real escape hatch, see
+// ratelimit.Limiter's own fallback) posture the old accountSendAllowed
+// used.
+func (s *Service) emailSendAllowed(ctx context.Context, email string) bool {
+	result, err := s.limiter.Allow(ctx, "signup:send:email:"+emailHashKey(email), s.policy.SignupCodesPerEmailPerHour, time.Hour)
 	if err != nil {
-		s.logger.Warn("service: account send rate limit", "user_id", userID, "error", err)
+		s.logger.Warn("service: signup send rate limit", "error", err)
 		return true
 	}
 	return result.Allowed
 }
 
-func (s *Service) sendVerificationEmail(ctx context.Context, u identity.User) {
-	rawToken, _, err := s.tokens.Issue(ctx, u.ID, tokens.PurposeVerifyEmail, s.policy.EmailVerificationTTL)
-	if err != nil {
-		s.logger.Error("service: issue verification token", "user_id", u.ID, "error", err)
-		return
-	}
-	// No frontend route exists yet to build a clickable link against
-	// (out of scope for this brief) -- the token itself is what
-	// POST /auth/verify-email takes, so the email states that
-	// directly rather than inventing a URL shape nothing serves yet.
-	body := fmt.Sprintf(
-		"Welcome to ARGUS. To verify your email, submit this token to POST /api/v1/auth/verify-email: %s\n\nThis token expires in %s.",
-		rawToken, s.policy.EmailVerificationTTL,
-	)
-	s.sendAsync(ctx, mailer.Message{To: u.Email, Subject: "Verify your ARGUS email", Body: body})
-}
-
 // sendAsync sends msg in the background (architect review item 1):
-// Register/ResendVerification's own response time must not depend on
-// how long the mail provider takes to accept a message either, or a
-// slow provider reintroduces the same existence oracle VerifyDummy
-// closes for Argon2. context.WithoutCancel keeps whatever request-
-// scoped values ctx carries (e.g. a trace id) while detaching from its
-// cancellation, so the HTTP response returning (and so the request's
-// own context being cancelled) does not abort the send; mailSendTimeout
-// bounds it instead so a hung provider cannot leak goroutines forever.
+// SignupStart's own response time must not depend on how long the
+// mail provider takes to accept a message, or a slow provider
+// reintroduces the timing oracle this method otherwise closes.
+// context.WithoutCancel keeps whatever request-scoped values ctx
+// carries (e.g. a trace id) while detaching from its cancellation, so
+// the HTTP response returning (and so the request's own context being
+// cancelled) does not abort the send; mailSendTimeout bounds it
+// instead so a hung provider cannot leak goroutines forever.
 func (s *Service) sendAsync(ctx context.Context, msg mailer.Message) {
 	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mailSendTimeout)
 	go func() {
@@ -236,72 +237,162 @@ func (s *Service) sendAsync(ctx context.Context, msg mailer.Message) {
 	}()
 }
 
-// VerifyEmail consumes a single-use verification token and marks the
-// account verified, atomically (architect review item 9): consuming
-// the token and marking the account verified were two separate
-// statements before this, so a failure on the second step burned the
-// token while leaving the account unverified, with no way to retry.
-// Does not log the user in (ADR-015).
-func (s *Service) VerifyEmail(ctx context.Context, rawToken, ip, userAgent string) error {
+// SignupVerify checks a 6-digit code and, on success, returns a
+// single-use signup ticket (ADR-015). signupcode.ErrInvalidCode
+// propagates unchanged -- the HTTP layer maps it to the one generic
+// invalid_code response the ADR requires, never distinguishing why.
+func (s *Service) SignupVerify(ctx context.Context, rawEmail, code, ip, userAgent string) (ticket string, err error) {
+	email := strings.TrimSpace(rawEmail)
+	ticket, err = s.signup.VerifyCode(ctx, email, code, s.policy.SignupCodeMaxWrongGuesses, s.policy.SignupTicketTTL)
+	if err != nil {
+		if errors.Is(err, signupcode.ErrInvalidCode) {
+			s.recordEvent(ctx, nil, "signup_verify_failure", ip, userAgent, nil)
+			return "", err
+		}
+		return "", fmt.Errorf("service: signup verify: %w", err)
+	}
+	s.recordEvent(ctx, nil, "signup_verify_success", ip, userAgent, nil)
+	return ticket, nil
+}
+
+// SignupComplete consumes a signup ticket and creates the account,
+// already verified (ADR-015: "no half accounts" -- this is the one
+// and only place a users row is created for this flow). On success,
+// logs the new account in, the same as Login.
+func (s *Service) SignupComplete(ctx context.Context, rawTicket, rawPassword, ip, userAgent string) (rawSessionToken string, user identity.User, err error) {
+	// Architect review (of Part 2) item 2: this used to consume the
+	// ticket first, then validate the password -- a weak password (or
+	// any other failure past this point) left the ticket already
+	// spent, forcing the user back to a brand new emailed code even
+	// though nothing about the code/ticket itself was wrong. Read-only
+	// lookup first, so a rejected password never burns the ticket.
+	verification, err := s.signup.GetByTicket(ctx, rawTicket)
+	if err != nil {
+		if errors.Is(err, signupcode.ErrInvalidTicket) {
+			return "", identity.User{}, err
+		}
+		return "", identity.User{}, fmt.Errorf("service: signup complete: get ticket: %w", err)
+	}
+
+	if err := password.ValidatePolicy(rawPassword, identity.LocalPart(verification.Email)); err != nil {
+		return "", identity.User{}, err
+	}
+
+	// Hashed before the transaction below opens: Argon2's own cost must
+	// not hold a database transaction open for as long as the hash
+	// takes (architect review item 2).
+	hash, err := s.hasher.Hash(ctx, rawPassword)
+	if err != nil {
+		return "", identity.User{}, fmt.Errorf("service: signup complete: hash password: %w", err)
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("service: verify email: begin tx: %w", err)
+		return "", identity.User{}, fmt.Errorf("service: signup complete: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	tok, err := s.tokens.WithTx(tx).Consume(ctx, rawToken, tokens.PurposeVerifyEmail)
+	// Consuming the ticket and creating the user share one transaction
+	// (architect review item 2): a failed insert now rolls the
+	// ticket's consumption back too, instead of permanently burning it
+	// for a failure that had nothing to do with the code/ticket.
+	consumed, err := s.signup.WithTx(tx).ConsumeTicket(ctx, rawTicket)
 	if err != nil {
-		return err
-	}
-	if _, err := s.users.WithTx(tx).MarkEmailVerified(ctx, tok.UserID, s.clk.Now()); err != nil {
-		return fmt.Errorf("service: verify email: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("service: verify email: commit: %w", err)
+		if errors.Is(err, signupcode.ErrInvalidTicket) {
+			return "", identity.User{}, err
+		}
+		return "", identity.User{}, fmt.Errorf("service: signup complete: consume ticket: %w", err)
 	}
 
-	s.recordEvent(ctx, &tok.UserID, "verify_email", ip, userAgent, nil)
-	return nil
+	now := s.clk.Now()
+	user, err = s.users.WithTx(tx).InsertVerified(ctx, consumed.Email, hash, now, consumed.TermsAcceptedAt, consumed.TermsVersion)
+	if err != nil {
+		if errors.Is(err, identity.ErrAlreadyExists) {
+			// Architect review item 5: a user can run start/verify/
+			// complete in one tab while a second tab does the same for
+			// the same email with its own, separately issued ticket --
+			// each ticket is bound to its own signup_verifications row
+			// (ADR-015), so both can reach here, and only one Insert
+			// wins the email_normalized unique constraint. The loser's
+			// ticket is still consumed (rolled back below along with
+			// the rest of this transaction) -- mapped to the same
+			// generic invalid_ticket the HTTP layer already uses for
+			// every other ticket failure, never a 500, and never
+			// disclosing that the email now belongs to an account.
+			return "", identity.User{}, signupcode.ErrInvalidTicket
+		}
+		return "", identity.User{}, fmt.Errorf("service: signup complete: insert user: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", identity.User{}, fmt.Errorf("service: signup complete: commit: %w", err)
+	}
+
+	token, _, err := s.sessions.Create(ctx, user.ID, userAgent, ip)
+	if err != nil {
+		return "", identity.User{}, fmt.Errorf("service: signup complete: create session: %w", err)
+	}
+
+	s.recordEvent(ctx, &user.ID, "signup_complete", ip, userAgent, nil)
+	return token, user, nil
 }
 
-// ResendVerification is rate limited per account and per IP, and
-// always succeeds from the caller's point of view regardless of
-// whether the email exists (ADR-015).
-func (s *Service) ResendVerification(ctx context.Context, rawEmail, ip, userAgent string) error {
-	email := strings.TrimSpace(rawEmail)
-
-	ipResult, err := s.limiter.Allow(ctx, "resend:ip:"+ip, s.policy.ResendVerificationPerIPPerHour, time.Hour)
+// UpdateProfile sets userID's display name (ADR-015 "Signup and
+// onboarding"), after validating it.
+func (s *Service) UpdateProfile(ctx context.Context, userID int64, rawDisplayName, ip, userAgent string) (identity.User, error) {
+	name, err := identity.ValidateDisplayName(rawDisplayName, s.policy.DisplayNameMaxLength)
 	if err != nil {
-		return fmt.Errorf("service: resend verification: rate limit: %w", err)
+		return identity.User{}, err
 	}
-	if !ipResult.Allowed {
-		return &RateLimitedError{RetryAfter: ipResult.RetryAfter}
-	}
-
-	user, err := s.users.GetByEmail(ctx, email)
+	user, err := s.users.SetDisplayName(ctx, userID, name, s.clk.Now())
 	if err != nil {
-		if errors.Is(err, identity.ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("service: resend verification: look up user: %w", err)
+		return identity.User{}, fmt.Errorf("service: update profile: %w", err)
+	}
+	s.recordEvent(ctx, &userID, "profile_update", ip, userAgent, nil)
+	return user, nil
+}
+
+// ErrOnboardingIncomplete is CompleteOnboarding's own rejection when
+// userID is missing a display name or has no watchlist item yet
+// (ADR-015: "Onboarding is complete only with a display name and at
+// least one watchlist item").
+var ErrOnboardingIncomplete = errors.New("service: onboarding requires a display name and at least one watchlist item")
+
+// CompleteOnboarding records onboarding_completed_at, but only once
+// userID already has a display name and at least one watchlist item
+// (ADR-015) -- checked here, in one visible place, rather than
+// duplicated as a SQL WHERE clause (internal/identity.Store's own
+// MarkOnboardingCompleted comment).
+func (s *Service) CompleteOnboarding(ctx context.Context, userID int64, ip, userAgent string) (identity.User, error) {
+	user, err := s.users.GetByID(ctx, userID)
+	if err != nil {
+		return identity.User{}, fmt.Errorf("service: complete onboarding: look up user: %w", err)
+	}
+	if user.DisplayName == nil {
+		return identity.User{}, ErrOnboardingIncomplete
+	}
+	count, err := s.watchlist.Count(ctx, userID)
+	if err != nil {
+		return identity.User{}, fmt.Errorf("service: complete onboarding: count watchlist: %w", err)
+	}
+	if count == 0 {
+		return identity.User{}, ErrOnboardingIncomplete
 	}
 
-	// Architect review item 6: only the per-IP limit above (checked
-	// before any user lookup, so it never depends on whether the email
-	// exists) may return 429. The per-account limit here must not: a
-	// 429 only for accounts that exist would itself be an existence
-	// oracle after a few tries, so hitting it returns the same generic
-	// success and simply sends nothing.
-	if !s.accountSendAllowed(ctx, user.ID) {
-		return nil
+	user, err = s.users.MarkOnboardingCompleted(ctx, userID, s.clk.Now())
+	if err != nil {
+		return identity.User{}, fmt.Errorf("service: complete onboarding: %w", err)
 	}
+	s.recordEvent(ctx, &userID, "onboarding_complete", ip, userAgent, nil)
+	return user, nil
+}
 
-	if user.EmailVerified() {
-		return nil
-	}
-	s.sendVerificationEmail(ctx, user)
-	s.recordEvent(ctx, &user.ID, "resend_verification", ip, userAgent, nil)
-	return nil
+// emailHashKey is the SHA-256 hex digest of the normalized email --
+// the same "never a raw email in a Redis key" convention
+// loginFailureKey uses, factored out since SignupStart needs it too.
+func emailHashKey(email string) string {
+	sum := sha256.Sum256([]byte(identity.NormalizeEmail(email)))
+	return hex.EncodeToString(sum[:])
 }
 
 // Login verifies credentials and, on success, creates a session.

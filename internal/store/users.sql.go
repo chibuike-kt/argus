@@ -12,7 +12,7 @@ import (
 )
 
 const getUserByEmailNormalized = `-- name: GetUserByEmailNormalized :one
-SELECT id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at FROM users WHERE email_normalized = $1
+SELECT id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at, display_name, terms_accepted_at, terms_version, onboarding_completed_at FROM users WHERE email_normalized = $1
 `
 
 func (q *Queries) GetUserByEmailNormalized(ctx context.Context, emailNormalized string) (User, error) {
@@ -27,12 +27,16 @@ func (q *Queries) GetUserByEmailNormalized(ctx context.Context, emailNormalized 
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DisabledAt,
+		&i.DisplayName,
+		&i.TermsAcceptedAt,
+		&i.TermsVersion,
+		&i.OnboardingCompletedAt,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at FROM users WHERE id = $1
+SELECT id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at, display_name, terms_accepted_at, terms_version, onboarding_completed_at FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
@@ -47,24 +51,47 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DisabledAt,
+		&i.DisplayName,
+		&i.TermsAcceptedAt,
+		&i.TermsVersion,
+		&i.OnboardingCompletedAt,
 	)
 	return i, err
 }
 
-const insertUser = `-- name: InsertUser :one
-INSERT INTO users (email, email_normalized, password_hash)
-VALUES ($1, $2, $3)
-RETURNING id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at
+const insertVerifiedUser = `-- name: InsertVerifiedUser :one
+INSERT INTO users (
+    email, email_normalized, password_hash, email_verified_at,
+    terms_accepted_at, terms_version
+)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at, display_name, terms_accepted_at, terms_version, onboarding_completed_at
 `
 
-type InsertUserParams struct {
-	Email           string `json:"email"`
-	EmailNormalized string `json:"email_normalized"`
-	PasswordHash    string `json:"password_hash"`
+type InsertVerifiedUserParams struct {
+	Email           string         `json:"email"`
+	EmailNormalized string         `json:"email_normalized"`
+	PasswordHash    string         `json:"password_hash"`
+	EmailVerifiedAt sql.NullTime   `json:"email_verified_at"`
+	TermsAcceptedAt sql.NullTime   `json:"terms_accepted_at"`
+	TermsVersion    sql.NullString `json:"terms_version"`
 }
 
-func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, insertUser, arg.Email, arg.EmailNormalized, arg.PasswordHash)
+// InsertVerifiedUser is the only way a users row is ever created
+// (ADR-015: "no half accounts" -- signup complete is the one call
+// site, after the emailed code and the password step). The row is
+// created already verified, with terms_accepted_at/terms_version
+// carried over from the signup_verifications row that is consumed
+// alongside it.
+func (q *Queries) InsertVerifiedUser(ctx context.Context, arg InsertVerifiedUserParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, insertVerifiedUser,
+		arg.Email,
+		arg.EmailNormalized,
+		arg.PasswordHash,
+		arg.EmailVerifiedAt,
+		arg.TermsAcceptedAt,
+		arg.TermsVersion,
+	)
 	var i User
 	err := row.Scan(
 		&i.ID,
@@ -75,6 +102,10 @@ func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) (User, e
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DisabledAt,
+		&i.DisplayName,
+		&i.TermsAcceptedAt,
+		&i.TermsVersion,
+		&i.OnboardingCompletedAt,
 	)
 	return i, err
 }
@@ -82,7 +113,7 @@ func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) (User, e
 const markEmailVerified = `-- name: MarkEmailVerified :one
 UPDATE users SET email_verified_at = $2, updated_at = $2
 WHERE id = $1
-RETURNING id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at
+RETURNING id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at, display_name, terms_accepted_at, terms_version, onboarding_completed_at
 `
 
 type MarkEmailVerifiedParams struct {
@@ -102,6 +133,78 @@ func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DisabledAt,
+		&i.DisplayName,
+		&i.TermsAcceptedAt,
+		&i.TermsVersion,
+		&i.OnboardingCompletedAt,
+	)
+	return i, err
+}
+
+const markOnboardingCompleted = `-- name: MarkOnboardingCompleted :one
+UPDATE users SET onboarding_completed_at = $2, updated_at = $2
+WHERE id = $1
+RETURNING id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at, display_name, terms_accepted_at, terms_version, onboarding_completed_at
+`
+
+type MarkOnboardingCompletedParams struct {
+	ID                    int64        `json:"id"`
+	OnboardingCompletedAt sql.NullTime `json:"onboarding_completed_at"`
+}
+
+// MarkOnboardingCompleted is unconditional -- the service layer
+// (not this statement) is what checks display_name and at least one
+// watchlist item already exist before calling it, so the check stays
+// in one visible, testable place in Go rather than a SQL WHERE clause
+// duplicating it.
+func (q *Queries) MarkOnboardingCompleted(ctx context.Context, arg MarkOnboardingCompletedParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, markOnboardingCompleted, arg.ID, arg.OnboardingCompletedAt)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.EmailNormalized,
+		&i.PasswordHash,
+		&i.EmailVerifiedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DisabledAt,
+		&i.DisplayName,
+		&i.TermsAcceptedAt,
+		&i.TermsVersion,
+		&i.OnboardingCompletedAt,
+	)
+	return i, err
+}
+
+const setDisplayName = `-- name: SetDisplayName :one
+UPDATE users SET display_name = $2, updated_at = $3
+WHERE id = $1
+RETURNING id, email, email_normalized, password_hash, email_verified_at, created_at, updated_at, disabled_at, display_name, terms_accepted_at, terms_version, onboarding_completed_at
+`
+
+type SetDisplayNameParams struct {
+	ID          int64          `json:"id"`
+	DisplayName sql.NullString `json:"display_name"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
+func (q *Queries) SetDisplayName(ctx context.Context, arg SetDisplayNameParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, setDisplayName, arg.ID, arg.DisplayName, arg.UpdatedAt)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.EmailNormalized,
+		&i.PasswordHash,
+		&i.EmailVerifiedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DisabledAt,
+		&i.DisplayName,
+		&i.TermsAcceptedAt,
+		&i.TermsVersion,
+		&i.OnboardingCompletedAt,
 	)
 	return i, err
 }

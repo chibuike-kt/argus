@@ -44,7 +44,8 @@ func authenticatedClient(t *testing.T, serverURL string, users *identity.Store, 
 	t.Helper()
 	ctx := context.Background()
 	email := fmt.Sprintf("httpapi-router-test-%d@example.com", time.Now().UnixNano())
-	u, err := users.Insert(ctx, email, "$argon2id$v=19$m=8,t=1,p=1$c2FsdA$aGFzaA")
+	now := time.Now()
+	u, err := users.InsertVerified(ctx, email, "$argon2id$v=19$m=8,t=1,p=1$c2FsdA$aGFzaA", now, now, "test")
 	if err != nil {
 		t.Fatalf("create test user: %v", err)
 	}

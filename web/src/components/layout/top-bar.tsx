@@ -1,6 +1,8 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Bell, Gear } from "@phosphor-icons/react";
 import { IconButton } from "@/components/ui/icon-button";
+import { useAuth } from "@/auth/auth-context";
 import { cn } from "@/lib/cn";
 
 const NAV = [
@@ -10,6 +12,15 @@ const NAV = [
 ];
 
 export function TopBar() {
+  const { user, signOut } = useAuth();
+  const navigate = useNavigate();
+  const initial = (user?.display_name || user?.email)?.[0]?.toUpperCase() ?? "?";
+
+  async function onSignOut() {
+    await signOut();
+    navigate("/login", { replace: true });
+  }
+
   return (
     <header className="z-40 flex h-14 shrink-0 items-center gap-4 border-b border-line bg-base/60 px-4 backdrop-blur-xl">
       <div className="flex items-center gap-3">
@@ -45,9 +56,45 @@ export function TopBar() {
         <IconButton variant="ghost" aria-label="Settings">
           <Gear />
         </IconButton>
-        <span className="ml-1 grid size-9 place-items-center rounded-full bg-surface-2 text-sm font-semibold text-fg-muted">
-          K
-        </span>
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button
+              aria-label="Account menu"
+              className="focus-ring ml-1 grid size-9 place-items-center rounded-full bg-surface-2 text-sm font-semibold text-fg-muted transition-colors hover:text-fg"
+            >
+              {initial}
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content
+              align="end"
+              sideOffset={10}
+              className="glass-strong z-[60] w-56 rounded-lg p-1 shadow-xl"
+            >
+              <div className="px-2.5 py-2">
+                {user?.display_name && (
+                  <div className="truncate text-[13px] font-medium text-fg">
+                    {user.display_name}
+                  </div>
+                )}
+                <div className="truncate text-[12px] text-fg-subtle">{user?.email}</div>
+              </div>
+              <DropdownMenu.Separator className="my-1 h-px bg-line" />
+              <DropdownMenu.Item
+                onSelect={() => navigate("/account")}
+                className="cursor-pointer rounded-md px-2.5 py-1.5 text-[13px] text-fg outline-none transition-colors data-[highlighted]:bg-white/5"
+              >
+                Account
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                onSelect={onSignOut}
+                className="cursor-pointer rounded-md px-2.5 py-1.5 text-[13px] text-fg outline-none transition-colors data-[highlighted]:bg-white/5"
+              >
+                Sign out
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </div>
     </header>
   );

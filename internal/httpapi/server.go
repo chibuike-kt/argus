@@ -54,6 +54,7 @@ type Deps struct {
 	// just for a type name, and so a test can satisfy them with a
 	// hand-written fake instead of a real Postgres connection.
 	Auth         authService
+	Watchlist    watchlistStore
 	Sessions     sessionResolver
 	Users        userLookup
 	AuthPolicy   config.AuthPolicy
@@ -116,6 +117,7 @@ func NewRouter(d Deps) http.Handler {
 			instruments:  instruments.NewStore(d.DB),
 			candles:      marketdata.NewStore(d.DB, clock.Real{}),
 			auth:         d.Auth,
+			watchlist:    d.Watchlist,
 			authPolicy:   d.AuthPolicy,
 			isProduction: d.IsProduction,
 			logger:       d.Logger,

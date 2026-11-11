@@ -25,6 +25,15 @@ type Config struct {
 	DatabaseURL string `env:"ARGUS_DATABASE_URL" envDefault:"postgres://argus:argus@localhost:5432/argus?sslmode=disable"`
 	RedisURL    string `env:"ARGUS_REDIS_URL" envDefault:"redis://localhost:6379/0"`
 
+	// PublicBaseURL is the frontend origin internal/identity/service
+	// builds the verification-email link against ({base}/verify-email?
+	// token=...) -- an implementation setting (where the web app is
+	// served), not an ADR-015 addendum policy value, so it lives here
+	// rather than in AuthPolicy. Defaults to the Vite dev server's own
+	// origin; validated like ARGUS_AUTH_ALLOWED_ORIGINS (https:// only
+	// in production).
+	PublicBaseURL string `env:"ARGUS_PUBLIC_BASE_URL" envDefault:"http://localhost:5173"`
+
 	// Auth is ADR-015's own tunables (internal/config/auth.go) --
 	// caarlos0/env recurses into a nested struct's own `env` tags
 	// automatically, so no prefix/special handling is needed here.
@@ -93,6 +102,16 @@ func (c Config) Validate() error {
 				return fmt.Errorf("ARGUS_ENV=%s requires every ARGUS_AUTH_ALLOWED_ORIGINS entry to start with https://, got %q", c.Env, origin)
 			}
 		}
+		if !strings.HasPrefix(c.PublicBaseURL, "https://") {
+			return fmt.Errorf("ARGUS_ENV=%s requires ARGUS_PUBLIC_BASE_URL to start with https://, got %q", c.Env, c.PublicBaseURL)
+		}
+	}
+	// The signup code's HMAC key is what keeps a database breach from
+	// being brute-forced offline (ADR-015 "Signup and onboarding");
+	// the local-dev placeholder every deployment starts from must
+	// never reach production unreplaced.
+	if c.IsProduction() && (c.Auth.SignupCodeHMACKey == "" || c.Auth.SignupCodeHMACKey == insecureSignupCodeHMACKey) {
+		return errors.New("ARGUS_AUTH_SIGNUP_CODE_HMAC_KEY must be set outside local/test; the local-dev default must not run in production")
 	}
 	return nil
 }

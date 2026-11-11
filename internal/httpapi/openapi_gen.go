@@ -149,10 +149,12 @@ type AuthSession struct {
 
 // AuthUser defines model for AuthUser.
 type AuthUser struct {
-	CreatedAt     time.Time `json:"created_at"`
-	Email         string    `json:"email"`
-	EmailVerified bool      `json:"email_verified"`
-	Id            int64     `json:"id"`
+	CreatedAt           time.Time `json:"created_at"`
+	DisplayName         *string   `json:"display_name,omitempty"`
+	Email               string    `json:"email"`
+	EmailVerified       bool      `json:"email_verified"`
+	Id                  int64     `json:"id"`
+	OnboardingCompleted bool      `json:"onboarding_completed"`
 }
 
 // Candle defines model for Candle.
@@ -229,15 +231,9 @@ type PlanSnapshot struct {
 	Targets          []TargetSnapshot `json:"targets"`
 }
 
-// RegisterRequest defines model for RegisterRequest.
-type RegisterRequest struct {
-	Email    openapi_types.Email `json:"email"`
-	Password string              `json:"password"`
-}
-
-// ResendVerificationRequest defines model for ResendVerificationRequest.
-type ResendVerificationRequest struct {
-	Email openapi_types.Email `json:"email"`
+// ProfileUpdateRequest defines model for ProfileUpdateRequest.
+type ProfileUpdateRequest struct {
+	DisplayName string `json:"display_name"`
 }
 
 // Setup defines model for Setup.
@@ -278,15 +274,45 @@ type SetupEvent struct {
 // SetupEventEventType defines model for SetupEvent.EventType.
 type SetupEventEventType string
 
+// SignupCompleteRequest defines model for SignupCompleteRequest.
+type SignupCompleteRequest struct {
+	Password string `json:"password"`
+	Ticket   string `json:"ticket"`
+}
+
+// SignupStartRequest defines model for SignupStartRequest.
+type SignupStartRequest struct {
+	AcceptedTerms bool                `json:"accepted_terms"`
+	Email         openapi_types.Email `json:"email"`
+}
+
+// SignupVerifyRequest defines model for SignupVerifyRequest.
+type SignupVerifyRequest struct {
+	Code  string              `json:"code"`
+	Email openapi_types.Email `json:"email"`
+}
+
+// SignupVerifyResponse defines model for SignupVerifyResponse.
+type SignupVerifyResponse struct {
+	Ticket string `json:"ticket"`
+}
+
 // TargetSnapshot defines model for TargetSnapshot.
 type TargetSnapshot struct {
 	Level string `json:"level"`
 	Rr    string `json:"rr"`
 }
 
-// VerifyEmailRequest defines model for VerifyEmailRequest.
-type VerifyEmailRequest struct {
-	Token string `json:"token"`
+// WatchlistItem defines model for WatchlistItem.
+type WatchlistItem struct {
+	InstrumentId int64 `json:"instrument_id"`
+	Position     int32 `json:"position"`
+}
+
+// WatchlistUpdateRequest defines model for WatchlistUpdateRequest.
+type WatchlistUpdateRequest struct {
+	// InstrumentIds Order in this array becomes each item's position.
+	InstrumentIds []int64 `json:"instrument_ids"`
 }
 
 // ListInstrumentsParams defines parameters for ListInstruments.
@@ -339,14 +365,20 @@ type ListSetupsParamsState string
 // AuthLoginJSONRequestBody defines body for AuthLogin for application/json ContentType.
 type AuthLoginJSONRequestBody = LoginRequest
 
-// AuthRegisterJSONRequestBody defines body for AuthRegister for application/json ContentType.
-type AuthRegisterJSONRequestBody = RegisterRequest
+// AuthSignupCompleteJSONRequestBody defines body for AuthSignupComplete for application/json ContentType.
+type AuthSignupCompleteJSONRequestBody = SignupCompleteRequest
 
-// AuthResendVerificationJSONRequestBody defines body for AuthResendVerification for application/json ContentType.
-type AuthResendVerificationJSONRequestBody = ResendVerificationRequest
+// AuthSignupStartJSONRequestBody defines body for AuthSignupStart for application/json ContentType.
+type AuthSignupStartJSONRequestBody = SignupStartRequest
 
-// AuthVerifyEmailJSONRequestBody defines body for AuthVerifyEmail for application/json ContentType.
-type AuthVerifyEmailJSONRequestBody = VerifyEmailRequest
+// AuthSignupVerifyJSONRequestBody defines body for AuthSignupVerify for application/json ContentType.
+type AuthSignupVerifyJSONRequestBody = SignupVerifyRequest
+
+// UpdateProfileJSONRequestBody defines body for UpdateProfile for application/json ContentType.
+type UpdateProfileJSONRequestBody = ProfileUpdateRequest
+
+// UpdateWatchlistJSONRequestBody defines body for UpdateWatchlist for application/json ContentType.
+type UpdateWatchlistJSONRequestBody = WatchlistUpdateRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -362,27 +394,33 @@ type ServerInterface interface {
 	// AuthMe The authenticated user.
 	// (GET /auth/me)
 	AuthMe(w http.ResponseWriter, r *http.Request)
-	// AuthRegister Creates an unverified account and sends a verification email (ADR-015). Always responds 202 with the identical generic body whether the email was already registered or not -- the body itself never distinguishes the two cases.
-	// (POST /auth/register)
-	AuthRegister(w http.ResponseWriter, r *http.Request)
-	// AuthResendVerification Generic 202, rate limited per account and per IP, whether or not the email exists or is already verified (ADR-015).
-	// (POST /auth/resend-verification)
-	AuthResendVerification(w http.ResponseWriter, r *http.Request)
 	// AuthListSessions The authenticated user's own active sessions.
 	// (GET /auth/sessions)
 	AuthListSessions(w http.ResponseWriter, r *http.Request)
 	// AuthRevokeSession Revokes one of the authenticated user's own sessions. A session id that exists but belongs to a different user is 404, not 403 (ADR-015: it must not even confirm that id is real).
 	// (DELETE /auth/sessions/{id})
 	AuthRevokeSession(w http.ResponseWriter, r *http.Request, id int64)
-	// AuthVerifyEmail Consumes a single-use, 24-hour email verification token (ADR-015). Does not create a session.
-	// (POST /auth/verify-email)
-	AuthVerifyEmail(w http.ResponseWriter, r *http.Request)
+	// AuthSignupComplete Consumes a signup ticket and creates the account, already verified (ADR-015: "no half accounts") -- the first and only point a users row is created for this flow. terms_accepted_at/ terms_version are copied from the signup start this ticket descends from. On success, sets the session cookie and returns the user, the same as login.
+	// (POST /auth/signup/complete)
+	AuthSignupComplete(w http.ResponseWriter, r *http.Request)
+	// AuthSignupStart Starts or restarts a signup: sends a 6-digit emailed code (ADR-015 "Signup and onboarding"). Always 202 with the identical generic body and equal timing whether the email is new or already registered -- for an existing account this sends a notice instead of a code, and the notice itself is skipped silently (never a 429) if the per-email hourly limit is already spent; a new email within its own 60s resend cooldown gets the same silent 202 with nothing re-sent, so that limit can never disclose that the account exists either. 429 is only ever the per-IP limit. Requires accepted_terms: true.
+	// (POST /auth/signup/start)
+	AuthSignupStart(w http.ResponseWriter, r *http.Request)
+	// AuthSignupVerify Checks a 6-digit code and, if correct, returns a single-use signup ticket valid for 30 minutes (ADR-015). One generic invalid_code for a wrong, expired, unknown or exhausted code -- none of those is distinguished for the caller.
+	// (POST /auth/signup/verify)
+	AuthSignupVerify(w http.ResponseWriter, r *http.Request)
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams)
 	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1); the handler itself still requires both, with the same message as before, when order is asc or omitted -- see its own comment.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams)
+	// CompleteOnboarding Records onboarding_completed_at (ADR-015), but only once the authenticated user already has a display name and at least one watchlist item -- 409 onboarding_incomplete otherwise: the request itself is well formed, the account's current state is just not yet eligible.
+	// (POST /me/onboarding/complete)
+	CompleteOnboarding(w http.ResponseWriter, r *http.Request)
+	// UpdateProfile Sets the authenticated user's display name.
+	// (PUT /me/profile)
+	UpdateProfile(w http.ResponseWriter, r *http.Request)
 	// Ping Connectivity check for the versioned API surface.
 	// (GET /ping)
 	Ping(w http.ResponseWriter, r *http.Request)
@@ -395,6 +433,12 @@ type ServerInterface interface {
 	// ListSetupEvents A setup's full append-only history, in creation order -- internal/setups.Store.ListEvents. The "Evidence" data a client needs to reconstruct how a setup got where it is (ADR-011).
 	// (GET /setups/{id}/events)
 	ListSetupEvents(w http.ResponseWriter, r *http.Request, id int64)
+	// GetWatchlist The authenticated user's own watchlist, in order (ADR-016 -- watchlists are private).
+	// (GET /watchlist)
+	GetWatchlist(w http.ResponseWriter, r *http.Request)
+	// UpdateWatchlist Replaces the authenticated user's whole watchlist at once, in the given order (ADR-015: enabled instruments, maximum 50).
+	// (PUT /watchlist)
+	UpdateWatchlist(w http.ResponseWriter, r *http.Request)
 }
 
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
@@ -425,18 +469,6 @@ func (_ Unimplemented) AuthMe(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// AuthRegister Creates an unverified account and sends a verification email (ADR-015). Always responds 202 with the identical generic body whether the email was already registered or not -- the body itself never distinguishes the two cases.
-// (POST /auth/register)
-func (_ Unimplemented) AuthRegister(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// AuthResendVerification Generic 202, rate limited per account and per IP, whether or not the email exists or is already verified (ADR-015).
-// (POST /auth/resend-verification)
-func (_ Unimplemented) AuthResendVerification(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
 // AuthListSessions The authenticated user's own active sessions.
 // (GET /auth/sessions)
 func (_ Unimplemented) AuthListSessions(w http.ResponseWriter, r *http.Request) {
@@ -449,9 +481,21 @@ func (_ Unimplemented) AuthRevokeSession(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// AuthVerifyEmail Consumes a single-use, 24-hour email verification token (ADR-015). Does not create a session.
-// (POST /auth/verify-email)
-func (_ Unimplemented) AuthVerifyEmail(w http.ResponseWriter, r *http.Request) {
+// AuthSignupComplete Consumes a signup ticket and creates the account, already verified (ADR-015: "no half accounts") -- the first and only point a users row is created for this flow. terms_accepted_at/ terms_version are copied from the signup start this ticket descends from. On success, sets the session cookie and returns the user, the same as login.
+// (POST /auth/signup/complete)
+func (_ Unimplemented) AuthSignupComplete(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthSignupStart Starts or restarts a signup: sends a 6-digit emailed code (ADR-015 "Signup and onboarding"). Always 202 with the identical generic body and equal timing whether the email is new or already registered -- for an existing account this sends a notice instead of a code, and the notice itself is skipped silently (never a 429) if the per-email hourly limit is already spent; a new email within its own 60s resend cooldown gets the same silent 202 with nothing re-sent, so that limit can never disclose that the account exists either. 429 is only ever the per-IP limit. Requires accepted_terms: true.
+// (POST /auth/signup/start)
+func (_ Unimplemented) AuthSignupStart(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AuthSignupVerify Checks a 6-digit code and, if correct, returns a single-use signup ticket valid for 30 minutes (ADR-015). One generic invalid_code for a wrong, expired, unknown or exhausted code -- none of those is distinguished for the caller.
+// (POST /auth/signup/verify)
+func (_ Unimplemented) AuthSignupVerify(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -464,6 +508,18 @@ func (_ Unimplemented) ListInstruments(w http.ResponseWriter, r *http.Request, p
 // ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1); the handler itself still requires both, with the same message as before, when order is asc or omitted -- see its own comment.
 // (GET /instruments/{id}/candles)
 func (_ Unimplemented) ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// CompleteOnboarding Records onboarding_completed_at (ADR-015), but only once the authenticated user already has a display name and at least one watchlist item -- 409 onboarding_incomplete otherwise: the request itself is well formed, the account's current state is just not yet eligible.
+// (POST /me/onboarding/complete)
+func (_ Unimplemented) CompleteOnboarding(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// UpdateProfile Sets the authenticated user's display name.
+// (PUT /me/profile)
+func (_ Unimplemented) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -488,6 +544,18 @@ func (_ Unimplemented) GetSetup(w http.ResponseWriter, r *http.Request, id int64
 // ListSetupEvents A setup's full append-only history, in creation order -- internal/setups.Store.ListEvents. The "Evidence" data a client needs to reconstruct how a setup got where it is (ADR-011).
 // (GET /setups/{id}/events)
 func (_ Unimplemented) ListSetupEvents(w http.ResponseWriter, r *http.Request, id int64) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetWatchlist The authenticated user's own watchlist, in order (ADR-016 -- watchlists are private).
+// (GET /watchlist)
+func (_ Unimplemented) GetWatchlist(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// UpdateWatchlist Replaces the authenticated user's whole watchlist at once, in the given order (ADR-015: enabled instruments, maximum 50).
+// (PUT /watchlist)
+func (_ Unimplemented) UpdateWatchlist(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -556,34 +624,6 @@ func (siw *ServerInterfaceWrapper) AuthMe(w http.ResponseWriter, r *http.Request
 	handler.ServeHTTP(w, r)
 }
 
-// AuthRegister operation middleware
-func (siw *ServerInterfaceWrapper) AuthRegister(w http.ResponseWriter, r *http.Request) {
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.AuthRegister(w, r)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// AuthResendVerification operation middleware
-func (siw *ServerInterfaceWrapper) AuthResendVerification(w http.ResponseWriter, r *http.Request) {
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.AuthResendVerification(w, r)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
 // AuthListSessions operation middleware
 func (siw *ServerInterfaceWrapper) AuthListSessions(w http.ResponseWriter, r *http.Request) {
 
@@ -624,11 +664,39 @@ func (siw *ServerInterfaceWrapper) AuthRevokeSession(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
-// AuthVerifyEmail operation middleware
-func (siw *ServerInterfaceWrapper) AuthVerifyEmail(w http.ResponseWriter, r *http.Request) {
+// AuthSignupComplete operation middleware
+func (siw *ServerInterfaceWrapper) AuthSignupComplete(w http.ResponseWriter, r *http.Request) {
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.AuthVerifyEmail(w, r)
+		siw.Handler.AuthSignupComplete(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthSignupStart operation middleware
+func (siw *ServerInterfaceWrapper) AuthSignupStart(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthSignupStart(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AuthSignupVerify operation middleware
+func (siw *ServerInterfaceWrapper) AuthSignupVerify(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AuthSignupVerify(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -778,6 +846,34 @@ func (siw *ServerInterfaceWrapper) ListInstrumentCandles(w http.ResponseWriter, 
 	handler.ServeHTTP(w, r)
 }
 
+// CompleteOnboarding operation middleware
+func (siw *ServerInterfaceWrapper) CompleteOnboarding(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CompleteOnboarding(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateProfile operation middleware
+func (siw *ServerInterfaceWrapper) UpdateProfile(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateProfile(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // Ping operation middleware
 func (siw *ServerInterfaceWrapper) Ping(w http.ResponseWriter, r *http.Request) {
 
@@ -907,6 +1003,34 @@ func (siw *ServerInterfaceWrapper) ListSetupEvents(w http.ResponseWriter, r *htt
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListSetupEvents(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetWatchlist operation middleware
+func (siw *ServerInterfaceWrapper) GetWatchlist(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetWatchlist(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateWatchlist operation middleware
+func (siw *ServerInterfaceWrapper) UpdateWatchlist(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateWatchlist(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1048,13 +1172,13 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/setups/{id}/events", wrapper.ListSetupEvents)
 	})
 	r.Group(func(r chi.Router) {
-		r.Post(options.BaseURL+"/auth/register", wrapper.AuthRegister)
+		r.Post(options.BaseURL+"/auth/signup/start", wrapper.AuthSignupStart)
 	})
 	r.Group(func(r chi.Router) {
-		r.Post(options.BaseURL+"/auth/verify-email", wrapper.AuthVerifyEmail)
+		r.Post(options.BaseURL+"/auth/signup/verify", wrapper.AuthSignupVerify)
 	})
 	r.Group(func(r chi.Router) {
-		r.Post(options.BaseURL+"/auth/resend-verification", wrapper.AuthResendVerification)
+		r.Post(options.BaseURL+"/auth/signup/complete", wrapper.AuthSignupComplete)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/auth/login", wrapper.AuthLogin)
@@ -1073,6 +1197,18 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/auth/sessions/{id}", wrapper.AuthRevokeSession)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/me/profile", wrapper.UpdateProfile)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/me/onboarding/complete", wrapper.CompleteOnboarding)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/watchlist", wrapper.GetWatchlist)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/watchlist", wrapper.UpdateWatchlist)
 	})
 
 	return r
@@ -1179,92 +1315,6 @@ func (response AuthMe200JSONResponse) VisitAuthMeResponse(w http.ResponseWriter)
 	return err
 }
 
-type AuthRegisterRequestObject struct {
-	Body *AuthRegisterJSONRequestBody
-}
-
-type AuthRegisterResponseObject interface {
-	VisitAuthRegisterResponse(w http.ResponseWriter) error
-}
-
-type AuthRegister202JSONResponse GenericAccepted
-
-func (response AuthRegister202JSONResponse) VisitAuthRegisterResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(202)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type AuthRegister400JSONResponse Error
-
-func (response AuthRegister400JSONResponse) VisitAuthRegisterResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(400)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type AuthRegister429JSONResponse Error
-
-func (response AuthRegister429JSONResponse) VisitAuthRegisterResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(429)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type AuthResendVerificationRequestObject struct {
-	Body *AuthResendVerificationJSONRequestBody
-}
-
-type AuthResendVerificationResponseObject interface {
-	VisitAuthResendVerificationResponse(w http.ResponseWriter) error
-}
-
-type AuthResendVerification202JSONResponse GenericAccepted
-
-func (response AuthResendVerification202JSONResponse) VisitAuthResendVerificationResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(202)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type AuthResendVerification429JSONResponse Error
-
-func (response AuthResendVerification429JSONResponse) VisitAuthResendVerificationResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(429)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type AuthListSessionsRequestObject struct {
 }
 
@@ -1316,17 +1366,17 @@ func (response AuthRevokeSession404JSONResponse) VisitAuthRevokeSessionResponse(
 	return err
 }
 
-type AuthVerifyEmailRequestObject struct {
-	Body *AuthVerifyEmailJSONRequestBody
+type AuthSignupCompleteRequestObject struct {
+	Body *AuthSignupCompleteJSONRequestBody
 }
 
-type AuthVerifyEmailResponseObject interface {
-	VisitAuthVerifyEmailResponse(w http.ResponseWriter) error
+type AuthSignupCompleteResponseObject interface {
+	VisitAuthSignupCompleteResponse(w http.ResponseWriter) error
 }
 
-type AuthVerifyEmail200JSONResponse GenericAccepted
+type AuthSignupComplete200JSONResponse AuthUser
 
-func (response AuthVerifyEmail200JSONResponse) VisitAuthVerifyEmailResponse(w http.ResponseWriter) error {
+func (response AuthSignupComplete200JSONResponse) VisitAuthSignupCompleteResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -1338,9 +1388,95 @@ func (response AuthVerifyEmail200JSONResponse) VisitAuthVerifyEmailResponse(w ht
 	return err
 }
 
-type AuthVerifyEmail400JSONResponse Error
+type AuthSignupComplete400JSONResponse Error
 
-func (response AuthVerifyEmail400JSONResponse) VisitAuthVerifyEmailResponse(w http.ResponseWriter) error {
+func (response AuthSignupComplete400JSONResponse) VisitAuthSignupCompleteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthSignupStartRequestObject struct {
+	Body *AuthSignupStartJSONRequestBody
+}
+
+type AuthSignupStartResponseObject interface {
+	VisitAuthSignupStartResponse(w http.ResponseWriter) error
+}
+
+type AuthSignupStart202JSONResponse GenericAccepted
+
+func (response AuthSignupStart202JSONResponse) VisitAuthSignupStartResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthSignupStart400JSONResponse Error
+
+func (response AuthSignupStart400JSONResponse) VisitAuthSignupStartResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthSignupStart429JSONResponse Error
+
+func (response AuthSignupStart429JSONResponse) VisitAuthSignupStartResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthSignupVerifyRequestObject struct {
+	Body *AuthSignupVerifyJSONRequestBody
+}
+
+type AuthSignupVerifyResponseObject interface {
+	VisitAuthSignupVerifyResponse(w http.ResponseWriter) error
+}
+
+type AuthSignupVerify200JSONResponse SignupVerifyResponse
+
+func (response AuthSignupVerify200JSONResponse) VisitAuthSignupVerifyResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AuthSignupVerify400JSONResponse Error
+
+func (response AuthSignupVerify400JSONResponse) VisitAuthSignupVerifyResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -1435,6 +1571,77 @@ func (response ListInstrumentCandles404JSONResponse) VisitListInstrumentCandlesR
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CompleteOnboardingRequestObject struct {
+}
+
+type CompleteOnboardingResponseObject interface {
+	VisitCompleteOnboardingResponse(w http.ResponseWriter) error
+}
+
+type CompleteOnboarding200JSONResponse AuthUser
+
+func (response CompleteOnboarding200JSONResponse) VisitCompleteOnboardingResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CompleteOnboarding409JSONResponse Error
+
+func (response CompleteOnboarding409JSONResponse) VisitCompleteOnboardingResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateProfileRequestObject struct {
+	Body *UpdateProfileJSONRequestBody
+}
+
+type UpdateProfileResponseObject interface {
+	VisitUpdateProfileResponse(w http.ResponseWriter) error
+}
+
+type UpdateProfile200JSONResponse AuthUser
+
+func (response UpdateProfile200JSONResponse) VisitUpdateProfileResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateProfile400JSONResponse Error
+
+func (response UpdateProfile400JSONResponse) VisitUpdateProfileResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1570,6 +1777,63 @@ func (response ListSetupEvents404JSONResponse) VisitListSetupEventsResponse(w ht
 	return err
 }
 
+type GetWatchlistRequestObject struct {
+}
+
+type GetWatchlistResponseObject interface {
+	VisitGetWatchlistResponse(w http.ResponseWriter) error
+}
+
+type GetWatchlist200JSONResponse []WatchlistItem
+
+func (response GetWatchlist200JSONResponse) VisitGetWatchlistResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateWatchlistRequestObject struct {
+	Body *UpdateWatchlistJSONRequestBody
+}
+
+type UpdateWatchlistResponseObject interface {
+	VisitUpdateWatchlistResponse(w http.ResponseWriter) error
+}
+
+type UpdateWatchlist200JSONResponse []WatchlistItem
+
+func (response UpdateWatchlist200JSONResponse) VisitUpdateWatchlistResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateWatchlist400JSONResponse Error
+
+func (response UpdateWatchlist400JSONResponse) VisitUpdateWatchlistResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// AuthLogin Generic invalid_credentials for unknown email, wrong password or an unverified account alike (ADR-015). On success, sets the session cookie and returns the user.
@@ -1584,27 +1848,33 @@ type StrictServerInterface interface {
 	// AuthMe The authenticated user.
 	// (GET /auth/me)
 	AuthMe(ctx context.Context, request AuthMeRequestObject) (AuthMeResponseObject, error)
-	// AuthRegister Creates an unverified account and sends a verification email (ADR-015). Always responds 202 with the identical generic body whether the email was already registered or not -- the body itself never distinguishes the two cases.
-	// (POST /auth/register)
-	AuthRegister(ctx context.Context, request AuthRegisterRequestObject) (AuthRegisterResponseObject, error)
-	// AuthResendVerification Generic 202, rate limited per account and per IP, whether or not the email exists or is already verified (ADR-015).
-	// (POST /auth/resend-verification)
-	AuthResendVerification(ctx context.Context, request AuthResendVerificationRequestObject) (AuthResendVerificationResponseObject, error)
 	// AuthListSessions The authenticated user's own active sessions.
 	// (GET /auth/sessions)
 	AuthListSessions(ctx context.Context, request AuthListSessionsRequestObject) (AuthListSessionsResponseObject, error)
 	// AuthRevokeSession Revokes one of the authenticated user's own sessions. A session id that exists but belongs to a different user is 404, not 403 (ADR-015: it must not even confirm that id is real).
 	// (DELETE /auth/sessions/{id})
 	AuthRevokeSession(ctx context.Context, request AuthRevokeSessionRequestObject) (AuthRevokeSessionResponseObject, error)
-	// AuthVerifyEmail Consumes a single-use, 24-hour email verification token (ADR-015). Does not create a session.
-	// (POST /auth/verify-email)
-	AuthVerifyEmail(ctx context.Context, request AuthVerifyEmailRequestObject) (AuthVerifyEmailResponseObject, error)
+	// AuthSignupComplete Consumes a signup ticket and creates the account, already verified (ADR-015: "no half accounts") -- the first and only point a users row is created for this flow. terms_accepted_at/ terms_version are copied from the signup start this ticket descends from. On success, sets the session cookie and returns the user, the same as login.
+	// (POST /auth/signup/complete)
+	AuthSignupComplete(ctx context.Context, request AuthSignupCompleteRequestObject) (AuthSignupCompleteResponseObject, error)
+	// AuthSignupStart Starts or restarts a signup: sends a 6-digit emailed code (ADR-015 "Signup and onboarding"). Always 202 with the identical generic body and equal timing whether the email is new or already registered -- for an existing account this sends a notice instead of a code, and the notice itself is skipped silently (never a 429) if the per-email hourly limit is already spent; a new email within its own 60s resend cooldown gets the same silent 202 with nothing re-sent, so that limit can never disclose that the account exists either. 429 is only ever the per-IP limit. Requires accepted_terms: true.
+	// (POST /auth/signup/start)
+	AuthSignupStart(ctx context.Context, request AuthSignupStartRequestObject) (AuthSignupStartResponseObject, error)
+	// AuthSignupVerify Checks a 6-digit code and, if correct, returns a single-use signup ticket valid for 30 minutes (ADR-015). One generic invalid_code for a wrong, expired, unknown or exhausted code -- none of those is distinguished for the caller.
+	// (POST /auth/signup/verify)
+	AuthSignupVerify(ctx context.Context, request AuthSignupVerifyRequestObject) (AuthSignupVerifyResponseObject, error)
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(ctx context.Context, request ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error)
 	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1); the handler itself still requires both, with the same message as before, when order is asc or omitted -- see its own comment.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(ctx context.Context, request ListInstrumentCandlesRequestObject) (ListInstrumentCandlesResponseObject, error)
+	// CompleteOnboarding Records onboarding_completed_at (ADR-015), but only once the authenticated user already has a display name and at least one watchlist item -- 409 onboarding_incomplete otherwise: the request itself is well formed, the account's current state is just not yet eligible.
+	// (POST /me/onboarding/complete)
+	CompleteOnboarding(ctx context.Context, request CompleteOnboardingRequestObject) (CompleteOnboardingResponseObject, error)
+	// UpdateProfile Sets the authenticated user's display name.
+	// (PUT /me/profile)
+	UpdateProfile(ctx context.Context, request UpdateProfileRequestObject) (UpdateProfileResponseObject, error)
 	// Ping Connectivity check for the versioned API surface.
 	// (GET /ping)
 	Ping(ctx context.Context, request PingRequestObject) (PingResponseObject, error)
@@ -1617,6 +1887,12 @@ type StrictServerInterface interface {
 	// ListSetupEvents A setup's full append-only history, in creation order -- internal/setups.Store.ListEvents. The "Evidence" data a client needs to reconstruct how a setup got where it is (ADR-011).
 	// (GET /setups/{id}/events)
 	ListSetupEvents(ctx context.Context, request ListSetupEventsRequestObject) (ListSetupEventsResponseObject, error)
+	// GetWatchlist The authenticated user's own watchlist, in order (ADR-016 -- watchlists are private).
+	// (GET /watchlist)
+	GetWatchlist(ctx context.Context, request GetWatchlistRequestObject) (GetWatchlistResponseObject, error)
+	// UpdateWatchlist Replaces the authenticated user's whole watchlist at once, in the given order (ADR-015: enabled instruments, maximum 50).
+	// (PUT /watchlist)
+	UpdateWatchlist(ctx context.Context, request UpdateWatchlistRequestObject) (UpdateWatchlistResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -1761,68 +2037,6 @@ func (sh *strictHandler) AuthMe(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// AuthRegister operation middleware
-func (sh *strictHandler) AuthRegister(w http.ResponseWriter, r *http.Request) {
-	var request AuthRegisterRequestObject
-
-	var body AuthRegisterJSONRequestBody
-	if err := runtime.BindJSONBody(r, &body); err != nil {
-		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
-		return
-	}
-	request.Body = &body
-
-	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
-		return sh.ssi.AuthRegister(ctx, request.(AuthRegisterRequestObject))
-	}
-	for _, middleware := range sh.middlewares {
-		handler = middleware(handler, "AuthRegister")
-	}
-
-	response, err := handler(r.Context(), w, r, request)
-
-	if err != nil {
-		sh.options.ResponseErrorHandlerFunc(w, r, err)
-	} else if validResponse, ok := response.(AuthRegisterResponseObject); ok {
-		if err := validResponse.VisitAuthRegisterResponse(w); err != nil {
-			sh.options.ResponseErrorHandlerFunc(w, r, err)
-		}
-	} else if response != nil {
-		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
-	}
-}
-
-// AuthResendVerification operation middleware
-func (sh *strictHandler) AuthResendVerification(w http.ResponseWriter, r *http.Request) {
-	var request AuthResendVerificationRequestObject
-
-	var body AuthResendVerificationJSONRequestBody
-	if err := runtime.BindJSONBody(r, &body); err != nil {
-		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
-		return
-	}
-	request.Body = &body
-
-	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
-		return sh.ssi.AuthResendVerification(ctx, request.(AuthResendVerificationRequestObject))
-	}
-	for _, middleware := range sh.middlewares {
-		handler = middleware(handler, "AuthResendVerification")
-	}
-
-	response, err := handler(r.Context(), w, r, request)
-
-	if err != nil {
-		sh.options.ResponseErrorHandlerFunc(w, r, err)
-	} else if validResponse, ok := response.(AuthResendVerificationResponseObject); ok {
-		if err := validResponse.VisitAuthResendVerificationResponse(w); err != nil {
-			sh.options.ResponseErrorHandlerFunc(w, r, err)
-		}
-	} else if response != nil {
-		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
-	}
-}
-
 // AuthListSessions operation middleware
 func (sh *strictHandler) AuthListSessions(w http.ResponseWriter, r *http.Request) {
 	var request AuthListSessionsRequestObject
@@ -1873,11 +2087,11 @@ func (sh *strictHandler) AuthRevokeSession(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// AuthVerifyEmail operation middleware
-func (sh *strictHandler) AuthVerifyEmail(w http.ResponseWriter, r *http.Request) {
-	var request AuthVerifyEmailRequestObject
+// AuthSignupComplete operation middleware
+func (sh *strictHandler) AuthSignupComplete(w http.ResponseWriter, r *http.Request) {
+	var request AuthSignupCompleteRequestObject
 
-	var body AuthVerifyEmailJSONRequestBody
+	var body AuthSignupCompleteJSONRequestBody
 	if err := runtime.BindJSONBody(r, &body); err != nil {
 		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
 		return
@@ -1885,18 +2099,80 @@ func (sh *strictHandler) AuthVerifyEmail(w http.ResponseWriter, r *http.Request)
 	request.Body = &body
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
-		return sh.ssi.AuthVerifyEmail(ctx, request.(AuthVerifyEmailRequestObject))
+		return sh.ssi.AuthSignupComplete(ctx, request.(AuthSignupCompleteRequestObject))
 	}
 	for _, middleware := range sh.middlewares {
-		handler = middleware(handler, "AuthVerifyEmail")
+		handler = middleware(handler, "AuthSignupComplete")
 	}
 
 	response, err := handler(r.Context(), w, r, request)
 
 	if err != nil {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
-	} else if validResponse, ok := response.(AuthVerifyEmailResponseObject); ok {
-		if err := validResponse.VisitAuthVerifyEmailResponse(w); err != nil {
+	} else if validResponse, ok := response.(AuthSignupCompleteResponseObject); ok {
+		if err := validResponse.VisitAuthSignupCompleteResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthSignupStart operation middleware
+func (sh *strictHandler) AuthSignupStart(w http.ResponseWriter, r *http.Request) {
+	var request AuthSignupStartRequestObject
+
+	var body AuthSignupStartJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthSignupStart(ctx, request.(AuthSignupStartRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthSignupStart")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthSignupStartResponseObject); ok {
+		if err := validResponse.VisitAuthSignupStartResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AuthSignupVerify operation middleware
+func (sh *strictHandler) AuthSignupVerify(w http.ResponseWriter, r *http.Request) {
+	var request AuthSignupVerifyRequestObject
+
+	var body AuthSignupVerifyJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AuthSignupVerify(ctx, request.(AuthSignupVerifyRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AuthSignupVerify")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AuthSignupVerifyResponseObject); ok {
+		if err := validResponse.VisitAuthSignupVerifyResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -1950,6 +2226,61 @@ func (sh *strictHandler) ListInstrumentCandles(w http.ResponseWriter, r *http.Re
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ListInstrumentCandlesResponseObject); ok {
 		if err := validResponse.VisitListInstrumentCandlesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CompleteOnboarding operation middleware
+func (sh *strictHandler) CompleteOnboarding(w http.ResponseWriter, r *http.Request) {
+	var request CompleteOnboardingRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CompleteOnboarding(ctx, request.(CompleteOnboardingRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CompleteOnboarding")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CompleteOnboardingResponseObject); ok {
+		if err := validResponse.VisitCompleteOnboardingResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UpdateProfile operation middleware
+func (sh *strictHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
+	var request UpdateProfileRequestObject
+
+	var body UpdateProfileJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateProfile(ctx, request.(UpdateProfileRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateProfile")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateProfileResponseObject); ok {
+		if err := validResponse.VisitUpdateProfileResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -2059,71 +2390,139 @@ func (sh *strictHandler) ListSetupEvents(w http.ResponseWriter, r *http.Request,
 	}
 }
 
+// GetWatchlist operation middleware
+func (sh *strictHandler) GetWatchlist(w http.ResponseWriter, r *http.Request) {
+	var request GetWatchlistRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetWatchlist(ctx, request.(GetWatchlistRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetWatchlist")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetWatchlistResponseObject); ok {
+		if err := validResponse.VisitGetWatchlistResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UpdateWatchlist operation middleware
+func (sh *strictHandler) UpdateWatchlist(w http.ResponseWriter, r *http.Request) {
+	var request UpdateWatchlistRequestObject
+
+	var body UpdateWatchlistJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateWatchlist(ctx, request.(UpdateWatchlistRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateWatchlist")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateWatchlistResponseObject); ok {
+		if err := validResponse.VisitUpdateWatchlistResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // Base64 encoded, compressed with deflate, json marshaled OpenAPI spec.
 // Stored as a slice of fixed-width chunks rather than one concatenated
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"AAD//w==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

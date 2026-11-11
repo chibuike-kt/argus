@@ -21,13 +21,13 @@ import (
 // mounts them before this middleware's own Route group), so they need
 // no entry here to be reachable without a session.
 var publicAPIPaths = map[string]bool{
-	"/api/v1/ping":                     true,
-	"/api/v1/auth/register":            true,
-	"/api/v1/auth/verify-email":        true,
-	"/api/v1/auth/resend-verification": true,
-	"/api/v1/auth/login":               true,
-	"/api/v1/auth/forgot-password":     true, // Part 2 route; pre-listed now (ADR-015 names it public), inert until it exists
-	"/api/v1/auth/reset-password":      true, // Part 2 route; same as above
+	"/api/v1/ping":                 true,
+	"/api/v1/auth/signup/start":    true,
+	"/api/v1/auth/signup/verify":   true,
+	"/api/v1/auth/signup/complete": true, // no session exists yet; authenticates via the ticket itself
+	"/api/v1/auth/login":           true,
+	"/api/v1/auth/forgot-password": true, // not yet built; pre-listed now (ADR-015 names it public), inert until it exists
+	"/api/v1/auth/reset-password":  true, // same as above
 }
 
 // sessionResolver is the slice of *session.Store requireSession

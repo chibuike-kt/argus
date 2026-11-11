@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
+import { useAuth } from "@/auth/auth-context";
 import { useDrawing } from "@/components/chart/drawing-context";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import { useCommandPalette } from "@/components/workspace/command-palette";
@@ -119,9 +120,11 @@ function SymbolPicker({ instrument, instruments }: { instrument?: ApiInstrument;
 export function ChartToolbar() {
   const { timeframe: tf, drawings } = useDrawing();
   const { instrument, instruments } = useAnalysisWorkspace();
+  const { user } = useAuth();
   const navigate = useNavigate();
   const palette = useCommandPalette();
   const activity = useArgusActivity();
+  const initial = (user?.display_name || user?.email)?.[0]?.toUpperCase() ?? "?";
   return (
     <div className="argus-in glass relative z-30 flex items-center gap-1.5 rounded-xl px-2 py-1.5">
       <IconButton
@@ -199,7 +202,7 @@ export function ChartToolbar() {
           <Gear />
         </IconButton>
         <span className="ml-0.5 grid size-8 place-items-center rounded-full bg-surface-2 text-[13px] font-semibold text-fg-muted">
-          K
+          {initial}
         </span>
       </div>
     </div>
