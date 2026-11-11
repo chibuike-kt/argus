@@ -144,7 +144,7 @@ export function StyleGuide() {
         <h1 className="text-3xl font-semibold tracking-tight">ARGUS design system</h1>
         <p className="max-w-2xl text-fg-muted">
           A trading-intelligence terminal: true black, flat segmented cards, and colour that only
-          ever means something -- the market speaks green/red, ARGUS's own marks on the chart speak
+          ever means something. The market speaks green/red, ARGUS's own marks on the chart speak
           the indigo accent, and generic chrome (tabs, the active tool, focus) stays neutral.
           Typeface is Onest for body text and Archivo for headings (replacing Montserrat), with IBM
           Plex Mono for every number unchanged, and Astron Valley reserved for the ARGUS logo mark
@@ -154,7 +154,7 @@ export function StyleGuide() {
 
       <Section
         title="Typography"
-        desc="Onest across body text, Archivo for headings -- the web light auth redesign brief's own default, confirmed against the reference screenshots rather than reversed. Every number -- prices, times, deltas -- still renders in IBM Plex Mono via the .tnum class, with tabular figures so they stay aligned under live updates."
+        desc="Onest across body text, Archivo for headings. This is the web light auth redesign brief's own default, confirmed against the reference screenshots rather than reversed. Every number, prices, times, deltas, still renders in IBM Plex Mono via the .tnum class, with tabular figures so they stay aligned under live updates."
       >
         <Panel variant="strong" pad="lg" className="space-y-6">
           <div className="font-heading text-6xl font-semibold tracking-tight">Archivo</div>
@@ -216,14 +216,14 @@ export function StyleGuide() {
 
       <Section
         title="Light pages"
-        desc="Sign-in, sign-up and onboarding (web light auth redesign brief): a second, entirely separate token set and component library -- white, not terminal black. --color-light-primary is literally --color-accent, the same indigo hex as above, so the two palettes share one brand accent even though they never share a surface."
+        desc="Sign-in, sign-up and onboarding (web light auth redesign brief): a second, entirely separate token set and component library, white, not terminal black. --color-light-primary is literally --color-accent, the same indigo hex as above, so the two palettes share one brand accent even though they never share a surface."
       >
         <LightPagesShowcase />
       </Section>
 
       <Section
         title="Surfaces"
-        desc="Flat segmented cards -- solid fill, hairline border, no blur -- plus the indigo-tinted surface for highlighted/active panels."
+        desc="Flat segmented cards, solid fill, hairline border, no blur, plus the indigo-tinted surface for highlighted/active panels."
       >
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Panel variant="glass" pad="lg" className="h-32">

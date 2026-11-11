@@ -296,7 +296,7 @@ export function SignUp() {
                 Create a password
               </h1>
               <p className="mt-1 text-sm text-light-muted">
-                At least 12 characters -- make it one you don't use anywhere else
+                At least 12 characters. Make it one you don't use anywhere else
               </p>
             </div>
 

@@ -22,9 +22,9 @@ export default defineConfig({
     // to start) -- see web/README.md.
     strictPort: true,
     proxy: {
-      "/api": "http://localhost:8080",
-      "/healthz": "http://localhost:8080",
-      "/readyz": "http://localhost:8080",
+      "/api": "http://127.0.0.1:8080",
+      "/healthz": "http://127.0.0.1:8080",
+      "/readyz": "http://127.0.0.1:8080",
     },
   },
 });

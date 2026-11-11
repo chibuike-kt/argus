@@ -186,7 +186,7 @@ export function Onboarding() {
                 Pick a few pairs to watch
               </h1>
               <p className="mt-1 text-sm text-light-muted">
-                Choose at least one -- you can change this later
+                Choose at least one. You can change this later
               </p>
             </div>
 
