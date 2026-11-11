@@ -42,15 +42,18 @@ Simulation records must identify the observation time, side, freshness and model
 
 ## Ambiguous outcomes
 
-If a candle touches both stop-loss and take-profit and the available data cannot establish which occurred first, the simulator uses a documented conservative policy.
-
-The exact policy must be finalized and tested before the simulation is presented as reliable.
+If a candle touches both stop-loss and take-profit and the available data cannot establish which
+occurred first, the simulator takes the stop first and flags the outcome as
+`ambiguous_resolved_as_stop`. The rule, the fill rule and the other simulation rules are specified in
+the strategy spec, section 16, and are shared by the backtest and paper trading. The policy must still
+be tested against golden fixtures before the simulation is presented as reliable.
 
 ## Open decisions
 
 - Whether paper trading ships in the initial public release.
 
-- Exact entry-fill and price-observation rules.
+- Entry-fill rules for the first version are decided (spec section 16); price observation rules beyond
+  candles, and bid/ask aware fills, remain open.
 
 - Position adjustment and manual override behavior.
 
