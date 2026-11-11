@@ -70,6 +70,16 @@ func run(databaseURL, instrumentsFlag, startFlag, endFlag, outputDir, algorithmV
 	}
 	defer func() { _ = db.Close() }()
 
+	var dbName string
+	if err := db.QueryRowContext(ctx, "select current_database()").Scan(&dbName); err != nil {
+		return fmt.Errorf("get database name: %w", err)
+	}
+	fmt.Printf("argus-backtest: connected to database %q\n", dbName)
+
+	if err := backtest.CheckFixtureOnly(ctx, db); err != nil {
+		return fmt.Errorf("refusing to run against database %q: %w", dbName, err)
+	}
+
 	report, err := backtest.Run(ctx, db, backtest.Params{
 		InstrumentIDs:    instrumentIDs,
 		Start:            start,

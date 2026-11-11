@@ -27,15 +27,55 @@ const smallSampleThreshold = 30
 // measured" (not fit to any real fee/funding/spread data).
 var costSensitivityBps = []int{5, 10, 20}
 
+// SetupKey is a report-only key for one evaluated setup: the instrument's
+// own native symbol, timeframe, POI type, direction, the setup's own
+// first-detected evaluation time, and the algorithm version -- every
+// component a real-world fact, never a database-assigned sequence value,
+// so the same fixture replayed into two differently-seeded databases
+// keys its setups identically.
+//
+// This is NOT strategy spec section 15.3's own setup identity
+// (instrument_id, timeframe, poi_type, poi_source_candle_id, direction,
+// strategy_version): poi_source_candle_id has no sequence-independent
+// substitute captured anywhere today (analysis.POI stores
+// OrderBlockOpenTime for the order_block case, but no equivalent
+// timestamp for a QMR fail candle -- adding one would mean changing
+// analysis.POI and setups.POISnapshot, both shared packages, which this
+// fix was explicitly scoped to avoid). DetectedAt substitutes for it:
+// close, but not identical -- it marks when this identity was first
+// recognized, not which candle formed or failed its own POI. Two
+// setups could in principle share a key if the substitution ever
+// collides; Run refuses to proceed rather than merge them silently (see
+// checkNoKeyCollisions).
+type SetupKey struct {
+	Symbol           string
+	Timeframe        string
+	POIType          string
+	Direction        string
+	DetectedAt       time.Time
+	AlgorithmVersion string
+}
+
 // Row is one evaluated setup: enough of its own plan (for cost-
 // sensitivity and later-target reporting) plus the Outcome itself.
 type Row struct {
-	InstrumentID int64
+	// InstrumentID is excluded from JSON: a database-assigned sequence
+	// value, kept only for this package's own in-process grouping
+	// (BuildReport's bucketing uses Symbol, not this). Symbol already
+	// identifies the instrument in the report itself.
+	InstrumentID int64 `json:"-"`
 	Symbol       string
 	Direction    string // "bullish" or "bearish"
 	Timeframe    string
 	POIType      string // "order_block" or "qmr" -- whatever analysis.POIType.String() produced
-	SetupID      int64
+	Key          SetupKey
+
+	// rawSetupID is this row's own database-assigned setups.id --
+	// unexported, so encoding/json never sees it regardless of tags.
+	// Kept only so checkNoKeyCollisions can name a concrete, findable
+	// row if two different setups ever produce the same Key; it has no
+	// other reason to exist (Key is the whole point).
+	rawSetupID int64
 
 	Entry, Stop quant.Price
 	PriceScale  quant.Scale
@@ -79,8 +119,17 @@ func (r Row) costInR(bps int) *big.Rat {
 
 // Meta is report-level information that does not vary per bucket.
 type Meta struct {
-	Dataset          string // e.g. "dev fixture dataset" -- see the honesty statement this produces
-	RulesVersion     string
+	// Dataset and HonestyNote are both derived from the run's own
+	// instruments' own provider(s) (internal/backtest's own
+	// distinctProviders), never hardcoded: "dev fixture dataset" was
+	// only ever true because every instrument this runner has ever been
+	// pointed at so far happened to carry provider "fixture" -- ADR-007
+	// is still open, so a future real provider must not have this
+	// report keep claiming "fixture" regardless.
+	Dataset      string // e.g. "fixture dataset"
+	HonestyNote  string // e.g. "fixture data is not market evidence: ..."
+	RulesVersion string
+
 	AlgorithmVersion string
 	PeriodStart      time.Time
 	PeriodEnd        time.Time
@@ -203,6 +252,23 @@ type Report struct {
 	TotalNeverFilledInvalidated  int
 	TotalOpen                    int
 	TotalAmbiguousResolvedAsStop int
+}
+
+// checkNoKeyCollisions returns ErrSetupKeyCollision, naming both
+// involved setups by their own database-assigned id (diagnostic only --
+// never part of the report itself, the whole reason Key exists), if any
+// two rows share the same SetupKey. Run calls this before BuildReport:
+// merging two different identities into one row silently would be
+// exactly the kind of guess CLAUDE.md rule 3 forbids.
+func checkNoKeyCollisions(rows []Row) error {
+	seen := make(map[SetupKey]int64, len(rows))
+	for _, r := range rows {
+		if existing, ok := seen[r.Key]; ok {
+			return fmt.Errorf("%w: setups %d and %d both produced %+v", ErrSetupKeyCollision, existing, r.rawSetupID, r.Key)
+		}
+		seen[r.Key] = r.rawSetupID
+	}
+	return nil
 }
 
 // BuildReport aggregates rows into a Report. It never tunes or filters
@@ -339,7 +405,7 @@ func (rpt Report) RenderMarkdown() string {
 	var sb strings.Builder
 
 	fmt.Fprintf(&sb, "# Backtest report\n\n")
-	fmt.Fprintf(&sb, "**Dataset:** %s. Fixture data is not market evidence: this report proves the plumbing works, it is not evidence about the model.\n\n", rpt.Dataset)
+	fmt.Fprintf(&sb, "**Dataset:** %s. %s\n\n", rpt.Dataset, rpt.HonestyNote)
 	fmt.Fprintf(&sb, "**Period:** %s to %s\n\n", rpt.PeriodStart.Format(time.RFC3339), rpt.PeriodEnd.Format(time.RFC3339))
 	fmt.Fprintf(&sb, "**Instruments:** %s\n\n", strings.Join(rpt.Instruments, ", "))
 	fmt.Fprintf(&sb, "**Rules version:** %s  \n**Algorithm version:** %s\n\n", rpt.RulesVersion, rpt.AlgorithmVersion)

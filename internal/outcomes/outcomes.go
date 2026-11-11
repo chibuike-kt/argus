@@ -66,8 +66,15 @@ func (s Status) MarshalText() ([]byte, error) { return []byte(s.String()), nil }
 // produced one fact of an Outcome -- the evidence ADR-011 requires so a
 // caller can tell an outcome computed before a correction apart from the
 // one computed after it.
+//
+// ID is excluded from JSON: it is a database-assigned sequence value,
+// and OpenTime/CloseTime/Revision already identify the same candle
+// exactly (candles are unique per instrument and open_time) without it
+// -- a caller serializing an Outcome (a report, an export) should never
+// have that serialization depend on which database, or which id
+// sequence within it, produced the value.
 type CandleRef struct {
-	ID        int64
+	ID        int64 `json:"-"`
 	OpenTime  time.Time
 	CloseTime time.Time
 	Revision  int32

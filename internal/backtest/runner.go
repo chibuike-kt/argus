@@ -12,6 +12,8 @@ import (
 	"database/sql"
 	"fmt"
 	"math/big"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/chibuike-kt/argus/internal/analysis"
@@ -68,6 +70,7 @@ func Run(ctx context.Context, db *sql.DB, params Params) (Report, error) {
 
 	var rows []Row
 	var symbols []string
+	var providers []string
 
 	for _, instrumentID := range params.InstrumentIDs {
 		inst, err := instStore.GetByID(ctx, instrumentID)
@@ -75,6 +78,7 @@ func Run(ctx context.Context, db *sql.DB, params Params) (Report, error) {
 			return Report{}, fmt.Errorf("backtest: get instrument %d: %w", instrumentID, err)
 		}
 		symbols = append(symbols, inst.NativeSymbol)
+		providers = append(providers, inst.Provider)
 
 		candles, err := candleSource.ListCandles(ctx, instrumentID, params.Start, params.End)
 		if err != nil {
@@ -108,13 +112,22 @@ func Run(ctx context.Context, db *sql.DB, params Params) (Report, error) {
 		rows = append(rows, instRows...)
 	}
 
+	// Sorted by Key (every component a real-world fact, never a
+	// database-assigned sequence value) rather than left in whatever
+	// order ListByInstrument/the database happened to return: two runs
+	// of the identical fixture against databases with different id
+	// sequences must produce rows in the same order too, not just rows
+	// with the same content (brief's own "two runs, same bytes").
+	sort.Slice(rows, func(i, j int) bool { return setupKeyLess(rows[i].Key, rows[j].Key) })
+
+	if err := checkNoKeyCollisions(rows); err != nil {
+		return Report{}, err
+	}
+
+	dataset, honestyNote := datasetLabel(providers)
 	meta := Meta{
-		// ADR-007 (provider selection) is still open: the dev fixture
-		// dataset is the only data available today (brief's own
-		// "important honesty rule"). A caller replaying real ingested
-		// data once ADR-007 resolves must pass a different label here --
-		// Run does not try to detect which kind of data it was given.
-		Dataset:          "dev fixture dataset",
+		Dataset:          dataset,
+		HonestyNote:      honestyNote,
 		RulesVersion:     outcomes.RulesVersion,
 		AlgorithmVersion: params.AlgorithmVersion,
 		PeriodStart:      params.Start,
@@ -122,6 +135,54 @@ func Run(ctx context.Context, db *sql.DB, params Params) (Report, error) {
 		Instruments:      symbols,
 	}
 	return BuildReport(rows, meta), nil
+}
+
+// setupKeyLess orders two SetupKeys deterministically: by symbol, then
+// by when each identity was first detected, then (for the vanishingly
+// unlikely tie) by POI type and direction.
+func setupKeyLess(a, b SetupKey) bool {
+	if a.Symbol != b.Symbol {
+		return a.Symbol < b.Symbol
+	}
+	if !a.DetectedAt.Equal(b.DetectedAt) {
+		return a.DetectedAt.Before(b.DetectedAt)
+	}
+	if a.POIType != b.POIType {
+		return a.POIType < b.POIType
+	}
+	return a.Direction < b.Direction
+}
+
+// distinctProviders returns the sorted, deduplicated provider names
+// across providers.
+func distinctProviders(providers []string) []string {
+	seen := make(map[string]bool, len(providers))
+	var out []string
+	for _, p := range providers {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// datasetLabel derives the report's own dataset label and honesty
+// sentence from the run's own instruments' provider(s), rather than
+// hardcoding "dev fixture dataset": ADR-007 is still open, so nothing
+// about today's provider set is guaranteed to still be "fixture" once it
+// resolves, and this report must say what it actually ran on, not what
+// was true the last time someone wrote this string by hand.
+func datasetLabel(providers []string) (dataset, honestyNote string) {
+	names := distinctProviders(providers)
+	label := strings.Join(names, ", ")
+	if label == "" {
+		label = "no instruments"
+	}
+	dataset = fmt.Sprintf("%s dataset", label)
+	honestyNote = fmt.Sprintf("%s data is not market evidence: this report proves the plumbing works, it is not evidence about the model.", label)
+	return dataset, honestyNote
 }
 
 // reconcileSetupAt is cmd/argus-worker/processing.go's own reconcileSetup,
@@ -221,9 +282,14 @@ func evaluateInstrument(ctx context.Context, setupsStore *setups.Store, candles 
 			rrs[i] = t.RR
 		}
 
+		key := SetupKey{
+			Symbol: inst.NativeSymbol, Timeframe: timeframe, POIType: detected.Plan.POI.Type,
+			Direction: plan.Direction.String(), DetectedAt: detected.EvaluationTime,
+			AlgorithmVersion: detected.AlgorithmVersion,
+		}
 		rows = append(rows, Row{
 			InstrumentID: inst.ID, Symbol: inst.NativeSymbol, Direction: plan.Direction.String(),
-			Timeframe: timeframe, POIType: detected.Plan.POI.Type, SetupID: s.ID,
+			Timeframe: timeframe, POIType: detected.Plan.POI.Type, Key: key, rawSetupID: s.ID,
 			Entry: plan.Entry, Stop: plan.Stop, PriceScale: inst.PriceScale,
 			TargetRRs: rrs, Outcome: o,
 		})
