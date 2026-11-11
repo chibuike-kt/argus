@@ -90,15 +90,26 @@ paths:
     get:
       operationId: listInstrumentCandles
       summary: >
-        Closed 1-minute candles for one instrument in [from, to), oldest
-        first -- internal/marketdata.Store.ListClosedInRangeLimited, the
-        same read path cmd/argus-worker's own CandleSource uses. A forming
-        candle's own values can still change, so it is never included.
-        from/to are both optional at this schema level so order=desc can
-        mean "the latest N, no range known or needed" (web-wiring-polish
-        brief, item 1); the handler itself still requires both, with the
-        same message as before, when order is asc or omitted -- see its
-        own comment.
+        Closed candles for one instrument in [from, to), at the requested
+        interval (default 1m, so an existing caller that never sends this
+        parameter is unaffected). 1m is served directly
+        (internal/marketdata.Store.ListClosedInRangeLimited, the same read
+        path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are
+        computed on read from the canonical 1-minute series
+        (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) --
+        the browser never aggregates (live-chart-pipeline brief rule 4), so
+        history and the live stream's own derived candles cannot disagree.
+        A forming candle's own values can still change, so it is never
+        included at any interval; a window with any missing or still-
+        forming source minute is silently excluded, never guessed or
+        partially filled. from/to are both optional at this schema level
+        so order=desc can mean "the latest N, no range known or needed"
+        (web-wiring-polish brief, item 1) for 1m; above 1m both from and to
+        are required regardless of order (see the handler's own comment on
+        why the open-ended "latest N" shortcut is not built for aggregated
+        intervals). Calendar-aware (session-bounded) windows for forex are
+        not built: an interval above 1m for a non-crypto instrument is a
+        400, not a guess at session boundaries.
       parameters:
         - name: id
           in: path
@@ -106,6 +117,20 @@ paths:
           schema:
             type: integer
             format: int64
+        - name: interval
+          in: query
+          required: false
+          description: >
+            1m (default): the canonical series, served directly. 5m, 15m,
+            1h, 4h, 1d: computed on read by server-side aggregation: never
+            built client-side, so the live stream and REST history always
+            agree. Any other value is a 400. Above 1m, only crypto
+            instruments are served today (a clear 400 otherwise) --
+            calendar-aware forex windows are a later brief.
+          schema:
+            type: string
+            enum: [1m, 5m, 15m, 1h, 4h, 1d]
+            default: 1m
         - name: from
           in: query
           required: false
@@ -124,7 +149,7 @@ paths:
           description: >
             Maximum candles returned. Default 500, maximum 1000 -- a client
             cannot request the whole table in one call regardless of how
-            wide [from, to) is.
+            wide [from, to) is, at any interval.
           schema:
             type: integer
             format: int32
@@ -139,7 +164,10 @@ paths:
             parameter existed. desc: newest first -- "the most recent N"
             without already knowing a [from, to) range narrow enough to
             contain them (web-wiring-followup brief, Part 4). limit still
-            applies either way, enforced in SQL.
+            applies either way. At 1m, desc with from/to both omitted is
+            allowed (enforced in SQL); above 1m, from/to are required
+            regardless of order (enforced in the handler, over the
+            aggregated windows).
           schema:
             type: string
             enum: [asc, desc]
@@ -150,9 +178,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Candle"
+                $ref: "#/components/schemas/CandleHistory"
         "400":
           description: Bad Request
           content:
@@ -761,6 +787,33 @@ components:
         revision:
           type: integer
           format: int32
+    CandleHistory:
+      type: object
+      required: [candles]
+      description: >
+        GET /instruments/{id}/candles' own response shape (live-chart-
+        pipeline brief, Phase 1): the candle array plus the join point
+        with the live WebSocket stream (docs/briefs/adr-004-ws-contract-draft.md's
+        own `snapshot` message uses the same last_closed_open_time field
+        name) -- the instrument's own latest closed candle as of now,
+        independent of this response's own from/to range, so a client
+        that paged backward through history still gets the real current
+        join point, not whatever the requested range happened to end at.
+        Both last_closed_* fields are null only when the instrument has
+        no closed candle at all yet.
+      properties:
+        candles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Candle"
+        last_closed_open_time:
+          type: string
+          format: date-time
+          nullable: true
+        last_closed_revision:
+          type: integer
+          format: int32
+          nullable: true
     # PlanSnapshot (internal/setups/types.go) is stored as JSONB but its
     # Go shape is stable (TargetSnapshot/POISnapshot/PlanSnapshot structs,
     # not a map), so it is typed here rather than left as a free-form

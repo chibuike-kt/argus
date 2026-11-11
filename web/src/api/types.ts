@@ -72,6 +72,18 @@ export interface ApiCandle {
   revision: number;
 }
 
+// GET /instruments/{id}/candles' own response shape (live-chart-pipeline
+// brief, Phase 1): candles plus the join point with the live WebSocket
+// stream (docs/briefs/adr-004-ws-contract-draft.md's own `snapshot`
+// message uses the same field names) -- the instrument's own latest
+// closed candle as of now, independent of this response's own from/to
+// range. Both null only when the instrument has no closed candle yet.
+export interface ApiCandleHistory {
+  candles: ApiCandle[];
+  last_closed_open_time: string | null;
+  last_closed_revision: number | null;
+}
+
 // TargetSnapshot/POISnapshot/PlanSnapshot mirror internal/setups/types.go
 // field for field (read directly from source, not guessed), and now
 // api/openapi.yaml's own typed TargetSnapshot/POISnapshot/PlanSnapshot

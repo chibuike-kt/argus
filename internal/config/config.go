@@ -39,6 +39,11 @@ type Config struct {
 	// automatically, so no prefix/special handling is needed here.
 	Auth AuthPolicy
 
+	// Live is the live-chart-pipeline brief's own tunables
+	// (internal/config/live_feed.go) -- every one of them [U], per that
+	// brief's own rule 2.
+	Live LiveFeed
+
 	// DevFixtureIngest turns on cmd/argus-worker's fixture-provider
 	// ingestion path: it replays the checked-in dev/test dataset
 	// (internal/ingestion/fixture/testdata) into whatever instruments

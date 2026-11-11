@@ -198,7 +198,7 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
       { signal: controller.signal },
     )
       .then((data) => {
-        if (!controller.signal.aborted) setCandles([...data].reverse());
+        if (!controller.signal.aborted) setCandles([...data.candles].reverse());
       })
       .catch((err: unknown) => {
         if (!controller.signal.aborted) {

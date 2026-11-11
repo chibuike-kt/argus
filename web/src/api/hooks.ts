@@ -3,7 +3,7 @@ import { getWatchlist } from "./auth";
 import { ApiClientError } from "./client";
 import { listInstrumentCandles, listInstruments, type ListCandlesParams } from "./instruments";
 import { getSetup, listSetupEvents, listSetups, type ListSetupsParams } from "./setups";
-import type { ApiCandle, ApiInstrument, ApiSetup, ApiSetupEvent } from "./types";
+import type { ApiCandleHistory, ApiInstrument, ApiSetup, ApiSetupEvent } from "./types";
 
 export interface AsyncState<T> {
   data: T | undefined;
@@ -53,13 +53,15 @@ export function useInstruments(): AsyncState<ApiInstrument[]> {
 export function useInstrumentCandles(
   instrumentId: number | undefined,
   params: ListCandlesParams,
-): AsyncState<ApiCandle[]> {
+): AsyncState<ApiCandleHistory> {
   return useAsyncResource(
     (signal) => {
-      if (instrumentId === undefined) return Promise.resolve([]);
+      if (instrumentId === undefined) {
+        return Promise.resolve({ candles: [], last_closed_open_time: null, last_closed_revision: null });
+      }
       return listInstrumentCandles(instrumentId, params, { signal });
     },
-    [instrumentId, params.from, params.to, params.limit],
+    [instrumentId, params.interval, params.from, params.to, params.limit],
   );
 }
 
@@ -113,12 +115,13 @@ export function useLatestCloses(instrumentIds: number[]): AsyncState<Map<number,
       const entries = await Promise.all(
         capped.map(async (instrumentId): Promise<[number, number] | undefined> => {
           try {
-            const rows = await listInstrumentCandles(
+            const history = await listInstrumentCandles(
               instrumentId,
               { limit: 1, order: "desc" },
               { signal },
             );
-            return rows[0] ? [instrumentId, Number(rows[0].close)] : undefined;
+            const row = history.candles[0];
+            return row ? [instrumentId, Number(row.close)] : undefined;
           } catch {
             return undefined;
           }

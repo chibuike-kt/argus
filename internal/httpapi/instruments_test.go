@@ -66,6 +66,11 @@ func (f *fakeInstrumentsStore) GetByID(_ context.Context, id int64) (instruments
 type fakeCandlesStore struct {
 	rows []marketdata.Candle
 	err  error
+
+	aggregates   []marketdata.AggregateOHLCV
+	aggregateErr error
+	latestClosed marketdata.Candle
+	latestErr    error
 }
 
 func (f *fakeCandlesStore) ListClosedInRangeLimited(_ context.Context, _ int64, _, _ time.Time, _ int32) ([]marketdata.Candle, error) {
@@ -84,6 +89,20 @@ func (f *fakeCandlesStore) ListClosedInRangeLimitedDesc(_ context.Context, _ int
 		reversed[len(f.rows)-1-i] = c
 	}
 	return reversed, nil
+}
+
+func (f *fakeCandlesStore) AggregateRange(_ context.Context, _ int64, _ []marketdata.Window) ([]marketdata.AggregateOHLCV, error) {
+	if f.aggregateErr != nil {
+		return nil, f.aggregateErr
+	}
+	return f.aggregates, nil
+}
+
+func (f *fakeCandlesStore) GetLatestClosed(_ context.Context, _ int64) (marketdata.Candle, error) {
+	if f.latestErr != nil {
+		return marketdata.Candle{}, f.latestErr
+	}
+	return f.latestClosed, nil
 }
 
 func timePtr(t time.Time) *time.Time { return &t }
@@ -239,11 +258,11 @@ func TestListInstrumentCandles_OK(t *testing.T) {
 		t.Fatalf("ListInstrumentCandles: %v", err)
 	}
 	got, ok := resp.(ListInstrumentCandles200JSONResponse)
-	if !ok || len(got) != 1 {
+	if !ok || len(got.Candles) != 1 {
 		t.Fatalf("got %#v, want one candle", resp)
 	}
-	if got[0].Open != "100.50" || got[0].Volume != "1.5000" {
-		t.Fatalf("got %+v, want decimal-string OHLCV scaled from the instrument", got[0])
+	if got.Candles[0].Open != "100.50" || got.Candles[0].Volume != "1.5000" {
+		t.Fatalf("got %+v, want decimal-string OHLCV scaled from the instrument", got.Candles[0])
 	}
 }
 
@@ -291,11 +310,11 @@ func TestListInstrumentCandles_OrderDescUsesDescStore(t *testing.T) {
 		t.Fatalf("ListInstrumentCandles: %v", err)
 	}
 	got, ok := resp.(ListInstrumentCandles200JSONResponse)
-	if !ok || len(got) != 2 {
+	if !ok || len(got.Candles) != 2 {
 		t.Fatalf("got %#v, want two candles", resp)
 	}
-	if got[0].Open != "2.00" || got[1].Open != "1.00" {
-		t.Fatalf("got opens [%s, %s], want [2.00, 1.00] (newest first, from the fake's own Desc method)", got[0].Open, got[1].Open)
+	if got.Candles[0].Open != "2.00" || got.Candles[1].Open != "1.00" {
+		t.Fatalf("got opens [%s, %s], want [2.00, 1.00] (newest first, from the fake's own Desc method)", got.Candles[0].Open, got.Candles[1].Open)
 	}
 }
 
@@ -321,7 +340,7 @@ func TestListInstrumentCandles_OrderAscIsUnchangedDefault(t *testing.T) {
 		t.Fatalf("ListInstrumentCandles: %v", err)
 	}
 	got, ok := resp.(ListInstrumentCandles200JSONResponse)
-	if !ok || len(got) != 1 || got[0].Open != "1.00" {
+	if !ok || len(got.Candles) != 1 || got.Candles[0].Open != "1.00" {
 		t.Fatalf("got %#v, want the ascending fake's own one row, unchanged", resp)
 	}
 }
@@ -410,11 +429,11 @@ func TestListInstrumentCandles_OrderDescNoFromReturnsNewestFirst(t *testing.T) {
 		t.Fatalf("ListInstrumentCandles: %v", err)
 	}
 	got, ok := resp.(ListInstrumentCandles200JSONResponse)
-	if !ok || len(got) != 2 {
+	if !ok || len(got.Candles) != 2 {
 		t.Fatalf("got %#v, want two candles", resp)
 	}
-	if got[0].Open != "2.00" || got[1].Open != "1.00" {
-		t.Fatalf("got opens [%s, %s], want [2.00, 1.00] (newest first, no from/to needed)", got[0].Open, got[1].Open)
+	if got.Candles[0].Open != "2.00" || got.Candles[1].Open != "1.00" {
+		t.Fatalf("got opens [%s, %s], want [2.00, 1.00] (newest first, no from/to needed)", got.Candles[0].Open, got.Candles[1].Open)
 	}
 }
 
@@ -439,5 +458,183 @@ func TestListInstrumentCandles_OrderAscNoFromStillRejected(t *testing.T) {
 	}
 	if got.Error.Message != "Query argument from is required, but not found" {
 		t.Fatalf("message = %q, want the unchanged required-param message", got.Error.Message)
+	}
+}
+
+// --- live-chart-pipeline brief, Phase 1: interval ---
+
+func TestListInstrumentCandles_UnknownIntervalIs400(t *testing.T) {
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: testInstrumentDomain(1)}},
+		candles:     &fakeCandlesStore{},
+		logger:      slog.Default(),
+	}
+	bad := ListInstrumentCandlesParamsInterval("2m")
+	from, to := time.Now(), time.Now().Add(time.Hour)
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{Interval: &bad, From: &from, To: &to},
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	if _, ok := resp.(ListInstrumentCandles400JSONResponse); !ok {
+		t.Fatalf("got %#v, want 400 for interval=%q", resp, bad)
+	}
+}
+
+func TestListInstrumentCandles_NonCryptoAboveOneMinuteIs400(t *testing.T) {
+	inst := testInstrumentDomain(1)
+	inst.AssetClass = "forex_spot" // anything that is not "crypto_perp"
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: inst}},
+		candles:     &fakeCandlesStore{},
+		logger:      slog.Default(),
+	}
+	interval := N5m
+	from, to := time.Now(), time.Now().Add(time.Hour)
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{Interval: &interval, From: &from, To: &to},
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	got, ok := resp.(ListInstrumentCandles400JSONResponse)
+	if !ok {
+		t.Fatalf("got %#v, want 400 for a non-crypto instrument at 5m", resp)
+	}
+	if got.Error.Code != "invalid_argument" {
+		t.Errorf("Error.Code = %q, want invalid_argument", got.Error.Code)
+	}
+}
+
+func TestListInstrumentCandles_CryptoAboveOneMinuteUsesAggregateRange(t *testing.T) {
+	inst := testInstrumentDomain(1) // AssetClass crypto_perp
+	agg := marketdata.AggregateOHLCV{
+		Window: marketdata.Window{
+			Start: clock.NewEventTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
+			End:   clock.NewEventTime(time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)),
+		},
+		Open: 10000, High: 10200, Low: 9900, Close: 10100, Volume: 500,
+	}
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: inst}},
+		candles:     &fakeCandlesStore{aggregates: []marketdata.AggregateOHLCV{agg}},
+		logger:      slog.Default(),
+	}
+	interval := N5m
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{Interval: &interval, From: &from, To: &to},
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	got, ok := resp.(ListInstrumentCandles200JSONResponse)
+	if !ok || len(got.Candles) != 1 {
+		t.Fatalf("got %#v, want one aggregated candle", resp)
+	}
+	c := got.Candles[0]
+	if c.Open != "100.00" || c.High != "102.00" || c.Low != "99.00" || c.Close != "101.00" || c.Volume != "0.0500" {
+		t.Errorf("c = %+v, want the AggregateOHLCV scaled by the instrument", c)
+	}
+	if !c.IsClosed {
+		t.Errorf("IsClosed = false, want true for an aggregate (only complete windows are ever returned)")
+	}
+	if c.Revision != 1 {
+		t.Errorf("Revision = %d, want 1 (this package's own fixed value for a derived candle)", c.Revision)
+	}
+}
+
+func TestListInstrumentCandles_AboveOneMinuteRequiresFromAndToRegardlessOfOrder(t *testing.T) {
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: testInstrumentDomain(1)}},
+		candles:     &fakeCandlesStore{},
+		logger:      slog.Default(),
+	}
+	interval := N5m
+	desc := Desc
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{Interval: &interval, Order: &desc},
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	if _, ok := resp.(ListInstrumentCandles400JSONResponse); !ok {
+		t.Fatalf("got %#v, want 400: above 1m, from/to are required even with order=desc", resp)
+	}
+}
+
+func TestListInstrumentCandles_LastClosedJoinPoint(t *testing.T) {
+	inst := testInstrumentDomain(1)
+	latest := marketdata.Candle{
+		OpenTime: clock.NewEventTime(time.Date(2026, 1, 1, 0, 9, 0, 0, time.UTC)),
+		Revision: 3,
+	}
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: inst}},
+		candles:     &fakeCandlesStore{rows: nil, latestClosed: latest},
+		logger:      slog.Default(),
+	}
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{From: &from, To: &to},
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	got, ok := resp.(ListInstrumentCandles200JSONResponse)
+	if !ok {
+		t.Fatalf("got %#v, want 200", resp)
+	}
+	if got.LastClosedOpenTime == nil || !got.LastClosedOpenTime.Equal(latest.OpenTime.Time()) {
+		t.Errorf("LastClosedOpenTime = %v, want %s", got.LastClosedOpenTime, latest.OpenTime.Time())
+	}
+	if got.LastClosedRevision == nil || *got.LastClosedRevision != 3 {
+		t.Errorf("LastClosedRevision = %v, want 3", got.LastClosedRevision)
+	}
+}
+
+func TestListInstrumentCandles_NoClosedCandleYet_JoinPointIsNil(t *testing.T) {
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: testInstrumentDomain(1)}},
+		candles:     &fakeCandlesStore{latestErr: marketdata.ErrCandleNotFound},
+		logger:      slog.Default(),
+	}
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{From: &from, To: &to},
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	got, ok := resp.(ListInstrumentCandles200JSONResponse)
+	if !ok {
+		t.Fatalf("got %#v, want 200", resp)
+	}
+	if got.LastClosedOpenTime != nil || got.LastClosedRevision != nil {
+		t.Errorf("join point = (%v, %v), want (nil, nil) when the instrument has no closed candle yet", got.LastClosedOpenTime, got.LastClosedRevision)
+	}
+}
+
+func TestListInstrumentCandles_AggregatedIntervalMax1000Holds(t *testing.T) {
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: testInstrumentDomain(1)}},
+		candles:     &fakeCandlesStore{},
+		logger:      slog.Default(),
+	}
+	interval := N5m
+	tooMany := int32(maxInstrumentCandles + 1)
+	from, to := time.Now(), time.Now().Add(time.Hour)
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{Interval: &interval, From: &from, To: &to, Limit: &tooMany},
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	if _, ok := resp.(ListInstrumentCandles400JSONResponse); !ok {
+		t.Fatalf("got %#v, want 400: the 1000 cap must hold for aggregated intervals too", resp)
 	}
 }

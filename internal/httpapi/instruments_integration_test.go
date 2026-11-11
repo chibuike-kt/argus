@@ -159,17 +159,17 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 		}
-		var got []Candle
+		var got CandleHistory
 		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if len(got) != 2 {
-			t.Fatalf("got %d candles, want 2", len(got))
+		if len(got.Candles) != 2 {
+			t.Fatalf("got %d candles, want 2", len(got.Candles))
 		}
-		if got[0].Open != "85" || got[1].Open != "90" {
-			t.Fatalf("got opens %q, %q, want decimal strings \"85\", \"90\"", got[0].Open, got[1].Open)
+		if got.Candles[0].Open != "85" || got.Candles[1].Open != "90" {
+			t.Fatalf("got opens %q, %q, want decimal strings \"85\", \"90\"", got.Candles[0].Open, got.Candles[1].Open)
 		}
-		if !got[0].IsClosed || !got[1].IsClosed {
+		if !got.Candles[0].IsClosed || !got.Candles[1].IsClosed {
 			t.Fatalf("got %+v, want both candles closed", got)
 		}
 	})
@@ -185,15 +185,15 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 		}
-		var got []Candle
+		var got CandleHistory
 		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if len(got) != 2 {
-			t.Fatalf("got %d candles, want 2", len(got))
+		if len(got.Candles) != 2 {
+			t.Fatalf("got %d candles, want 2", len(got.Candles))
 		}
-		if got[0].Open != "90" || got[1].Open != "85" {
-			t.Fatalf("got opens %q, %q, want \"90\", \"85\" (newest first)", got[0].Open, got[1].Open)
+		if got.Candles[0].Open != "90" || got.Candles[1].Open != "85" {
+			t.Fatalf("got opens %q, %q, want \"90\", \"85\" (newest first)", got.Candles[0].Open, got.Candles[1].Open)
 		}
 	})
 
@@ -206,11 +206,11 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 			t.Fatalf("GET /instruments/{id}/candles?order=desc&limit=1: %v", err)
 		}
 		defer resp.Body.Close()
-		var got []Candle
+		var got CandleHistory
 		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if len(got) != 1 || got[0].Open != "90" {
+		if len(got.Candles) != 1 || got.Candles[0].Open != "90" {
 			t.Fatalf("got %+v, want exactly one candle, open \"90\"", got)
 		}
 	})
@@ -225,15 +225,15 @@ func TestIntegration_InstrumentsAndCandlesEndpoints_RealStore(t *testing.T) {
 			body, _ := io.ReadAll(resp.Body)
 			t.Fatalf("status = %d, want %d, body=%s", resp.StatusCode, http.StatusOK, body)
 		}
-		var got []Candle
+		var got CandleHistory
 		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if len(got) != 2 {
-			t.Fatalf("got %d candles, want 2", len(got))
+		if len(got.Candles) != 2 {
+			t.Fatalf("got %d candles, want 2", len(got.Candles))
 		}
-		if got[0].Open != "90" || got[1].Open != "85" {
-			t.Fatalf("got opens %q, %q, want \"90\", \"85\" (newest first, no range given at all)", got[0].Open, got[1].Open)
+		if got.Candles[0].Open != "90" || got.Candles[1].Open != "85" {
+			t.Fatalf("got opens %q, %q, want \"90\", \"85\" (newest first, no range given at all)", got.Candles[0].Open, got.Candles[1].Open)
 		}
 	})
 
