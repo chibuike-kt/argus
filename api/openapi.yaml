@@ -497,7 +497,9 @@ paths:
       summary: >
         Records onboarding_completed_at (ADR-015), but only once the
         authenticated user already has a display name and at least one
-        watchlist item -- 400 otherwise, naming whichever is missing.
+        watchlist item -- 409 onboarding_incomplete otherwise: the
+        request itself is well formed, the account's current state is
+        just not yet eligible.
       responses:
         "200":
           description: OK
@@ -505,8 +507,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthUser"
-        "400":
-          description: Bad Request
+        "409":
+          description: Conflict
           content:
             application/json:
               schema:

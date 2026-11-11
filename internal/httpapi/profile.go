@@ -37,7 +37,7 @@ func (h *apiHandler) CompleteOnboarding(ctx context.Context, _ CompleteOnboardin
 		return CompleteOnboarding200JSONResponse(toAuthUser(updated)), nil
 	}
 	if errors.Is(err, service.ErrOnboardingIncomplete) {
-		return CompleteOnboarding400JSONResponse(apiError("invalid_argument", err.Error())), nil
+		return CompleteOnboarding409JSONResponse(apiError("onboarding_incomplete", err.Error())), nil
 	}
 	h.logger.Error("httpapi: complete onboarding", "user_id", user.ID, "error", err)
 	return nil, fmt.Errorf("complete onboarding: %w", err)

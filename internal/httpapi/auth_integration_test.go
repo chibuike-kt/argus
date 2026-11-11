@@ -434,8 +434,8 @@ func TestIntegration_Onboarding_ProfileAndWatchlistCompleteIt(t *testing.T) {
 		t.Fatalf("complete onboarding too early: %v", err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("complete onboarding with nothing set status = %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("complete onboarding with nothing set status = %d, want 409", resp.StatusCode)
 	}
 
 	profileReq := authJSONRequest(t, http.MethodPut, srv.URL+"/api/v1/me/profile", ProfileUpdateRequest{DisplayName: "Ada"})
