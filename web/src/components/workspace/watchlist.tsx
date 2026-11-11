@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Plus, Columns, DotsThree, CaretDown, CircleNotch } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { SampleDataBadge } from "@/components/ui/sample-data-badge";
-import { useInstruments, useLatestCloses } from "@/api/hooks";
+import { useInstruments, useLatestCloses, useWatchlist } from "@/api/hooks";
 import { cn } from "@/lib/cn";
 
 // No forex instrument exists in the dev-fixture dataset this is verified
@@ -82,13 +82,27 @@ function Group({ title, sample, children }: { title: string; sample?: boolean; c
 }
 
 export function Watchlist() {
-  const { data: instruments, loading, error } = useInstruments();
+  const { data: instruments, loading: instrumentsLoading, error: instrumentsError } =
+    useInstruments();
+  // The signed-in user's own saved instrument ids, in their saved
+  // order (web light auth redesign brief, Part 3) -- this panel no
+  // longer shows every registered instrument, only the ones onboarding
+  // (or /account later) actually saved.
+  const { data: watchlistIds, loading: watchlistLoading, error: watchlistError } = useWatchlist();
+  const loading = instrumentsLoading || watchlistLoading;
+  const error = instrumentsError ?? watchlistError;
+
+  const byId = new Map((instruments ?? []).map((inst) => [inst.id, inst]));
+  const watched = (watchlistIds ?? [])
+    .map((id) => byId.get(id))
+    .filter((inst): inst is NonNullable<typeof inst> => inst !== undefined);
+
   // Last = the latest closed candle's close, per real instrument
   // (order=desc&limit=1, web-wiring-followup brief Part 5) -- capped and
   // parallel (useLatestCloses's own doc comment); Chg/Chg% stay an em
   // dash (Row's own default), since no 24h reference exists yet and this
   // brief does not invent one.
-  const { data: latestCloses } = useLatestCloses((instruments ?? []).map((i) => i.id));
+  const { data: latestCloses } = useLatestCloses(watched.map((i) => i.id));
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -135,7 +149,7 @@ export function Watchlist() {
           {error && <div className="px-2 py-2 text-[12px] text-down">{error.message}</div>}
           {!loading &&
             !error &&
-            (instruments ?? []).map((inst) => (
+            watched.map((inst) => (
               // Symbol and Last are both real now (GET /instruments,
               // GET .../candles?order=desc&limit=1); Chg/Chg% stay an em
               // dash -- no 24h reference endpoint exists to compute them
@@ -143,8 +157,10 @@ export function Watchlist() {
               // fabricated number.
               <Row key={inst.id} symbol={inst.native_symbol} last={latestCloses?.get(inst.id)} />
             ))}
-          {!loading && !error && (instruments ?? []).length === 0 && (
-            <div className="px-2 py-2 text-[12px] text-fg-subtle">No instruments registered.</div>
+          {!loading && !error && watched.length === 0 && (
+            <div className="px-2 py-2 text-[12px] text-fg-subtle">
+              Your watchlist is empty. Add a pair from onboarding or account settings.
+            </div>
           )}
         </Group>
         <Group title="Forex" sample>

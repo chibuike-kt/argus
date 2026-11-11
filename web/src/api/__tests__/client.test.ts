@@ -101,12 +101,12 @@ describe("postJSON", () => {
   it("sends Content-Type: application/json and the JSON body", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 1 }, 202));
     global.fetch = fetchMock;
-    await postJSON("/auth/register", { email: "a@example.com", password: "whatever12345" });
+    await postJSON("/auth/signup/start", { email: "a@example.com", accepted_terms: true });
 
     const [, init] = fetchMock.mock.calls[0];
     expect(init.method).toBe("POST");
     expect(init.headers).toMatchObject({ "Content-Type": "application/json" });
-    expect(JSON.parse(init.body)).toEqual({ email: "a@example.com", password: "whatever12345" });
+    expect(JSON.parse(init.body)).toEqual({ email: "a@example.com", accepted_terms: true });
   });
 
   it("reads Retry-After into ApiClientError.retryAfterSeconds on a 429", async () => {

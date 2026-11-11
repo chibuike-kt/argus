@@ -236,6 +236,28 @@ export async function postJSON<T>(
   return respBody as T;
 }
 
+// putJSON sends a JSON body via PUT (a full-replace write, e.g. the
+// watchlist or the profile) and parses the response the same way
+// postJSON does.
+export async function putJSON<T>(
+  path: string,
+  body?: unknown,
+  options?: RequestOptions,
+): Promise<T> {
+  const url = `${apiBaseUrl()}${path}`;
+  const { resp, body: respBody } = await performRequest(
+    url,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    },
+    options,
+  );
+  if (!resp.ok) throw toError(resp, respBody, options);
+  return respBody as T;
+}
+
 // deleteRequest sends a DELETE with no body (every DELETE route this
 // app calls, e.g. a session revoke, takes none) and parses an empty
 // (204) response. Content-Type is still sent on the empty body: the

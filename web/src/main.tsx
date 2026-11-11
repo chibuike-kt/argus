@@ -23,8 +23,14 @@ import { AnalysisPreview } from "@/routes/analysis-preview";
 import { Setups } from "@/routes/setups";
 import { Account } from "@/routes/account";
 import { SignIn } from "@/routes/sign-in";
+import { SignUp } from "@/routes/sign-up";
+import { ForgotPassword } from "@/routes/forgot-password";
+import { Onboarding } from "@/routes/onboarding";
+import { Terms } from "@/routes/terms";
+import { Privacy } from "@/routes/privacy";
 import { AuthProvider } from "@/auth/auth-context";
 import { RequireAuth } from "@/auth/require-auth";
+import { RequireOnboarded } from "@/auth/require-onboarded";
 import { PublicOnly } from "@/auth/public-only";
 
 // /login is now just a redirect to /sign-in (web light auth redesign
@@ -48,21 +54,36 @@ const router = createBrowserRouter([
     ),
     children: [
       { path: "login", element: <LoginRedirect /> },
+      { path: "terms", element: <Terms /> },
+      { path: "privacy", element: <Privacy /> },
       {
         element: <PublicOnly />,
-        children: [{ path: "sign-in", element: <SignIn /> }],
+        children: [
+          { path: "sign-in", element: <SignIn /> },
+          { path: "sign-up", element: <SignUp /> },
+          { path: "forgot-password", element: <ForgotPassword /> },
+        ],
       },
       {
         element: <RequireAuth />,
         children: [
+          // /onboarding sits directly under RequireAuth, not
+          // RequireOnboarded below -- it is the one route a signed-in,
+          // not-yet-onboarded user must be able to reach.
+          { path: "onboarding", element: <Onboarding /> },
           {
-            element: <AppShell />,
+            element: <RequireOnboarded />,
             children: [
-              { index: true, element: <Navigate to="/setups" replace /> },
-              { path: "analysis", element: <AnalysisPreview /> },
-              { path: "setups", element: <Setups /> },
-              { path: "account", element: <Account /> },
-              { path: "style", element: <StyleGuide /> },
+              {
+                element: <AppShell />,
+                children: [
+                  { index: true, element: <Navigate to="/setups" replace /> },
+                  { path: "analysis", element: <AnalysisPreview /> },
+                  { path: "setups", element: <Setups /> },
+                  { path: "account", element: <Account /> },
+                  { path: "style", element: <StyleGuide /> },
+                ],
+              },
             ],
           },
         ],

@@ -17,10 +17,13 @@ import { safeNextPath } from "@/auth/safe-next";
 // is chosen and wired.
 const SOCIAL_LOGIN_ENABLED = false;
 
-// Password reset (auth backend Part 2) is not built. A live "Forgot
-// password?" link would be dishonest, so it renders nothing until
-// this flips. Backend Part 2 of the auth brief is where it gets built.
-const FORGOT_PASSWORD_ENABLED = false;
+// Password reset itself (a real /auth/forgot-password + /auth/reset-
+// password backend) is not built yet -- ADR-015 reserves the shape
+// and internal/httpapi's own deny-by-default list already pre-lists
+// both paths as public, inert until they exist. The link is shown
+// (per direct request) but points at a placeholder page that says so
+// honestly, rather than a form that would submit to nothing real.
+const FORGOT_PASSWORD_ENABLED = true;
 
 const GENERIC_LOGIN_ERROR = "Email or password is incorrect, or the email is not verified yet";
 

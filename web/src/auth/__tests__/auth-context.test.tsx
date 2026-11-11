@@ -48,7 +48,7 @@ describe("AuthProvider", () => {
       const url = new URL(String(input), "http://localhost");
       if (url.pathname === "/api/v1/auth/me") {
         return Promise.resolve(
-          jsonResponse({ id: 1, email: "a@example.com", email_verified: true, created_at: "2026-01-01T00:00:00Z" }),
+          jsonResponse({ id: 1, email: "a@example.com", email_verified: true, created_at: "2026-01-01T00:00:00Z", display_name: null, onboarding_completed: true }),
         );
       }
       if (url.pathname === "/api/v1/setups") {

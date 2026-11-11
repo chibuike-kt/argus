@@ -14,7 +14,7 @@ const NAV = [
 export function TopBar() {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
-  const initial = user?.email?.[0]?.toUpperCase() ?? "?";
+  const initial = (user?.display_name || user?.email)?.[0]?.toUpperCase() ?? "?";
 
   async function onSignOut() {
     await signOut();
@@ -71,7 +71,14 @@ export function TopBar() {
               sideOffset={10}
               className="glass-strong z-[60] w-56 rounded-lg p-1 shadow-xl"
             >
-              <div className="truncate px-2.5 py-2 text-[12px] text-fg-subtle">{user?.email}</div>
+              <div className="px-2.5 py-2">
+                {user?.display_name && (
+                  <div className="truncate text-[13px] font-medium text-fg">
+                    {user.display_name}
+                  </div>
+                )}
+                <div className="truncate text-[12px] text-fg-subtle">{user?.email}</div>
+              </div>
               <DropdownMenu.Separator className="my-1 h-px bg-line" />
               <DropdownMenu.Item
                 onSelect={() => navigate("/account")}

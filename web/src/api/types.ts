@@ -17,12 +17,24 @@ export interface ApiError {
 }
 
 // ApiAuthUser/ApiAuthSession mirror api/openapi.yaml's AuthUser/
-// AuthSession schemas exactly (web auth UI brief, Part A).
+// AuthSession schemas exactly (web auth UI brief, Part A;
+// display_name/onboarding_completed added by the web light auth
+// redesign brief, Part 2).
 export interface ApiAuthUser {
   id: number;
   email: string;
   email_verified: boolean;
   created_at: string;
+  display_name: string | null;
+  onboarding_completed: boolean;
+}
+
+// ApiWatchlistItem mirrors api/openapi.yaml's WatchlistItem schema --
+// position is this user's own display order (PUT /watchlist replaces
+// the whole list at once; position is the index in the array sent).
+export interface ApiWatchlistItem {
+  instrument_id: number;
+  position: number;
 }
 
 export interface ApiAuthSession {

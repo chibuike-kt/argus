@@ -35,7 +35,14 @@ export function CodeInput({
     next[index] = char;
     const joined = next.join("").slice(0, length);
     onChange(joined);
-    if (joined.length === length && !joined.includes("")) {
+    // next.includes("") (an empty slot still present in the per-box
+    // array) is the right check -- joined.includes("") was a bug: the
+    // empty string is a substring of every string, so that check was
+    // always true and onComplete could never fire (caught by the web
+    // light auth redesign brief's own Part 3 integration test, the
+    // first thing to actually exercise auto-submit-on-complete end to
+    // end).
+    if (joined.length === length && !next.includes("")) {
       onComplete?.(joined);
     }
   }

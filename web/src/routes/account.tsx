@@ -65,6 +65,15 @@ export function Account() {
     <div className="mx-auto h-full max-w-[720px] space-y-6 overflow-y-auto p-4 sm:p-6">
       <h1 className="text-2xl font-semibold tracking-tight">Account</h1>
 
+      {user?.display_name && (
+        <Panel variant="glass" pad="lg" className="space-y-1.5">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-fg-subtle">
+            Display name
+          </div>
+          <div className="text-sm">{user.display_name}</div>
+        </Panel>
+      )}
+
       <Panel variant="glass" pad="lg" className="space-y-1.5">
         <div className="text-[11px] font-semibold uppercase tracking-wide text-fg-subtle">
           Email

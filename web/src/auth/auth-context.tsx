@@ -11,9 +11,18 @@ export interface AuthContextValue {
   status: AuthStatus;
   user: ApiAuthUser | null;
   signIn: (email: string, password: string) => Promise<ApiAuthUser>;
+  // completeSignup logs the new account in the same way signIn does --
+  // signup/complete itself sets the session cookie (ADR-015), so this
+  // is just the matching context-state update, not a second API call.
+  completeSignup: (ticket: string, password: string) => Promise<ApiAuthUser>;
   signOut: () => Promise<void>;
   signOutAll: () => Promise<void>;
   refresh: () => Promise<void>;
+  // applyUser lets a screen that already has a fresher AuthUser from
+  // its own mutation (PUT /me/profile, POST /me/onboarding/complete)
+  // push it into context directly, without a second GET /auth/me
+  // round trip just to pick up the same response it already has.
+  applyUser: (user: ApiAuthUser) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -26,6 +35,8 @@ const FIXTURE_USER: ApiAuthUser = {
   email: "sample@argus.local",
   email_verified: true,
   created_at: new Date(0).toISOString(),
+  display_name: "Sample Account",
+  onboarding_completed: true,
 };
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -89,6 +100,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return u;
   };
 
+  const completeSignup = async (ticket: string, password: string) => {
+    const u = await authApi.signupComplete(ticket, password);
+    setUser(u);
+    setStatus("signedIn");
+    return u;
+  };
+
   const signOut = async () => {
     try {
       await authApi.logout();
@@ -119,7 +137,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ status, user, signIn, signOut, signOutAll, refresh }}>
+    <AuthContext.Provider
+      value={{ status, user, signIn, completeSignup, signOut, signOutAll, refresh, applyUser: setUser }}
+    >
       {children}
     </AuthContext.Provider>
   );

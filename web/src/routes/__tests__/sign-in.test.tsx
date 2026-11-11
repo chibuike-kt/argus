@@ -52,7 +52,7 @@ describe("SignIn route", () => {
 
   it("redirects to ?next= on success", async () => {
     installFetchMock(() =>
-      jsonResponse({ id: 1, email: "a@example.com", email_verified: true, created_at: "2026-01-01T00:00:00Z" }),
+      jsonResponse({ id: 1, email: "a@example.com", email_verified: true, created_at: "2026-01-01T00:00:00Z", display_name: null, onboarding_completed: true }),
     );
     renderSignIn(["/sign-in?next=/account"]);
 
@@ -115,10 +115,11 @@ describe("SignIn route", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("renders no Forgot password link (FORGOT_PASSWORD_ENABLED is false)", async () => {
+  it("renders a Forgot password link pointing at /forgot-password", async () => {
     installFetchMock(() => jsonResponse({}, 202));
     renderSignIn();
     await screen.findByLabelText(/Email address/);
-    expect(screen.queryByText("Forgot password?")).toBeNull();
+    const link = screen.getByText("Forgot password?");
+    expect(link.closest("a")).toHaveAttribute("href", "/forgot-password");
   });
 });
