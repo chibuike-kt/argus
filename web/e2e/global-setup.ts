@@ -9,7 +9,7 @@
 // git-ignored file -- generated fresh by this run, never committed,
 // never a file a human hand-edits.
 import { readFileSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,6 +84,15 @@ function cookieValue(setCookieHeader: string | null, name: string): string {
 }
 
 export default async function globalSetup(): Promise<void> {
+  // A failed run from earlier leaves this file's own previous
+  // (successful) contents in place, since nothing before this deletes
+  // it -- global-teardown's own "no file -> global setup must have
+  // failed" assumption otherwise breaks the moment THIS run fails
+  // after an EARLIER successful one: teardown would read that stale
+  // file and try to revoke a session on a backend/database that no
+  // longer has any idea what it is.
+  await rm(AUTH_FILE, { force: true });
+
   const email = `e2e-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
 
   await api("POST", "/auth/signup/start", undefined, { email, accepted_terms: true });
@@ -106,12 +115,11 @@ export default async function globalSetup(): Promise<void> {
   // Look up real instruments at run time -- never hardcoded ids. The
   // dev fixture seed (db/seed/dev_fixture_instruments.sql, applied by
   // Makefile's own e2e-stack target) always creates exactly these two
-  // symbols, but never at a fixed id: argus_test accumulates rows
-  // across every integration-test run this repo's own Go suite does
-  // (over a thousand by the time this was written), ordered oldest-id-
-  // first, so freshly-seeded BTC-PERP/ETH-PERP are near the END of the
-  // listing -- paginate (after_id, the API's own cursor) until found,
-  // not just the first page.
+  // symbols, but never at a fixed id -- argus_e2e is reset fresh before
+  // every run (Makefile's own e2e-resetdb), so in practice these are
+  // the first two rows, but paginating (after_id, the API's own
+  // cursor) rather than trusting that is what makes this correct even
+  // if that ever changes, not just convenient today.
   type Instrument = { id: number; native_symbol: string; provider: string };
   let btc: Instrument | undefined;
   let eth: Instrument | undefined;
@@ -128,16 +136,31 @@ export default async function globalSetup(): Promise<void> {
   }
   if (!btc || !eth) {
     throw new Error(
-      "BTC-PERP/ETH-PERP not found after paginating every instrument -- did Makefile's e2e-stack target's own seed-dev step run against argus_test?",
+      "BTC-PERP/ETH-PERP not found after paginating every instrument -- did Makefile's e2e-stack target's own seed-dev step run against argus_e2e?",
     );
   }
 
   await api("PUT", "/watchlist", sessionCookie, { instrument_ids: [btc.id, eth.id] });
   await api("POST", "/me/onboarding/complete", sessionCookie);
 
-  const setups = (await (await api("GET", `/setups?instrument_id=${btc.id}`, sessionCookie)).json()) as Array<{ id: number }>;
+  // "Fresh database per e2e run" (Makefile's own e2e-resetdb) means
+  // setups do not already exist the way they always did on a long-
+  // lived, never-reset argus_e2e -- the analysis engine
+  // (cmd/argus-worker's own processing loop, ticking once a minute)
+  // has to actually run against the just-ingested candles before any
+  // exist. Poll rather than guess a fixed sleep: real end-to-end
+  // confirmation that processing has caught up, not a timing guess.
+  let setups: Array<{ id: number }> = [];
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    setups = (await (await api("GET", `/setups?instrument_id=${btc.id}`, sessionCookie)).json()) as Array<{ id: number }>;
+    if (setups.length > 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
   if (setups.length === 0) {
-    throw new Error(`no setups found for BTC-PERP (instrument ${btc.id}) -- the dev fixture ingest may not have run yet`);
+    throw new Error(
+      `no setups found for BTC-PERP (instrument ${btc.id}) after waiting 90s -- the worker's own processing loop (cmd/argus-worker, ticks once a minute) may not be running, or the dev fixture ingest did not complete`,
+    );
   }
 
   const state: E2EAuthState = {

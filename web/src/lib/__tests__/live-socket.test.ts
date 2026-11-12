@@ -221,6 +221,69 @@ describe("LiveSocket: sequence gap detection", () => {
 
     expect(onSeqGap).toHaveBeenCalledWith(5, 3);
   });
+
+  // A real stream-loss recovery (internal/hub's own handleCandleStreamLoss)
+  // intentionally resets the hub's own per-subscription seq counter and
+  // sends a fresh snapshot at seq 1 again -- without this exemption,
+  // this module would see that snapshot's own seq as "not lastSeq+1",
+  // call sendSubscribe in reaction, and get ANOTHER snapshot back at
+  // seq 1 again (Subscribe always resets), perceived as yet another
+  // gap, forever. A snapshot is a resync point by definition: its own
+  // seq is accepted as the new baseline, never treated as evidence of
+  // a gap needing another resubscribe.
+  it("a snapshot's own seq is never treated as a gap, even when it is lower than lastSeq (a real stream-loss recovery resets the hub's own counter)", () => {
+    const socket = getLiveSocket();
+    const onSeqGap = vi.fn();
+    const h = handlers({ onSeqGap });
+    socket.subscribe(1, "1m", h);
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+    ws.sent = [];
+
+    ws.receive({ v: 1, type: "candle", ts: "t", sub: "1:1m", seq: 5, payload: {} });
+    // The recovery snapshot: seq 1 again, lower than lastSeq (5).
+    ws.receive({
+      v: 1,
+      type: "snapshot",
+      ts: "t",
+      sub: "1:1m",
+      seq: 1,
+      payload: { last_closed_open_time: null, last_closed_revision: null },
+    });
+
+    expect(onSeqGap).not.toHaveBeenCalled();
+    const resubscribedAfterSnapshot = ws.sent.some((m) => (JSON.parse(m) as { type: string }).type === "subscribe");
+    expect(resubscribedAfterSnapshot).toBe(false); // no infinite resubscribe loop
+
+    // The snapshot's own seq (1) is now the accepted baseline -- a
+    // following message at seq 2 is normal, not a gap.
+    ws.receive({ v: 1, type: "candle", ts: "t", sub: "1:1m", seq: 2, payload: {} });
+    expect(onSeqGap).not.toHaveBeenCalled();
+  });
+
+  // Status shares its subscription's own seq space with candle/snapshot
+  // messages on the hub side (internal/hub's own sendLiveStatus/degraded
+  // notice send with no seq at all, Seq 0) -- it is advisory, never part
+  // of the candle state machine, so it must never trigger a resubscribe
+  // either.
+  it("a status message's own seq (always 0) is never treated as a gap", () => {
+    const socket = getLiveSocket();
+    const onSeqGap = vi.fn();
+    const onStatus = vi.fn();
+    const h = handlers({ onSeqGap, onStatus });
+    socket.subscribe(1, "1m", h);
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+    ws.sent = [];
+
+    ws.receive({ v: 1, type: "candle", ts: "t", sub: "1:1m", seq: 5, payload: {} });
+    ws.receive({ v: 1, type: "status", ts: "t", sub: "1:1m", payload: { state: "degraded" } });
+
+    expect(onSeqGap).not.toHaveBeenCalled();
+    expect(onStatus).toHaveBeenCalledWith({ state: "degraded" });
+    const resubscribed = ws.sent.some((m) => (JSON.parse(m) as { type: string }).type === "subscribe");
+    expect(resubscribed).toBe(false);
+  });
 });
 
 describe("LiveSocket: reconnect on open resends every held subscription", () => {

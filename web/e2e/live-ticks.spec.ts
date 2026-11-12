@@ -6,7 +6,7 @@ import { AUTH_FILE, type E2EAuthState } from "./global-setup";
 // forming candle visibly moves, a new candle appears at the boundary,
 // and killing the connection recovers without reloading the page."
 // Against the real production build, proxying to a dedicated api+
-// worker pair on argus_test -- Makefile's own e2e-stack target, which
+// worker pair on argus_e2e -- Makefile's own e2e-stack target, which
 // runs the worker with ARGUS_DEV_FIXTURE_LIVE_REPLAY=true specifically
 // so there is a live feed here to watch (internal/ingestion/fixture's
 // own LiveGenerator, a candle moving forward from each instrument's

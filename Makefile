@@ -4,12 +4,22 @@ MIGRATE_VERSION := v4.17.1
 DB_URL ?= postgres://argus:argus@localhost:5432/argus?sslmode=disable
 MIGRATIONS_DIR := db/migrations
 
-# e2e-stack's own target database/cache/port -- always argus_test, never
-# the dev argus database (web/e2e's own Playwright suite, live-chart
-# brief phase 4). Redis logical DB 14 is distinct from the dev worker's
-# own 0 and the Go integration suite's own 15, so none of the three can
-# cross-publish on the same pub/sub channels.
-E2E_DB_URL ?= postgres://argus:argus@localhost:5432/argus_test?sslmode=disable
+# e2e-stack's own target database/cache/port -- its own dedicated
+# database (argus_e2e), never the dev argus database and never
+# argus_test (web/e2e's own Playwright suite, live-chart brief phase
+# 4). A dedicated database, dropped and recreated by e2e-resetdb below
+# before every e2e-stack run, is what makes "fresh database per e2e
+# run" possible: argus_test is also the Go integration suite's own
+# shared database (internal/*/integration_test.go's own
+# ARGUS_TEST_DATABASE_URL default), so dropping IT on every e2e run
+# would be destructive to unrelated work; a separate database the e2e
+# suite owns outright has no such conflict. Redis logical DB 14 is
+# distinct from the dev worker's own 0 and the Go integration suite's
+# own 15, so none of the three can cross-publish on the same pub/sub
+# channels.
+E2E_DB_NAME := argus_e2e
+E2E_DB_URL ?= postgres://argus:argus@localhost:5432/$(E2E_DB_NAME)?sslmode=disable
+E2E_MAINTENANCE_URL ?= postgres://argus:argus@localhost:5432/postgres?sslmode=disable
 E2E_REDIS_URL ?= redis://localhost:6379/14
 E2E_HTTP_PORT ?= 8090
 E2E_API_LOG := /tmp/argus-e2e-api.log
@@ -126,8 +136,14 @@ web-dev: ## Run the frontend dev server
 web-build: ## Build the frontend
 	cd web && (pnpm build || npm run build)
 
+.PHONY: e2e-resetdb
+e2e-resetdb: ## Drops and recreates the dedicated e2e database (argus_e2e) -- "fresh database per e2e run": a previous run's own live-replay candles (which can run for a while, advancing far into its own simulated future) must never leak into the next run's "most recent N" queries. Never argus_test, never argus: this is its own database, owned outright by e2e-stack. Also flushes Redis logical DB 14 (its own INCR sequence counters are keyed by instrument id, which is always fresh after the database reset above, but a stale key left behind from a killed run is not worth tracking down by hand).
+	docker run --rm --network host postgres:16-alpine psql "$(E2E_MAINTENANCE_URL)" -c "DROP DATABASE IF EXISTS $(E2E_DB_NAME);"
+	docker run --rm --network host postgres:16-alpine psql "$(E2E_MAINTENANCE_URL)" -c "CREATE DATABASE $(E2E_DB_NAME);"
+	docker run --rm --network host redis:7-alpine redis-cli -h localhost -n 14 FLUSHDB
+
 .PHONY: e2e-stack
-e2e-stack: ## THE ONE COMMAND for web/e2e's own backend: migrates + seeds + ingests the dev fixture into argus_test (never argus), then runs a dedicated api+worker pair on E2E_HTTP_PORT (default 8090), with CORS/CSRF allowing Vite preview's own origin (4173). The worker also runs Part 2G's own live replay, so a forming candle visibly moves and a new one appears at the boundary -- exactly what the Playwright scenario in web/e2e needs. Needs: make infra running first (postgres+redis). Blocks in the foreground (Ctrl-C stops both); api's own stdout/stderr -- including the dev mailer's logged signup codes -- goes to $(E2E_API_LOG), which web/e2e's own global setup reads.
+e2e-stack: e2e-resetdb ## THE ONE COMMAND for web/e2e's own backend: resets argus_e2e to a clean database, migrates + seeds + ingests the dev fixture into it, then runs a dedicated api+worker pair on E2E_HTTP_PORT (default 8090), with CORS/CSRF allowing Vite preview's own origin (4173). The worker also runs Part 2G's own live replay, so a forming candle visibly moves and a new one appears at the boundary -- exactly what the Playwright scenario in web/e2e needs. Needs: make infra running first (postgres+redis). Blocks in the foreground (Ctrl-C stops both); api's own stdout/stderr -- including the dev mailer's logged signup codes -- goes to $(E2E_API_LOG), which web/e2e's own global setup reads.
 	$(MAKE) migrate-up DB_URL="$(E2E_DB_URL)"
 	$(MAKE) seed-dev DB_URL="$(E2E_DB_URL)"
 	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_DEV_FIXTURE_INGEST=true ARGUS_DEV_FIXTURE_LIVE_REPLAY=true ARGUS_DEV_FIXTURE_LIVE_REPLAY_SPEED="$(LIVE_DEMO_SPEED)" go run ./cmd/argus-worker &

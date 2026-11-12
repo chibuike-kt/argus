@@ -3,7 +3,7 @@ import { defineConfig, devices } from "@playwright/test";
 // Against the real stack (live-chart brief, phase 4), but never the dev
 // one: the production build (pnpm build, then pnpm preview -- not the
 // dev server, which skips bundling/minification entirely), proxying to
-// a dedicated backend on argus_test (never the dev "argus" database --
+// a dedicated backend on argus_e2e (never the dev "argus" database --
 // `make e2e-stack`), documented in this package's own README.md under
 // "Running the e2e suite".
 const E2E_API_PORT = process.env.E2E_API_PORT ?? "8090";

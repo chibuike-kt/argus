@@ -173,13 +173,6 @@ func (c *Connection) send(env Envelope) {
 	}
 }
 
-// enqueueControl sends env immediately, unconditionally -- used for
-// status/heartbeat, which never go through per-subscription seq or
-// coalescing.
-func (c *Connection) enqueueControl(env Envelope) {
-	c.send(env)
-}
-
 // nextSeq assigns the next sequence number for key, after coalescing
 // (review item 3): called only from the place that is actually about to
 // write to the wire, never when a forming update is merely queued.

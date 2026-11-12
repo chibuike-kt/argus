@@ -236,7 +236,43 @@ func (h *Hub) Subscribe(ctx context.Context, c *Connection, instrumentID int64, 
 	// adr-004-ws-contract-draft.md's own "snapshot is seq 1" -- the
 	// first live update that follows is then seq 2, never seq 1 again.
 	c.sendSnapshot(key, snapshot, h.clk.Now())
+	h.sendLiveStatus(c, key, inst.Provider, snapshot, d, h.clk.Now())
 	return nil
+}
+
+// sendLiveStatus is this subscription's own "live" status, sent right
+// after its snapshot -- never a time-based staleness judgment, which
+// nothing in this project has a decided numeric threshold for
+// (appendix-c-unresolved-decisions.md: "Freshness and latency
+// thresholds... per-market SLOs" is explicitly still open; ADR-006:
+// "Freshness targets are market-specific and must be defined
+// numerically before release"). "live" here means exactly what is
+// observable without inventing one: this subscription just got a real
+// snapshot back from the store, and nothing is currently known to be
+// degraded. LastEventAt is the most recent candle boundary this hub
+// actually knows about (the snapshot's own join point, one interval
+// later -- the forming candle's own open boundary), not a guess.
+//
+// Deliberately outside the subscription's own candle/snapshot seq
+// space (no c.nextSeq call): status is advisory, read by a client's own
+// badge, never part of the replace/append candle state machine
+// (live-candles-reducer.ts's own decideApplyAction) -- giving it a real
+// seq would shift every subsequent candle/snapshot seq by one per
+// status sent, breaking the existing, already-decided "snapshot is
+// seq 1" wire contract's own numbering for no benefit, since
+// live-socket.ts's own gap check already exempts "status" from the
+// seq-contiguity rule.
+func (h *Hub) sendLiveStatus(c *Connection, key subscriptionKey, provider string, snap SnapshotPayload, d time.Duration, now time.Time) {
+	var lastEventAt *time.Time
+	if snap.LastClosedOpenTime != nil {
+		t := snap.LastClosedOpenTime.Add(d)
+		lastEventAt = &t
+	}
+	payload, err := json.Marshal(StatusPayload{State: "live", Provider: provider, LastEventAt: lastEventAt})
+	if err != nil {
+		return
+	}
+	c.send(Envelope{V: envelopeVersion, Type: TypeStatus, ID: NewEventID(), TS: now, Sub: c.subString(key), Payload: payload})
 }
 
 // Unsubscribe handles one `unsubscribe` message. A key the connection
@@ -373,7 +409,15 @@ func (h *Hub) startRedisSubscriptionLocked(instrumentID int64) {
 // handleCandleStreamLoss is review item 7: degraded first, then
 // immediately a fresh snapshot per affected subscription -- the same
 // recovery path an ordinary client resubscribe already uses, just
-// triggered by a sequence gap/repeat instead of a client action.
+// triggered by a sequence gap/repeat instead of a client action. Both
+// the degraded notice and the snapshot that follows are sent per
+// SUBSCRIPTION (its own Sub), not once per connection with no Sub at
+// all -- a status message with no Sub cannot be routed to any one
+// subscription's own UI, so it would otherwise be silently unattributed
+// on arrival (live-socket.ts's own handleMessage only ever routes a
+// message by its Sub field). The degraded notice itself carries no seq
+// (see sendLiveStatus's own doc comment on why status stays outside the
+// candle/snapshot seq space entirely).
 func (h *Hub) handleCandleStreamLoss(instrumentID int64) {
 	h.mu.Lock()
 	conns := h.instrumentConns[instrumentID]
@@ -385,13 +429,21 @@ func (h *Hub) handleCandleStreamLoss(instrumentID int64) {
 	}
 	h.mu.Unlock()
 
-	degraded := Envelope{V: envelopeVersion, Type: TypeStatus, ID: NewEventID(), TS: h.clk.Now()}
-	degraded.Payload, _ = json.Marshal(StatusPayload{State: "degraded"})
-	for c := range targets {
-		c.enqueueControl(degraded)
+	ctx := context.Background()
+	inst, err := h.instruments.GetByID(ctx, instrumentID)
+	provider := "" // best-effort: a provider name missing from this one notice is not worth failing recovery over
+	if err == nil {
+		provider = inst.Provider
 	}
 
-	ctx := context.Background()
+	degradedPayload, _ := json.Marshal(StatusPayload{State: "degraded", Provider: provider})
+	for c, ivs := range targets {
+		for _, iv := range ivs {
+			key := subscriptionKey{InstrumentID: instrumentID, Interval: iv}
+			c.send(Envelope{V: envelopeVersion, Type: TypeStatus, ID: NewEventID(), TS: h.clk.Now(), Sub: c.subString(key), Payload: degradedPayload})
+		}
+	}
+
 	for c, ivs := range targets {
 		for _, iv := range ivs {
 			d, ok := iv.Duration()
@@ -406,6 +458,7 @@ func (h *Hub) handleCandleStreamLoss(instrumentID int64) {
 			key := subscriptionKey{InstrumentID: instrumentID, Interval: iv}
 			c.resetSubscription(key)
 			c.sendSnapshot(key, snap, h.clk.Now())
+			h.sendLiveStatus(c, key, provider, snap, d, h.clk.Now())
 		}
 	}
 }

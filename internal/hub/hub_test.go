@@ -296,6 +296,59 @@ func TestSubscribe_Enabled_SnapshotReflectsJoinPoint(t *testing.T) {
 	}
 }
 
+// TestSubscribe_SendsLiveStatusAfterSnapshot is the freshness-status
+// half of the live-chart brief: Subscribe sends a "live" status right
+// after its snapshot, carrying the instrument's own provider and a
+// LastEventAt derived purely from the join point already computed for
+// the snapshot (the join window's own end, one interval past its
+// start) -- never a time-based staleness judgment, since nothing in
+// this project has decided a numeric freshness/latency threshold
+// (appendix-c-unresolved-decisions.md, ADR-006's own "Freshness
+// targets... must be defined numerically before release").
+func TestSubscribe_SendsLiveStatusAfterSnapshot(t *testing.T) {
+	insts := &fakeInstruments{byID: map[int64]instruments.Instrument{
+		1: {ID: 1, Enabled: true, Provider: "fixture", PriceScale: 2, QtyScale: 4},
+	}}
+	candles := newFakeCandles()
+	base := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	candles.latestResult[1] = &marketdata.AggregateOHLCV{
+		Window: marketdata.Window{Start: clock.NewEventTime(base), End: clock.NewEventTime(base.Add(time.Minute))},
+		Open:   100, High: 110, Low: 95, Close: 105, Volume: 10, Revision: 1,
+	}
+	h := newTestHub(insts, candles, newFakeSubscriber(), clock.NewFixed(base), testCfg())
+	sink := &fakeSink{}
+	c := NewConnection(sink, 1, "sess", "1.2.3.4", testCfg(), clock.NewFixed(base))
+
+	if err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	statuses := sink.byType(TypeStatus)
+	if len(statuses) != 1 {
+		t.Fatalf("got %d status messages, want 1 (a live status right after the snapshot)", len(statuses))
+	}
+	if statuses[0].Sub != "1:1m" {
+		t.Errorf("status Sub = %q, want %q (routable to this one subscription, not a connection-wide broadcast)", statuses[0].Sub, "1:1m")
+	}
+	if statuses[0].Seq != 0 {
+		t.Errorf("status Seq = %d, want 0 (status stays outside the candle/snapshot seq space)", statuses[0].Seq)
+	}
+	var p StatusPayload
+	if err := json.Unmarshal(statuses[0].Payload, &p); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if p.State != "live" {
+		t.Errorf("State = %q, want live", p.State)
+	}
+	if p.Provider != "fixture" {
+		t.Errorf("Provider = %q, want the instrument's own %q", p.Provider, "fixture")
+	}
+	wantLastEventAt := base.Add(time.Minute) // the join window's own end: base (its start) + the 1m interval
+	if p.LastEventAt == nil || !p.LastEventAt.Equal(wantLastEventAt) {
+		t.Errorf("LastEventAt = %v, want %v", p.LastEventAt, wantLastEventAt)
+	}
+}
+
 func TestRouteEvent_OneMinute_FormingThenClosed_NeverDropped(t *testing.T) {
 	insts := &fakeInstruments{byID: map[int64]instruments.Instrument{1: enabledInstrument(1)}}
 	sub := newFakeSubscriber()
@@ -446,16 +499,25 @@ func TestSequenceGap_SendsDegradedThenFreshSnapshot(t *testing.T) {
 	sub.publishWithSeq(t, 1, CandleEvent{InstrumentID: 1, Kind: EventClosed, OpenTime: base, CloseTime: base.Add(time.Minute), Open: 100, High: 110, Low: 100, Close: 108, Volume: 10, Revision: 1}, 5)
 
 	awaitLen(t, func() int { return len(sink.byType(TypeSnapshot)) }, 2, 2*time.Second) // the subscribe-time one, plus the recovery one
-	degraded := sink.byType(TypeStatus)
-	if len(degraded) != 1 {
-		t.Fatalf("got %d status messages, want 1 degraded notice", len(degraded))
-	}
-	var statusPayload StatusPayload
-	if err := json.Unmarshal(degraded[0].Payload, &statusPayload); err != nil {
-		t.Fatalf("unmarshal status: %v", err)
-	}
-	if statusPayload.State != "degraded" {
-		t.Errorf("status state = %q, want degraded", statusPayload.State)
+	// Three status messages total: "live" right after the subscribe-
+	// time snapshot, "degraded" the moment the gap is detected, then
+	// "live" again right after the recovery snapshot -- a client
+	// watching this subscription's own badge sees it recover, not get
+	// stuck on "degraded" forever.
+	awaitLen(t, func() int { return len(sink.byType(TypeStatus)) }, 3, 2*time.Second)
+	statuses := sink.byType(TypeStatus)
+	wantStates := []string{"live", "degraded", "live"}
+	for i, env := range statuses {
+		var p StatusPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			t.Fatalf("unmarshal status[%d]: %v", i, err)
+		}
+		if p.State != wantStates[i] {
+			t.Errorf("status[%d].State = %q, want %q", i, p.State, wantStates[i])
+		}
+		if env.Seq != 0 {
+			t.Errorf("status[%d].Seq = %d, want 0 (status stays outside the candle/snapshot seq space)", i, env.Seq)
+		}
 	}
 
 	snapshots := sink.byType(TypeSnapshot)

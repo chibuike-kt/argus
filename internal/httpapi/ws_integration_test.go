@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -467,6 +468,172 @@ func TestIntegration_WS_RedisDrop_RecoversViaSequenceGap(t *testing.T) {
 	}
 	if recovery.LastClosedOpenTime == nil || !recovery.LastClosedOpenTime.Equal(missedOpen) {
 		t.Fatalf("recovery snapshot LastClosedOpenTime = %v, want %v -- the candle seeded during the outage must not be silently lost", recovery.LastClosedOpenTime, missedOpen)
+	}
+}
+
+// dialAuthenticatedWS is the dial sequence TestIntegration_WS_DisabledInstrument_NotSubscribable
+// and others already repeat inline -- factored out for the hostile-
+// condition tests below, which do not otherwise care about that
+// boilerplate.
+func dialAuthenticatedWS(t *testing.T, srv *httptest.Server, deps Deps, users *identity.Store, sessions *session.Store) *websocket.Conn {
+	t.Helper()
+	jarClient := authenticatedClient(t, srv.URL, users, sessions)
+	cookies := jarClient.Jar.Cookies(mustParseURL(t, srv.URL))
+	var rawToken string
+	for _, c := range cookies {
+		if c.Name == deps.AuthPolicy.CookieName(false) {
+			rawToken = c.Value
+		}
+	}
+	if rawToken == "" {
+		t.Fatal("no session cookie found on the authenticated client")
+	}
+	h := wsDialHeader(deps.AuthPolicy.CookieName(false), rawToken, testOrigin)
+	conn, _, err := websocket.Dial(context.Background(), wsURL(srv.URL)+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return conn
+}
+
+// TestIntegration_WS_OversizedMessageClosesConnection is a hostile-
+// condition test: ws.go's own wsConn.SetReadLimit(h.live.MaxMessageSize)
+// is configured (testWSDeps sets it to 4096) but was never actually
+// exercised by anything sending a message over that limit -- a
+// malicious or merely buggy client flooding the connection with a
+// huge payload must not be allowed to consume unbounded server memory
+// reading it.
+func TestIntegration_WS_OversizedMessageClosesConnection(t *testing.T) {
+	db := testDB(t)
+	rdb := testRedisForWS(t)
+	deps, _, users, sessions := testWSDeps(t, db, rdb)
+	srv := httptest.NewServer(NewRouter(deps))
+	defer srv.Close()
+
+	conn := dialAuthenticatedWS(t, srv, deps, users, sessions)
+	defer conn.CloseNow()
+
+	// One byte past the configured 4096-byte limit.
+	oversized := make([]byte, deps.Live.MaxMessageSize+1)
+	for i := range oversized {
+		oversized[i] = 'a'
+	}
+	// The write itself may or may not return an error depending on
+	// buffering/timing -- the real assertion is what happens next: the
+	// connection must be closed by the server, not left half-alive
+	// consuming memory for an oversized frame it never finishes
+	// reading.
+	_ = conn.Write(context.Background(), websocket.MessageText, oversized)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _, err := conn.Read(ctx)
+	if err == nil {
+		t.Fatal("Read after an oversized message = nil error, want the connection closed")
+	}
+}
+
+// TestIntegration_WS_MalformedJSON_ConnectionSurvives is a hostile-
+// condition test for ws.go's own readLoop: garbage bytes that do not
+// even parse as JSON are silently ignored (the handler's own
+// json.Unmarshal failure path, continue rather than close) -- proving
+// that holds against the REAL server, not just reading the source, and
+// that the connection is still fully usable afterward (a real
+// subscribe still works), not left in some half-broken state.
+func TestIntegration_WS_MalformedJSON_ConnectionSurvives(t *testing.T) {
+	db := testDB(t)
+	rdb := testRedisForWS(t)
+	deps, _, users, sessions := testWSDeps(t, db, rdb)
+	srv := httptest.NewServer(NewRouter(deps))
+	defer srv.Close()
+
+	instID := enabledTestInstrument(t, db)
+	conn := dialAuthenticatedWS(t, srv, deps, users, sessions)
+	defer conn.CloseNow()
+
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte("{not valid json at all")); err != nil {
+		t.Fatalf("write garbage: %v", err)
+	}
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`"just a json string, not an envelope object"`)); err != nil {
+		t.Fatalf("write non-object json: %v", err)
+	}
+
+	// The connection must still be alive and able to subscribe
+	// normally -- proof the garbage did not leave readLoop in a broken
+	// state, not just that it did not crash the process.
+	subPayload, _ := json.Marshal(subscribeRequest{InstrumentID: instID, Interval: "1m"})
+	req, _ := json.Marshal(hub.Envelope{V: 1, Type: hub.TypeSubscribe, Payload: subPayload})
+	if err := conn.Write(context.Background(), websocket.MessageText, req); err != nil {
+		t.Fatalf("write subscribe after garbage: %v", err)
+	}
+	readUntil(t, conn, hub.TypeSnapshot, 5*time.Second) // would time out and fail the test if the connection were broken
+}
+
+// TestIntegration_WS_GracefulShutdown_ClosesOpenConnections is the
+// brief's own required "graceful shutdown" test, against the real
+// http.Server (CLAUDE.md's own "long lived connections" rule: the
+// production NewServer, not a bare httptest server) -- proving what a
+// client sees when the process receives a shutdown signal with a live
+// subscription still open.
+func TestIntegration_WS_GracefulShutdown_ClosesOpenConnections(t *testing.T) {
+	db := testDB(t)
+	rdb := testRedisForWS(t)
+	deps, _, users, sessions := testWSDeps(t, db, rdb)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := NewServer(ln.Addr().String(), NewRouter(deps), 5*time.Second, 5*time.Second)
+	go func() { _ = srv.Serve(ln) }()
+	baseURL := "http://" + ln.Addr().String()
+
+	jarClient := authenticatedClient(t, baseURL, users, sessions)
+	cookies := jarClient.Jar.Cookies(mustParseURL(t, baseURL))
+	var rawToken string
+	for _, c := range cookies {
+		if c.Name == deps.AuthPolicy.CookieName(false) {
+			rawToken = c.Value
+		}
+	}
+	if rawToken == "" {
+		t.Fatal("no session cookie found on the authenticated client")
+	}
+	h := wsDialHeader(deps.AuthPolicy.CookieName(false), rawToken, testOrigin)
+	conn, _, err := websocket.Dial(context.Background(), wsURL(baseURL)+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Confirm the connection is genuinely open and live-streaming
+	// before shutdown: a heartbeat must arrive first.
+	readUntil(t, conn, hub.TypeHeartbeat, 5*time.Second)
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		shutdownDone <- srv.Shutdown(ctx)
+	}()
+
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v (graceful shutdown must not itself error out)", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Shutdown did not return within its own 5s deadline -- an open WebSocket connection blocked it from completing, want it closed instead")
+	}
+
+	// The client side must see its own connection actually close
+	// (Read returns an error), not just that Shutdown returned on the
+	// server -- a server that gives up waiting without telling the
+	// client anything is not what "graceful" means here.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, _, err := conn.Read(ctx); err == nil {
+		t.Fatal("client Read after server Shutdown = nil error, want the connection closed")
 	}
 }
 

@@ -437,7 +437,23 @@ class LiveSocket {
     if (!sub) return; // already unsubscribed; a message in flight for it is not an error
 
     const seq = env.seq ?? 0;
-    if (sub.lastSeq !== 0 && seq !== sub.lastSeq + 1 && env.type !== "error") {
+    // "snapshot" is exempt from the gap check, not just "error": a
+    // snapshot (hub.go's own handleCandleStreamLoss sends one right
+    // after a real stream-loss recovery, exactly like a genuine
+    // resubscribe does -- both intentionally reset the hub's own per-
+    // subscription seq counter back to 1, ADR-004's own "snapshot is
+    // seq 1" contract, proven by TestSequenceGap_SendsDegradedThenFreshSnapshot)
+    // is ALWAYS a fresh, authoritative resync point by definition --
+    // treating its own seq as "evidence of a gap" would make this
+    // module immediately resubscribe again in reaction to the snapshot
+    // the hub just sent specifically to resolve a gap, which would
+    // come back at seq 1 again, perceived as yet another gap, forever.
+    // "status" is exempt for the same shared-counter reason (hub.go's
+    // own sendLiveStatus/degraded notice share one subscription's seq
+    // space with its snapshot/candle messages): it is advisory, never
+    // part of the candle state machine, so a jump around one is not a
+    // real gap in market data.
+    if (sub.lastSeq !== 0 && seq !== sub.lastSeq + 1 && env.type !== "error" && env.type !== "snapshot" && env.type !== "status") {
       sub.handlers.onSeqGap?.(sub.lastSeq, seq);
       // "refetch and resubscribe, never guess" (review item 6/item 3):
       // resubscribing gets a fresh snapshot, which both resyncs state

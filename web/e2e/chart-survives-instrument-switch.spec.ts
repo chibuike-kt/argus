@@ -4,7 +4,7 @@ import { AUTH_FILE, type E2EAuthState } from "./global-setup";
 
 // Real stack (live-chart brief, phase 4): the production build
 // (pnpm build && pnpm preview, this config's own webServer), proxying
-// to a dedicated api+worker pair against argus_test (never the dev
+// to a dedicated api+worker pair against argus_e2e (never the dev
 // "argus" database -- Makefile's own e2e-stack target). The session,
 // and the BTC-PERP/ETH-PERP instrument ids and a real setup id, all
 // come from global-setup.ts's own run (the real HTTP signup flow, and
@@ -33,15 +33,15 @@ function symbolPickerTrigger(page: import("@playwright/test").Page) {
   return page.locator('button[aria-haspopup="menu"]').first();
 }
 
-// argus_test (never the dev database) accumulates leftover instruments
-// from this repo's own Go integration-test runs, some enabled and
-// prefixed with the real symbol (e.g. "BTC-PERP-TestIntegration_...").
 // Each menu item's accessible name is "<icon-alt> <symbol> <provider>"
-// (chart-toolbar.tsx), so a plain substring match on "BTC-PERP" hits
-// those leftovers too ("BTC BTC-PERP-TestIntegration..."). Anchoring
-// the provider at the end, with a word boundary before the symbol,
-// is exact enough to exclude every one of those without hardcoding
-// anything not already looked up from the real API in global-setup.
+// (chart-toolbar.tsx), so a plain substring match on "BTC-PERP" is not
+// precise -- it would also match a symbol that merely starts with it
+// (e.g. a differently-provisioned row sharing the prefix). Anchoring
+// the provider at the end, with a word boundary before the symbol, is
+// exact without hardcoding anything not already looked up from the
+// real API in global-setup. argus_e2e is reset fresh before every run
+// (Makefile's own e2e-resetdb) so this is defensive rather than a
+// response to an actual leftover-row problem today.
 function symbolMenuItem(page: import("@playwright/test").Page, symbol: string, provider: string) {
   const escaped = symbol.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
   return page.getByRole("menuitem", { name: new RegExp(`\\b${escaped}\\s+${provider}$`) });
@@ -123,5 +123,21 @@ test("switching instrument and back keeps the saved chart view for each instrume
   const btcViewAfterReturn = await page.evaluate(() =>
     localStorage.getItem("argus:chart-view:v1:BTC-PERP:1m"),
   );
-  expect(btcViewAfterReturn).toBe(btcViewAfterZoom);
+  expect(btcViewAfterReturn).not.toBeNull();
+
+  // Not exact equality: Part 2G's own live replay keeps appending real
+  // new candles the whole time this test runs (make e2e-stack's own
+  // ARGUS_DEV_FIXTURE_LIVE_REPLAY=true), so the logical index a given
+  // on-screen window corresponds to can drift by a few bars between
+  // the zoom and the switch-back, even though visually it is still
+  // "the same place" -- a few seconds pass for real while this test
+  // drives the UI, and the chart is never static the way it was
+  // before the live feed existed. A tight tolerance on both bounds is
+  // the restore actually working, not a coincidence.
+  const parseView = (raw: string) => JSON.parse(raw) as { from: number; to: number };
+  const zoomed = parseView(btcViewAfterZoom!);
+  const returned = parseView(btcViewAfterReturn!);
+  const tolerance = 10; // bars
+  expect(Math.abs(returned.from - zoomed.from)).toBeLessThanOrEqual(tolerance);
+  expect(Math.abs(returned.to - zoomed.to)).toBeLessThanOrEqual(tolerance);
 });
