@@ -38,7 +38,7 @@ func seedAndIngest(t *testing.T, db *sql.DB, logger *slog.Logger, baseCandles []
 	instrumentStore := instruments.NewStore(db)
 	instrumentID = seedDevFixtureInstrument(t, db, instrumentStore, symbol)
 	data := fixture.Data{Candles: map[string][]ingestion.ProviderCandle{symbol: candles}}
-	if err := runDevFixtureIngest(context.Background(), logger, data, instrumentStore, marketdata.NewStore(db, clock.Real{})); err != nil {
+	if err := runDevFixtureIngest(context.Background(), logger, data, instrumentStore, marketdata.NewStore(db, clock.Real{}), nil); err != nil {
 		t.Fatalf("runDevFixtureIngest (%s): %v", label, err)
 	}
 	return instrumentID, symbol

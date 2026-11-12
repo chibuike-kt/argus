@@ -69,8 +69,8 @@ type fakeCandlesStore struct {
 
 	aggregates   []marketdata.AggregateOHLCV
 	aggregateErr error
-	latestClosed marketdata.Candle
-	latestErr    error
+	joinPoint    *marketdata.AggregateOHLCV
+	joinPointErr error
 }
 
 func (f *fakeCandlesStore) ListClosedInRangeLimited(_ context.Context, _ int64, _, _ time.Time, _ int32) ([]marketdata.Candle, error) {
@@ -98,11 +98,11 @@ func (f *fakeCandlesStore) AggregateRange(_ context.Context, _ int64, _ []market
 	return f.aggregates, nil
 }
 
-func (f *fakeCandlesStore) GetLatestClosed(_ context.Context, _ int64) (marketdata.Candle, error) {
-	if f.latestErr != nil {
-		return marketdata.Candle{}, f.latestErr
+func (f *fakeCandlesStore) LatestCompleteWindow(_ context.Context, _ int64, _ time.Duration) (*marketdata.AggregateOHLCV, error) {
+	if f.joinPointErr != nil {
+		return nil, f.joinPointErr
 	}
-	return f.latestClosed, nil
+	return f.joinPoint, nil
 }
 
 func timePtr(t time.Time) *time.Time { return &t }
@@ -514,11 +514,11 @@ func TestListInstrumentCandles_CryptoAboveOneMinuteUsesAggregateRange(t *testing
 			Start: clock.NewEventTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
 			End:   clock.NewEventTime(time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)),
 		},
-		Open: 10000, High: 10200, Low: 9900, Close: 10100, Volume: 500,
+		Open: 10000, High: 10200, Low: 9900, Close: 10100, Volume: 500, Revision: 1,
 	}
 	h := &apiHandler{
 		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: inst}},
-		candles:     &fakeCandlesStore{aggregates: []marketdata.AggregateOHLCV{agg}},
+		candles:     &fakeCandlesStore{aggregates: []marketdata.AggregateOHLCV{agg}, joinPoint: &agg},
 		logger:      slog.Default(),
 	}
 	interval := N5m
@@ -542,14 +542,44 @@ func TestListInstrumentCandles_CryptoAboveOneMinuteUsesAggregateRange(t *testing
 		t.Errorf("IsClosed = false, want true for an aggregate (only complete windows are ever returned)")
 	}
 	if c.Revision != 1 {
-		t.Errorf("Revision = %d, want 1 (this package's own fixed value for a derived candle)", c.Revision)
+		t.Errorf("Revision = %d, want 1 (the fake's own AggregateOHLCV.Revision, carried through unchanged)", c.Revision)
 	}
 }
 
-func TestListInstrumentCandles_AboveOneMinuteRequiresFromAndToRegardlessOfOrder(t *testing.T) {
+func TestListInstrumentCandles_AboveOneMinuteAscStillRequiresFromAndTo(t *testing.T) {
 	h := &apiHandler{
 		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: testInstrumentDomain(1)}},
 		candles:     &fakeCandlesStore{},
+		logger:      slog.Default(),
+	}
+	interval := N5m
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{Interval: &interval}, // order omitted -> asc
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	if _, ok := resp.(ListInstrumentCandles400JSONResponse); !ok {
+		t.Fatalf("got %#v, want 400: above 1m, asc still requires from/to", resp)
+	}
+}
+
+// TestListInstrumentCandles_AboveOneMinuteDescNoFromToIsLatestN proves
+// addendum item C: order=desc above 1m, with neither from nor to, is
+// now the same "latest N" shortcut 1m already had -- anchored at the
+// per-interval join point (review item 5), not an error.
+func TestListInstrumentCandles_AboveOneMinuteDescNoFromToIsLatestN(t *testing.T) {
+	inst := testInstrumentDomain(1)
+	joinPoint := marketdata.AggregateOHLCV{
+		Window: marketdata.Window{
+			Start: clock.NewEventTime(time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)),
+			End:   clock.NewEventTime(time.Date(2026, 1, 1, 1, 5, 0, 0, time.UTC)),
+		},
+		Open: 10000, High: 10200, Low: 9900, Close: 10100, Volume: 500, Revision: 1,
+	}
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: inst}},
+		candles:     &fakeCandlesStore{joinPoint: &joinPoint, aggregates: []marketdata.AggregateOHLCV{joinPoint}},
 		logger:      slog.Default(),
 	}
 	interval := N5m
@@ -560,20 +590,55 @@ func TestListInstrumentCandles_AboveOneMinuteRequiresFromAndToRegardlessOfOrder(
 	if err != nil {
 		t.Fatalf("ListInstrumentCandles: %v", err)
 	}
-	if _, ok := resp.(ListInstrumentCandles400JSONResponse); !ok {
-		t.Fatalf("got %#v, want 400: above 1m, from/to are required even with order=desc", resp)
+	got, ok := resp.(ListInstrumentCandles200JSONResponse)
+	if !ok {
+		t.Fatalf("got %#v, want 200 (latest-N, not an error)", resp)
+	}
+	if len(got.Candles) != 1 {
+		t.Fatalf("got %d candles, want 1", len(got.Candles))
+	}
+	if got.LastClosedOpenTime == nil || !got.LastClosedOpenTime.Equal(joinPoint.Window.Start.Time()) {
+		t.Errorf("LastClosedOpenTime = %v, want %s", got.LastClosedOpenTime, joinPoint.Window.Start.Time())
+	}
+}
+
+// TestListInstrumentCandles_AboveOneMinuteDescNoFromTo_NoJoinPointYet
+// proves the "nothing yet" case is zero candles, not an error.
+func TestListInstrumentCandles_AboveOneMinuteDescNoFromTo_NoJoinPointYet(t *testing.T) {
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: testInstrumentDomain(1)}},
+		candles:     &fakeCandlesStore{joinPoint: nil},
+		logger:      slog.Default(),
+	}
+	interval := N5m
+	desc := Desc
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{Interval: &interval, Order: &desc},
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	got, ok := resp.(ListInstrumentCandles200JSONResponse)
+	if !ok {
+		t.Fatalf("got %#v, want 200 with zero candles, not an error", resp)
+	}
+	if len(got.Candles) != 0 {
+		t.Errorf("got %d candles, want 0", len(got.Candles))
 	}
 }
 
 func TestListInstrumentCandles_LastClosedJoinPoint(t *testing.T) {
 	inst := testInstrumentDomain(1)
-	latest := marketdata.Candle{
-		OpenTime: clock.NewEventTime(time.Date(2026, 1, 1, 0, 9, 0, 0, time.UTC)),
+	latest := marketdata.AggregateOHLCV{
+		Window: marketdata.Window{
+			Start: clock.NewEventTime(time.Date(2026, 1, 1, 0, 9, 0, 0, time.UTC)),
+			End:   clock.NewEventTime(time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC)),
+		},
 		Revision: 3,
 	}
 	h := &apiHandler{
 		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: inst}},
-		candles:     &fakeCandlesStore{rows: nil, latestClosed: latest},
+		candles:     &fakeCandlesStore{rows: nil, joinPoint: &latest},
 		logger:      slog.Default(),
 	}
 	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -588,8 +653,8 @@ func TestListInstrumentCandles_LastClosedJoinPoint(t *testing.T) {
 	if !ok {
 		t.Fatalf("got %#v, want 200", resp)
 	}
-	if got.LastClosedOpenTime == nil || !got.LastClosedOpenTime.Equal(latest.OpenTime.Time()) {
-		t.Errorf("LastClosedOpenTime = %v, want %s", got.LastClosedOpenTime, latest.OpenTime.Time())
+	if got.LastClosedOpenTime == nil || !got.LastClosedOpenTime.Equal(latest.Window.Start.Time()) {
+		t.Errorf("LastClosedOpenTime = %v, want %s", got.LastClosedOpenTime, latest.Window.Start.Time())
 	}
 	if got.LastClosedRevision == nil || *got.LastClosedRevision != 3 {
 		t.Errorf("LastClosedRevision = %v, want 3", got.LastClosedRevision)
@@ -599,7 +664,7 @@ func TestListInstrumentCandles_LastClosedJoinPoint(t *testing.T) {
 func TestListInstrumentCandles_NoClosedCandleYet_JoinPointIsNil(t *testing.T) {
 	h := &apiHandler{
 		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: testInstrumentDomain(1)}},
-		candles:     &fakeCandlesStore{latestErr: marketdata.ErrCandleNotFound},
+		candles:     &fakeCandlesStore{joinPoint: nil},
 		logger:      slog.Default(),
 	}
 	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

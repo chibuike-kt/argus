@@ -44,14 +44,16 @@ var _ instrumentsStore = (*instruments.Store)(nil)
 type candlesStore interface {
 	ListClosedInRangeLimited(ctx context.Context, instrumentID int64, start, end time.Time, limit int32) ([]marketdata.Candle, error)
 	ListClosedInRangeLimitedDesc(ctx context.Context, instrumentID int64, start, end *time.Time, limit int32) ([]marketdata.Candle, error)
-	// AggregateRange and GetLatestClosed back the interval>1m path and
-	// the last_closed_* join-point fields (live-chart-pipeline brief,
-	// Phase 1) -- both expressed entirely in marketdata's own exported
-	// types, never the sqlc-generated store.Candle candleReader itself
-	// uses internally, so this interface never needs to import
-	// internal/store just to be satisfied.
+	// AggregateRange and LatestCompleteWindow back the interval>1m path
+	// and the last_closed_* join-point fields (live-chart-pipeline
+	// brief, Phase 1; the per-interval join point is
+	// adr-004-ws-contract-review.md's own review item 5) -- both
+	// expressed entirely in marketdata's own exported types, never the
+	// sqlc-generated store.Candle candleReader itself uses internally,
+	// so this interface never needs to import internal/store just to be
+	// satisfied.
 	AggregateRange(ctx context.Context, instrumentID int64, windows []marketdata.Window) ([]marketdata.AggregateOHLCV, error)
-	GetLatestClosed(ctx context.Context, instrumentID int64) (marketdata.Candle, error)
+	LatestCompleteWindow(ctx context.Context, instrumentID int64, d time.Duration) (*marketdata.AggregateOHLCV, error)
 }
 
 var _ candlesStore = (*marketdata.Store)(nil)
@@ -156,15 +158,13 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 		}
 	}
 
-	// from/to are optional in the OpenAPI schema at 1m only (web-wiring-
-	// polish brief, item 1) so order=desc can mean "the latest N, no
-	// range known or needed". Above 1m, both are required regardless of
-	// order: an open-ended backward scan across aggregated windows (as
-	// opposed to a bounded SQL LIMIT over 1-minute rows) is not
-	// something the live-chart-pipeline brief asked for, so that
-	// shortcut is not built for derived intervals -- flagged, not
-	// silently assumed to generalize from the 1m case.
-	if interval != N1m || !desc {
+	// from/to are optional for order=desc at every interval, not just 1m
+	// (addendum item C: "the chart's first load needs it" for 5m/15m/1h/
+	// 4h/1d too, the same "latest N" shortcut phase 1 already gave 1m).
+	// asc still requires both explicitly, at every interval -- an
+	// open-ended "oldest N" with no starting point has no natural
+	// meaning and is not built.
+	if !desc {
 		if request.Params.From == nil {
 			return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", "Query argument from is required, but not found")), nil
 		}
@@ -197,6 +197,25 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 		return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", "intervals above 1m are only served for crypto instruments today -- calendar-aware forex session boundaries are not built")), nil
 	}
 
+	d, err := intervalDuration(interval)
+	if err != nil {
+		return nil, err
+	}
+
+	// The join point with the live stream, per the subscribed/requested
+	// interval (adr-004-ws-contract-review.md, review item 5): the
+	// latest COMPLETE window of this interval, not the latest closed
+	// 1-minute candle regardless of what interval was asked for -- a 1h
+	// chart's own join point is its own latest complete hour, which
+	// could be well behind the latest closed minute. Also this
+	// response's own anchor for "latest N" (addendum item C) when
+	// from/to are both omitted, below.
+	joinPoint, err := h.candles.LatestCompleteWindow(ctx, request.Id, d)
+	if err != nil {
+		h.logger.Error("httpapi: latest complete window", "instrument_id", request.Id, "interval", interval, "error", err)
+		return nil, fmt.Errorf("latest complete window for instrument %d: %w", request.Id, err)
+	}
+
 	var apiCandles []Candle
 	if interval == N1m {
 		var rows []marketdata.Candle
@@ -214,11 +233,23 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 			apiCandles = append(apiCandles, toAPICandle(row, inst.PriceScale, inst.QtyScale))
 		}
 	} else {
-		d, err := intervalDuration(interval)
-		if err != nil {
-			return nil, err
+		var windows []marketdata.Window
+		switch {
+		case request.Params.From != nil && request.Params.To != nil:
+			windows = marketdata.WindowsInRange(*request.Params.From, *request.Params.To, d, desc, int(limit))
+		case joinPoint == nil:
+			// Latest-N mode (addendum item C), but no complete window of
+			// this interval exists yet at all: zero candles, not an
+			// error -- the same "nothing yet" shape the 1m path already
+			// has for a brand new instrument.
+			windows = nil
+		default:
+			// Latest-N mode: anchored at the same join point this
+			// response reports, walking backward exactly limit windows.
+			anchorTo := joinPoint.Window.End.Time()
+			anchorFrom := anchorTo.Add(-time.Duration(limit) * d)
+			windows = marketdata.WindowsInRange(anchorFrom, anchorTo, d, true, int(limit))
 		}
-		windows := marketdata.WindowsInRange(*request.Params.From, *request.Params.To, d, desc, int(limit))
 		aggs, err := h.candles.AggregateRange(ctx, request.Id, windows)
 		if err != nil {
 			h.logger.Error("httpapi: aggregate instrument candles", "instrument_id", request.Id, "interval", interval, "error", err)
@@ -230,25 +261,13 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 		}
 	}
 
-	// The join point with the live stream (design doc section 6; the WS
-	// contract draft's own `snapshot` message uses the same field name):
-	// the instrument's own latest closed candle as of now, independent
-	// of this response's own from/to range.
 	var lastClosedOpenTime *time.Time
 	var lastClosedRevision *int32
-	lastClosed, err := h.candles.GetLatestClosed(ctx, request.Id)
-	switch {
-	case err == nil:
-		t := lastClosed.OpenTime.Time()
+	if joinPoint != nil {
+		t := joinPoint.Window.Start.Time()
 		lastClosedOpenTime = &t
-		rev := lastClosed.Revision
+		rev := joinPoint.Revision
 		lastClosedRevision = &rev
-	case errors.Is(err, marketdata.ErrCandleNotFound):
-		// No closed candle for this instrument at all yet: both fields
-		// stay nil, not an error.
-	default:
-		h.logger.Error("httpapi: get latest closed candle", "instrument_id", request.Id, "error", err)
-		return nil, fmt.Errorf("get latest closed candle for instrument %d: %w", request.Id, err)
 	}
 
 	return ListInstrumentCandles200JSONResponse{
@@ -296,11 +315,10 @@ func toAPICandle(c marketdata.Candle, priceScale, qtyScale quant.Scale) Candle {
 // toAPIAggregateCandle converts a derived-interval aggregate (never
 // persisted, ADR-006) to the same wire shape toAPICandle produces for a
 // real stored row, so the client cannot tell the two apart at the
-// interval boundary. Revision is always 1: a derived candle is never
-// individually corrected -- only its own underlying 1-minute source
-// candles are, and this endpoint simply recomputes fresh from whatever
-// they currently say on the next call (not a spec rule; this package's
-// own choice, flagged since nothing else names a value for it).
+// interval boundary. Revision is marketdata.AggregateOHLCV's own derived-
+// revision rule (adr-004-ws-contract-review.md, review item 4:
+// 1 + sum(revision-1) over the window's own source candles), not a
+// fixed 1 -- phase 1's own original choice, superseded by that review.
 func toAPIAggregateCandle(agg marketdata.AggregateOHLCV, priceScale, qtyScale quant.Scale) Candle {
 	return Candle{
 		OpenTime:  agg.Window.Start.Time(),
@@ -311,6 +329,6 @@ func toAPIAggregateCandle(agg marketdata.AggregateOHLCV, priceScale, qtyScale qu
 		Close:     agg.Close.String(priceScale),
 		Volume:    agg.Volume.String(qtyScale),
 		IsClosed:  true,
-		Revision:  1,
+		Revision:  agg.Revision,
 	}
 }

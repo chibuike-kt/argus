@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
+	"github.com/chibuike-kt/argus/internal/hub"
 	"github.com/chibuike-kt/argus/internal/ingestion"
 	"github.com/chibuike-kt/argus/internal/ingestion/fixture"
 	"github.com/chibuike-kt/argus/internal/instruments"
@@ -45,11 +46,12 @@ const devFixtureProviderName = "fixture"
 // has not already shown. One-time historical ingest is enough to
 // prove the wiring; a later brief can add a live stream if an ongoing
 // feed is genuinely needed to demonstrate something this does not.
-func runDevFixtureIngest(ctx context.Context, logger *slog.Logger, data fixture.Data, instrumentStore *instruments.Store, marketdataStore *marketdata.Store) error {
+func runDevFixtureIngest(ctx context.Context, logger *slog.Logger, data fixture.Data, instrumentStore *instruments.Store, marketdataStore *marketdata.Store, publisher hub.Publisher) error {
 	cache := ingestion.NewInstrumentCache(instrumentStore)
 	normalizer := ingestion.NewNormalizer(cache, clock.Real{})
 	provider := fixture.New(data, 0)
 	svc := ingestion.NewService(devFixtureProviderName, provider, normalizer, cache, marketdataStore, marketdata.ContinuousCalendar{}, logger)
+	svc.SetPublisher(publisher)
 
 	for symbol, candles := range data.Candles {
 		if len(candles) == 0 {

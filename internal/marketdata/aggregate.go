@@ -61,6 +61,17 @@ type AggregateOHLCV struct {
 	Low    quant.Price
 	Close  quant.Price
 	Volume quant.Qty
+	// Revision is the derived-candle revision rule
+	// (adr-004-ws-contract-review.md, review item 4): 1 + the sum of
+	// (revision - 1) over every source 1-minute candle in Window. It
+	// starts at 1 (every source candle at its own revision 1
+	// contributes 0) and rises by exactly 1 for every supersession of
+	// any source minute inside the window -- identical wherever the
+	// same window is computed, so the REST endpoint and the WebSocket
+	// snapshot/candle_corrected payload (not built in this phase) never
+	// disagree about it. For a 1-minute window (a single source
+	// candle), this reduces to exactly that candle's own revision.
+	Revision int32
 }
 
 // IncompleteWindow explains why a window could not be aggregated: at least
@@ -115,19 +126,31 @@ var _ candleReader = (*Store)(nil)
 // returned *AggregateOHLCV is non-nil only when *IncompleteWindow is nil,
 // and vice versa -- exactly one of the two carries meaning.
 func Aggregate(ctx context.Context, r candleReader, instrumentID int64, w Window) (*AggregateOHLCV, *IncompleteWindow, error) {
+	rows, err := r.ListCurrentCandlesInRange(ctx, instrumentID, w.Start.Time(), w.End.Time())
+	if err != nil {
+		return nil, nil, fmt.Errorf("marketdata: aggregate instrument=%d window=[%s,%s): %w", instrumentID, w.Start, w.End, err)
+	}
+	return aggregateFromRows(instrumentID, w, rows)
+}
+
+// aggregateFromRows is Aggregate's own in-memory half, over rows the
+// caller has already fetched -- shared by Aggregate itself (a single
+// window, one DB round trip) and AggregateRange (addendum item B: one
+// range query covering every window, then this same reduction run
+// per window entirely in memory, no further DB calls). rows need not be
+// pre-filtered to w; only rows whose own OpenTime falls in
+// [w.Start, w.End) are ever consulted.
+func aggregateFromRows(instrumentID int64, w Window, rows []store.Candle) (*AggregateOHLCV, *IncompleteWindow, error) {
 	expected, err := w.minutes()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	rows, err := r.ListCurrentCandlesInRange(ctx, instrumentID, w.Start.Time(), w.End.Time())
-	if err != nil {
-		return nil, nil, fmt.Errorf("marketdata: aggregate instrument=%d window=[%s,%s): %w", instrumentID, w.Start, w.End, err)
-	}
-
-	present := make(map[time.Time]store.Candle, len(rows))
+	present := make(map[time.Time]store.Candle, expected)
 	for _, row := range rows {
-		present[row.OpenTime] = row
+		if !row.OpenTime.Before(w.Start.Time()) && row.OpenTime.Before(w.End.Time()) {
+			present[row.OpenTime] = row
+		}
 	}
 
 	var missing []clock.EventTime
@@ -164,6 +187,7 @@ func Aggregate(ctx context.Context, r candleReader, instrumentID int64, w Window
 		Close:  quant.Price(ordered[len(ordered)-1].Close),
 	}
 	var volume int64
+	revision := int32(1)
 	for _, c := range ordered {
 		if quant.Price(c.High) > agg.High {
 			agg.High = quant.Price(c.High)
@@ -172,8 +196,10 @@ func Aggregate(ctx context.Context, r candleReader, instrumentID int64, w Window
 			agg.Low = quant.Price(c.Low)
 		}
 		volume += c.Volume
+		revision += c.Revision - 1
 	}
 	agg.Volume = quant.Qty(volume)
+	agg.Revision = revision
 
 	return &agg, nil, nil
 }

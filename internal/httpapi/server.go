@@ -14,6 +14,7 @@ import (
 
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/config"
+	"github.com/chibuike-kt/argus/internal/hub"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/setups"
@@ -58,6 +59,8 @@ type Deps struct {
 	Sessions     sessionResolver
 	Users        userLookup
 	AuthPolicy   config.AuthPolicy
+	Live         config.LiveFeed
+	Hub          *hub.Hub
 	IsProduction bool
 	Clock        clock.Clock
 }
@@ -89,6 +92,21 @@ func NewRouter(d Deps) http.Handler {
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "not_found", "no such route")
 	})
+
+	// /ws (ADR-004 v2 draft, docs/briefs/adr-004-ws-contract-draft.md):
+	// the live candle stream. Mounted outside /api/v1 -- it is not an
+	// OpenAPI operation -- but authenticated the same way (the same
+	// session cookie, resolved through the same sessionResolver/
+	// userLookup this package already uses for REST), plus its own
+	// Origin check before the handshake (review item 1), reusing the
+	// exact allow-list csrfProtection enforces for REST.
+	if d.Hub != nil {
+		wsClk := d.Clock
+		if wsClk == nil {
+			wsClk = clock.Real{}
+		}
+		r.Get("/ws", newWSHandler(d.Hub, d.Sessions, d.Users, d.AuthPolicy.CookieName(d.IsProduction), d.AuthPolicy.AllowedOrigins, d.AuthPolicy.TrustProxyForIP, d.Live, wsClk, d.Logger).ServeHTTP)
+	}
 
 	r.Route("/api/v1", func(r chi.Router) {
 		clk := d.Clock

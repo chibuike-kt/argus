@@ -19,6 +19,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/config"
 	"github.com/chibuike-kt/argus/internal/cursor"
+	"github.com/chibuike-kt/argus/internal/hub"
 	"github.com/chibuike-kt/argus/internal/ingestion/fixture"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/marketdata"
@@ -62,6 +63,7 @@ func main() {
 	clk := clock.Real{}
 	instrumentStore := instruments.NewStore(db)
 	marketdataStore := marketdata.NewStore(db, clk)
+	candlePublisher := hub.NewRedisPublisher(rdb)
 	candleSource := analysis.NewMarketdataSource(marketdataStore)
 	analysisStore := analysis.NewStore(db)
 	setupsStore := setups.NewStore(db)
@@ -88,7 +90,7 @@ func main() {
 			logger.Error("startup: load dev dataset", "error", err)
 			os.Exit(1)
 		}
-		if err := runDevFixtureIngest(ctx, logger, devData, instrumentStore, marketdataStore); err != nil {
+		if err := runDevFixtureIngest(ctx, logger, devData, instrumentStore, marketdataStore, candlePublisher); err != nil {
 			logger.Error("startup: dev fixture ingest failed", "error", err)
 			os.Exit(1)
 		}

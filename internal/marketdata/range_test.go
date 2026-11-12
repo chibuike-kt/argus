@@ -81,4 +81,39 @@ func TestAggregateRange_EmptyWindowList(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("got %+v, want empty", got)
 	}
+	if r.calls != 0 {
+		t.Errorf("calls = %d, want 0: an empty window list must not query at all", r.calls)
+	}
+}
+
+// TestAggregateRange_OneQueryRegardlessOfWindowCount proves addendum
+// item B: the database call count does not grow with the number of
+// bars requested. 500 hourly windows (the same shape the addendum's own
+// "500 bar hourly request" timing ask uses) must still be exactly one
+// call, not 500.
+func TestAggregateRange_OneQueryRegardlessOfWindowCount(t *testing.T) {
+	r := newFakeCandleReader()
+	base := utc(2026, time.October, 1, 0, 0)
+	const hours = 500
+	for h := 0; h < hours; h++ {
+		for m := 0; m < 60; m++ {
+			r.put(base.Add(time.Duration(h)*time.Hour+time.Duration(m)*time.Minute), true, 100, 110, 95, 105, 10)
+		}
+	}
+
+	windows := WindowsInRange(base, base.Add(hours*time.Hour), time.Hour, false, hours)
+	if len(windows) != hours {
+		t.Fatalf("test setup error: got %d windows, want %d", len(windows), hours)
+	}
+
+	got, err := AggregateRange(context.Background(), r, 1, windows)
+	if err != nil {
+		t.Fatalf("AggregateRange: %v", err)
+	}
+	if len(got) != hours {
+		t.Fatalf("got %d aggregates, want %d (every hour complete)", len(got), hours)
+	}
+	if r.calls != 1 {
+		t.Errorf("calls = %d, want exactly 1 for %d windows (addendum item B)", r.calls, hours)
+	}
 }

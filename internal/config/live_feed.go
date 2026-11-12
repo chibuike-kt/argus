@@ -51,4 +51,36 @@ type LiveFeed struct {
 	// numeric value to configure. Placeholders 1s base, 30s cap.
 	ReconnectBackoffBase time.Duration `env:"ARGUS_LIVE_RECONNECT_BACKOFF_BASE" envDefault:"1s"` // [U]
 	ReconnectBackoffCap  time.Duration `env:"ARGUS_LIVE_RECONNECT_BACKOFF_CAP" envDefault:"30s"` // [U]
+
+	// HeartbeatInterval governs both the `heartbeat` message cadence and
+	// the server's own session re-check tick
+	// (adr-004-ws-contract-review.md review item 2: re-validate on a
+	// timer, not only on writes). [U] -- not named by the design doc;
+	// standard practice. Placeholder 15s.
+	HeartbeatInterval time.Duration `env:"ARGUS_LIVE_HEARTBEAT_INTERVAL" envDefault:"15s"` // [U]
+
+	// MaxMessageSize bounds one WebSocket message's own size, in bytes
+	// (adr-004-ws-contract-draft.md's own "Subscription limits and
+	// message size" section). [U]. Placeholder 4096 (every real message
+	// this contract defines -- subscribe/unsubscribe, a candle payload --
+	// is a small, fixed-shape JSON object; this is headroom, not a
+	// measured value).
+	MaxMessageSize int64 `env:"ARGUS_LIVE_MAX_MESSAGE_SIZE" envDefault:"4096"` // [U]
+
+	// MaxConnectionsPerUser/PerIP (review item 8: "a maximum number of
+	// concurrent connections per user and per IP"). [U]. Placeholders 5
+	// and 20: one user with several open tabs/devices should comfortably
+	// fit under 5; 20 per IP allows a shared office/NAT without being
+	// effectively unbounded.
+	MaxConnectionsPerUser int `env:"ARGUS_LIVE_MAX_CONNECTIONS_PER_USER" envDefault:"5"` // [U]
+	MaxConnectionsPerIP   int `env:"ARGUS_LIVE_MAX_CONNECTIONS_PER_IP" envDefault:"20"`  // [U]
+
+	// MaxSubscribeMessagesPerSecond (review item 8: "a limit on
+	// subscribe and unsubscribe messages per second per connection"
+	// -- a flood closes the connection). [U]. Placeholder 10: generous
+	// for a legitimate client (changing instrument/interval unsubscribes
+	// the old stream first, per the brief's own Phase 4 rule -- at most
+	// a handful of these messages per genuine user action), tight enough
+	// to catch a flood quickly.
+	MaxSubscribeMessagesPerSecond float64 `env:"ARGUS_LIVE_MAX_SUBSCRIBE_MESSAGES_PER_SECOND" envDefault:"10"` // [U]
 }

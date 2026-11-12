@@ -89,7 +89,7 @@ func TestIntegration_Pipeline_DevFixtureIngestThroughSetupsLifecycle(t *testing.
 		t.Fatalf("disable other fixture instruments: %v", err)
 	}
 
-	if err := runDevFixtureIngest(ctx, logger, data, instrumentStore, marketdata.NewStore(db, clock.Real{})); err != nil {
+	if err := runDevFixtureIngest(ctx, logger, data, instrumentStore, marketdata.NewStore(db, clock.Real{}), nil); err != nil {
 		t.Fatalf("runDevFixtureIngest: %v", err)
 	}
 
