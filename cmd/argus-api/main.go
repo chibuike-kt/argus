@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/config"
@@ -98,7 +99,7 @@ func main() {
 		IsProduction: cfg.IsProduction(),
 		Clock:        clk,
 	})
-	srv := httpapi.NewServer(":"+cfg.HTTPPort, handler, cfg.HTTPReadTimeout)
+	srv := httpapi.NewServer(":"+cfg.HTTPPort, handler, cfg.HTTPReadTimeout, 30*time.Second)
 
 	go func() {
 		logger.Info("api listening", "addr", srv.Addr, "env", cfg.Env)
