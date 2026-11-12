@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/coder/websocket"
@@ -211,8 +210,11 @@ func (h *wsHandler) handleSubscribeMessage(ctx context.Context, conn *hub.Connec
 		return
 	}
 
-	snap, err := h.hub.Subscribe(ctx, conn, req.InstrumentID, interval)
-	if err != nil {
+	// Subscribe sends the snapshot itself, through conn, so it is
+	// assigned seq 1 by the same per-subscription counter every live
+	// update after it uses (adr-004-ws-contract-draft.md's own
+	// "snapshot is seq 1") -- there is nothing left to send here.
+	if err := h.hub.Subscribe(ctx, conn, req.InstrumentID, interval); err != nil {
 		switch {
 		case errors.Is(err, hub.ErrNotFound), errors.Is(err, hub.ErrNotEnabled):
 			sendError(ctx, sink, hub.ErrorCodeNotSubscribable, "instrument not subscribable")
@@ -222,22 +224,7 @@ func (h *wsHandler) handleSubscribeMessage(ctx context.Context, conn *hub.Connec
 			h.logger.Error("ws: subscribe", "instrument_id", req.InstrumentID, "interval", req.Interval, "error", err)
 			sendError(ctx, sink, "internal_error", "could not subscribe")
 		}
-		return
 	}
-
-	payload, err := json.Marshal(snap)
-	if err != nil {
-		return
-	}
-	sub := req.Interval
-	sendEnvelope(ctx, sink, hub.Envelope{
-		V: 1, Type: hub.TypeSnapshot, ID: hub.NewEventID(), TS: h.clk.Now(),
-		Sub: formatSub(req.InstrumentID, sub), Payload: payload,
-	})
-}
-
-func formatSub(instrumentID int64, interval string) string {
-	return strconv.FormatInt(instrumentID, 10) + ":" + interval
 }
 
 func sendError(ctx context.Context, sink *wsSink, code, message string) {

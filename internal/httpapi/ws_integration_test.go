@@ -329,6 +329,145 @@ func TestIntegration_WS_EndToEnd_SubscribeFormingClosed(t *testing.T) {
 	}
 }
 
+// TestIntegration_WS_RedisDrop_RecoversViaSequenceGap is review item
+// 7's own real repro, now fixed: kill the hub's pubsub connection with
+// CLIENT KILL TYPE pubsub while a client is connected and subscribed,
+// publish during the outage, and confirm the client still gets
+// status:degraded then a fresh snapshot that includes what was
+// published while it was disconnected -- without depending on
+// anything go-redis reports about the reconnect itself (a real repro
+// against this same Redis showed that signal never arrives: delivery
+// just silently resumed, with no degraded notice at all). Recovery is
+// now driven by a gap in CandleEvent.Seq, which this test forces
+// deterministically (wasting a sequence number) rather than racing
+// go-redis's own reconnect timing, since either a slow reconnect or an
+// outright lost message produces the exact same gap from the hub's
+// side.
+func TestIntegration_WS_RedisDrop_RecoversViaSequenceGap(t *testing.T) {
+	db := testDB(t)
+	rdb := testRedisForWS(t)
+	deps, instrumentsStore, users, sessions := testWSDeps(t, db, rdb)
+	srv := httptest.NewServer(NewRouter(deps))
+	defer srv.Close()
+
+	priceScale, qtyScale := quant.Scale(2), quant.Scale(4)
+	symbol := fmt.Sprintf("WS-REDISDROP-%d", time.Now().UnixNano())
+	inst, err := instrumentsStore.Insert(context.Background(), instruments.NewInstrumentParams{
+		Provider: "redisdrop-test", NativeSymbol: symbol, AssetClass: "crypto_perp",
+		PriceScale: &priceScale, QtyScale: &qtyScale, TickSize: 1, QtyStepSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("insert instrument: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE instruments SET enabled = TRUE WHERE id = $1`, inst.ID); err != nil {
+		t.Fatalf("enable instrument: %v", err)
+	}
+
+	jarClient := authenticatedClient(t, srv.URL, users, sessions)
+	var rawToken string
+	for _, c := range jarClient.Jar.Cookies(mustParseURL(t, srv.URL)) {
+		if c.Name == deps.AuthPolicy.CookieName(false) {
+			rawToken = c.Value
+		}
+	}
+
+	h := wsDialHeader(deps.AuthPolicy.CookieName(false), rawToken, testOrigin)
+	conn, _, err := websocket.Dial(context.Background(), wsURL(srv.URL)+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	subPayload, _ := json.Marshal(subscribeRequest{InstrumentID: inst.ID, Interval: "1m"})
+	req, _ := json.Marshal(hub.Envelope{V: 1, Type: hub.TypeSubscribe, Payload: subPayload})
+	if err := conn.Write(context.Background(), websocket.MessageText, req); err != nil {
+		t.Fatalf("write subscribe: %v", err)
+	}
+	readUntil(t, conn, hub.TypeSnapshot, 5*time.Second) // the normal subscribe-time snapshot
+
+	publisher := hub.NewRedisPublisher(rdb)
+	base := time.Now().UTC().Truncate(time.Minute).Add(time.Minute)
+
+	// A normal event, delivered before any drop, to prove the stream
+	// is alive and the hub's own sequence tracking has started.
+	if err := publisher.Publish(context.Background(), hub.CandleEvent{
+		InstrumentID: inst.ID, Kind: hub.EventForming,
+		OpenTime: base, CloseTime: base.Add(time.Minute),
+		Open: 100, High: 105, Low: 100, Close: 103, Volume: 5, Revision: 1,
+	}); err != nil {
+		t.Fatalf("publish (before drop): %v", err)
+	}
+	readUntil(t, conn, hub.TypeCandle, 5*time.Second)
+
+	// Kill the pubsub connection -- the literal repro. go-redis will
+	// transparently reconnect and resubscribe on its own (its own doc
+	// comment says so); this test does not wait for or depend on that
+	// in any way.
+	admin := redis.NewClient(rdb.Options())
+	defer admin.Close()
+	killed, err := admin.ClientKillByFilter(context.Background(), "TYPE", "pubsub").Result()
+	if err != nil {
+		t.Fatalf("CLIENT KILL TYPE pubsub: %v", err)
+	}
+	if killed == 0 {
+		t.Fatal("CLIENT KILL TYPE pubsub killed 0 connections -- the hub's own subscription was not in pubsub mode when expected")
+	}
+
+	// Seed the candle that was "missed during the outage" directly in
+	// the database -- the resnapshot recovery reads from here, not
+	// from whatever Redis did or did not deliver.
+	missedOpen := base.Add(time.Minute)
+	missedStore := marketdata.NewStore(db, clock.Real{})
+	if _, err := missedStore.UpsertForming(context.Background(), marketdata.Tick{
+		InstrumentID: inst.ID, OpenTime: clock.NewEventTime(missedOpen),
+		Open: 110, High: 115, Low: 108, Close: 112, Volume: 7,
+		Provider: "redisdrop-test", IngestedAt: clock.NewIngestionTime(time.Now()),
+	}); err != nil {
+		t.Fatalf("seed missed candle: %v", err)
+	}
+	if _, err := missedStore.Close(context.Background(), inst.ID, clock.NewEventTime(missedOpen)); err != nil {
+		t.Fatalf("close missed candle: %v", err)
+	}
+
+	// Deterministically force the gap this publish will land on:
+	// waste the next sequence number, exactly simulating a published
+	// event that never arrived (whether lost in transit or published
+	// while nothing was subscribed) -- mirrors RedisPublisher's own
+	// key format (redis.go's seqKey), which is otherwise unexported.
+	if err := rdb.Incr(context.Background(), fmt.Sprintf("argus:candles:seq:%d", inst.ID)).Err(); err != nil {
+		t.Fatalf("waste a sequence number: %v", err)
+	}
+
+	// Publish the next real event. Whatever go-redis's own reconnect
+	// has or has not finished doing by now, the hub will see this
+	// arrive with a seq that skips the one just wasted.
+	if err := publisher.Publish(context.Background(), hub.CandleEvent{
+		InstrumentID: inst.ID, Kind: hub.EventClosed,
+		OpenTime: base.Add(2 * time.Minute), CloseTime: base.Add(3 * time.Minute),
+		Open: 100, High: 106, Low: 99, Close: 104, Volume: 6, Revision: 1,
+	}); err != nil {
+		t.Fatalf("publish (after drop): %v", err)
+	}
+
+	degradedEnv := readUntil(t, conn, hub.TypeStatus, 15*time.Second)
+	var status hub.StatusPayload
+	if err := json.Unmarshal(degradedEnv.Payload, &status); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if status.State != "degraded" {
+		t.Fatalf("status state = %q, want degraded", status.State)
+	}
+
+	recoveryEnv := readUntil(t, conn, hub.TypeSnapshot, 5*time.Second)
+	var recovery hub.SnapshotPayload
+	if err := json.Unmarshal(recoveryEnv.Payload, &recovery); err != nil {
+		t.Fatalf("unmarshal recovery snapshot: %v", err)
+	}
+	if recovery.LastClosedOpenTime == nil || !recovery.LastClosedOpenTime.Equal(missedOpen) {
+		t.Fatalf("recovery snapshot LastClosedOpenTime = %v, want %v -- the candle seeded during the outage must not be silently lost", recovery.LastClosedOpenTime, missedOpen)
+	}
+}
+
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)

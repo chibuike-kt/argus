@@ -76,37 +76,67 @@ func (f *fakeCandles) AggregatePartial(_ context.Context, instrumentID int64, _ 
 }
 
 // fakeSubscriber is an in-process stand-in for Redis pub/sub: Subscribe
-// registers a channel pair per instrument; publish/triggerReconnect let
-// a test drive events without a real Redis connection.
+// registers a channel per instrument; publish lets a test drive events
+// without a real Redis connection, auto-assigning the next sequence
+// number the same way RedisPublisher's own Redis INCR would.
+// publishWithSeq bypasses that to simulate a gap or repeat
+// deterministically, in place of what used to be a separate reconnect
+// signal (review item 7, revised -- see hub.go's own handleCandleStreamLoss).
 type fakeSubscriber struct {
 	mu   sync.Mutex
 	subs map[int64]*fakeSub
 }
 
 type fakeSub struct {
-	events      chan []byte
-	reconnected chan struct{}
-	cancelled   bool
+	events    chan []byte
+	cancelled bool
+	nextSeq   uint64
 }
 
 func newFakeSubscriber() *fakeSubscriber {
 	return &fakeSubscriber{subs: make(map[int64]*fakeSub)}
 }
 
-func (f *fakeSubscriber) Subscribe(_ context.Context, instrumentID int64) (<-chan []byte, <-chan struct{}, func(), error) {
+func (f *fakeSubscriber) Subscribe(_ context.Context, instrumentID int64) (<-chan []byte, func(), error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s := &fakeSub{events: make(chan []byte, 64), reconnected: make(chan struct{}, 1)}
+	s := &fakeSub{events: make(chan []byte, 64)}
 	f.subs[instrumentID] = s
 	cancel := func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		s.cancelled = true
 	}
-	return s.events, s.reconnected, cancel, nil
+	return s.events, cancel, nil
 }
 
 func (f *fakeSubscriber) publish(t *testing.T, instrumentID int64, ev CandleEvent) {
+	t.Helper()
+	f.mu.Lock()
+	s, ok := f.subs[instrumentID]
+	if ok {
+		s.nextSeq++
+		ev.Seq = s.nextSeq
+	}
+	f.mu.Unlock()
+	f.publishRaw(t, instrumentID, ev)
+}
+
+// publishWithSeq publishes ev with an explicit seq, bypassing
+// auto-increment, so a test can simulate a gap (seq jumps ahead) or a
+// repeat (seq goes backward or stays the same) deterministically.
+func (f *fakeSubscriber) publishWithSeq(t *testing.T, instrumentID int64, ev CandleEvent, seq uint64) {
+	t.Helper()
+	ev.Seq = seq
+	f.mu.Lock()
+	if s, ok := f.subs[instrumentID]; ok {
+		s.nextSeq = seq
+	}
+	f.mu.Unlock()
+	f.publishRaw(t, instrumentID, ev)
+}
+
+func (f *fakeSubscriber) publishRaw(t *testing.T, instrumentID int64, ev CandleEvent) {
 	t.Helper()
 	data, err := json.Marshal(ev)
 	if err != nil {
@@ -119,17 +149,6 @@ func (f *fakeSubscriber) publish(t *testing.T, instrumentID int64, ev CandleEven
 		t.Fatalf("publish: instrument %d has no active subscription", instrumentID)
 	}
 	s.events <- data
-}
-
-func (f *fakeSubscriber) triggerReconnect(t *testing.T, instrumentID int64) {
-	t.Helper()
-	f.mu.Lock()
-	s, ok := f.subs[instrumentID]
-	f.mu.Unlock()
-	if !ok {
-		t.Fatalf("triggerReconnect: instrument %d has no active subscription", instrumentID)
-	}
-	s.reconnected <- struct{}{}
 }
 
 func (f *fakeSubscriber) isCancelled(instrumentID int64) bool {
@@ -232,11 +251,11 @@ func TestSubscribe_UnknownAndDisabled_SameError(t *testing.T) {
 	h := newTestHub(insts, newFakeCandles(), newFakeSubscriber(), clock.NewFixed(time.Now()), testCfg())
 	c := NewConnection(&fakeSink{}, 1, "sess", "1.2.3.4", testCfg(), clock.NewFixed(time.Now()))
 
-	_, err := h.Subscribe(context.Background(), c, 1, Interval1m) // unknown
+	err := h.Subscribe(context.Background(), c, 1, Interval1m) // unknown
 	if err != ErrNotFound {
 		t.Errorf("unknown instrument: err = %v, want ErrNotFound", err)
 	}
-	_, err = h.Subscribe(context.Background(), c, 2, Interval1m) // disabled
+	err = h.Subscribe(context.Background(), c, 2, Interval1m) // disabled
 	if err != ErrNotEnabled {
 		t.Errorf("disabled instrument: err = %v, want ErrNotEnabled", err)
 	}
@@ -251,11 +270,23 @@ func TestSubscribe_Enabled_SnapshotReflectsJoinPoint(t *testing.T) {
 		Open:   100, High: 110, Low: 95, Close: 105, Volume: 10, Revision: 1,
 	}
 	h := newTestHub(insts, candles, newFakeSubscriber(), clock.NewFixed(base), testCfg())
-	c := NewConnection(&fakeSink{}, 1, "sess", "1.2.3.4", testCfg(), clock.NewFixed(base))
+	sink := &fakeSink{}
+	c := NewConnection(sink, 1, "sess", "1.2.3.4", testCfg(), clock.NewFixed(base))
 
-	snap, err := h.Subscribe(context.Background(), c, 1, Interval1m)
-	if err != nil {
+	if err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
 		t.Fatalf("Subscribe: %v", err)
+	}
+
+	snapshots := sink.byType(TypeSnapshot)
+	if len(snapshots) != 1 {
+		t.Fatalf("got %d snapshot messages, want 1", len(snapshots))
+	}
+	if snapshots[0].Seq != 1 {
+		t.Errorf("snapshot seq = %d, want 1 (adr-004-ws-contract-draft.md: \"snapshot is seq 1\")", snapshots[0].Seq)
+	}
+	var snap SnapshotPayload
+	if err := json.Unmarshal(snapshots[0].Payload, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
 	}
 	if snap.LastClosedOpenTime == nil || !snap.LastClosedOpenTime.Equal(base) {
 		t.Errorf("LastClosedOpenTime = %v, want %v", snap.LastClosedOpenTime, base)
@@ -273,7 +304,7 @@ func TestRouteEvent_OneMinute_FormingThenClosed_NeverDropped(t *testing.T) {
 	sink := &fakeSink{}
 	c := NewConnection(sink, 1, "sess", "1.2.3.4", testCfg(), clk)
 
-	if _, err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
+	if err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
@@ -291,11 +322,15 @@ func TestRouteEvent_OneMinute_FormingThenClosed_NeverDropped(t *testing.T) {
 	if len(closed) != 1 {
 		t.Fatalf("got %d closed messages, want 1", len(closed))
 	}
-	if forming[0].Seq != 1 {
-		t.Errorf("forming seq = %d, want 1", forming[0].Seq)
+	// Seq 1 was already consumed by the subscribe-time snapshot itself
+	// (adr-004-ws-contract-draft.md: "snapshot is seq 1"); the forming
+	// update is the second message actually written to this
+	// subscription, not the first.
+	if forming[0].Seq != 2 {
+		t.Errorf("forming seq = %d, want 2 (seq 1 is the subscribe-time snapshot)", forming[0].Seq)
 	}
-	if closed[0].Seq != 2 {
-		t.Errorf("closed seq = %d, want 2 (consecutive after the forming send)", closed[0].Seq)
+	if closed[0].Seq != 3 {
+		t.Errorf("closed seq = %d, want 3 (consecutive after the snapshot and the forming send)", closed[0].Seq)
 	}
 }
 
@@ -309,7 +344,7 @@ func TestCoalescing_RapidFormingUpdates_OnlyLatestSent(t *testing.T) {
 	sink := &fakeSink{}
 	c := NewConnection(sink, 1, "sess", "1.2.3.4", cfg, clk)
 
-	if _, err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
+	if err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
@@ -334,8 +369,10 @@ func TestCoalescing_RapidFormingUpdates_OnlyLatestSent(t *testing.T) {
 	if payload.Close != quant.Price(105).String(2) {
 		t.Errorf("flushed Close = %q, want the LATEST value %q (coalescing keeps the last value)", payload.Close, quant.Price(105).String(2))
 	}
-	if forming[0].Seq != 1 || forming[1].Seq != 2 {
-		t.Errorf("seqs = %d,%d, want 1,2 (consecutive: a coalesced-away update never consumes a seq)", forming[0].Seq, forming[1].Seq)
+	// Seq 1 is the subscribe-time snapshot (adr-004-ws-contract-draft.md:
+	// "snapshot is seq 1"); the two forming sends are seq 2 and 3.
+	if forming[0].Seq != 2 || forming[1].Seq != 3 {
+		t.Errorf("seqs = %d,%d, want 2,3 (consecutive: a coalesced-away update never consumes a seq)", forming[0].Seq, forming[1].Seq)
 	}
 }
 
@@ -348,7 +385,7 @@ func TestDerivedInterval_CorrectionFansOutWithRealRevision(t *testing.T) {
 	sink := &fakeSink{}
 	c := NewConnection(sink, 1, "sess", "1.2.3.4", testCfg(), clk)
 
-	if _, err := h.Subscribe(context.Background(), c, 1, Interval5m); err != nil {
+	if err := h.Subscribe(context.Background(), c, 1, Interval5m); err != nil {
 		t.Fatalf("Subscribe 5m: %v", err)
 	}
 
@@ -371,7 +408,15 @@ func TestDerivedInterval_CorrectionFansOutWithRealRevision(t *testing.T) {
 	}
 }
 
-func TestRedisReconnect_SendsDegradedThenFreshSnapshot(t *testing.T) {
+// TestSequenceGap_SendsDegradedThenFreshSnapshot is review item 7,
+// revised: recovery is driven entirely by a gap in CandleEvent.Seq, not
+// by any signal from the Subscriber about its own connection (a real
+// repro against Redis showed that signal is not reliable -- see
+// hub.go's own handleCandleStreamLoss and redis.go's RedisSubscriber
+// doc comment). publishWithSeq simulates exactly what a dropped-and-
+// recovered connection looks like from the hub's side: the next event
+// it sees does not continue the sequence it last saw.
+func TestSequenceGap_SendsDegradedThenFreshSnapshot(t *testing.T) {
 	insts := &fakeInstruments{byID: map[int64]instruments.Instrument{1: enabledInstrument(1)}}
 	candles := newFakeCandles()
 	base := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
@@ -385,13 +430,22 @@ func TestRedisReconnect_SendsDegradedThenFreshSnapshot(t *testing.T) {
 	sink := &fakeSink{}
 	c := NewConnection(sink, 1, "sess", "1.2.3.4", testCfg(), clk)
 
-	if _, err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
+	if err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
+	awaitLen(t, func() int { return len(sink.byType(TypeSnapshot)) }, 1, 2*time.Second) // the normal subscribe-time snapshot, seq 1
 
-	sub.triggerReconnect(t, 1)
+	// seq 1 arrives normally.
+	sub.publish(t, 1, CandleEvent{InstrumentID: 1, Kind: EventForming, OpenTime: base, CloseTime: base.Add(time.Minute), Open: 100, High: 105, Low: 100, Close: 103, Volume: 5, Revision: 1})
+	awaitLen(t, func() int { return len(sink.byType(TypeCandle)) }, 1, 2*time.Second)
 
-	awaitLen(t, func() int { return len(sink.byType(TypeSnapshot)) }, 1, 2*time.Second)
+	// seq jumps from 1 to 5: three events (2, 3, 4) were lost between
+	// the worker's publish and the hub's own subscription -- exactly
+	// what killing and restarting the underlying connection, or any
+	// other transit loss, looks like from here.
+	sub.publishWithSeq(t, 1, CandleEvent{InstrumentID: 1, Kind: EventClosed, OpenTime: base, CloseTime: base.Add(time.Minute), Open: 100, High: 110, Low: 100, Close: 108, Volume: 10, Revision: 1}, 5)
+
+	awaitLen(t, func() int { return len(sink.byType(TypeSnapshot)) }, 2, 2*time.Second) // the subscribe-time one, plus the recovery one
 	degraded := sink.byType(TypeStatus)
 	if len(degraded) != 1 {
 		t.Fatalf("got %d status messages, want 1 degraded notice", len(degraded))
@@ -404,19 +458,25 @@ func TestRedisReconnect_SendsDegradedThenFreshSnapshot(t *testing.T) {
 		t.Errorf("status state = %q, want degraded", statusPayload.State)
 	}
 
-	// The next message on this subscription must start a fresh
-	// sequence (resetSubscription was called as part of recovery).
-	sub.publish(t, 1, CandleEvent{InstrumentID: 1, Kind: EventClosed, OpenTime: base, CloseTime: base.Add(time.Minute), Open: 100, High: 110, Low: 100, Close: 108, Volume: 10, Revision: 1})
+	snapshots := sink.byType(TypeSnapshot)
+	recovery := snapshots[len(snapshots)-1]
+	if recovery.Seq != 1 {
+		t.Errorf("recovery snapshot seq = %d, want 1 (resetSubscription starts a fresh sequence, and the snapshot itself is always seq 1)", recovery.Seq)
+	}
+
+	// The event that caused the gap (seq 5) is not separately
+	// delivered on top of the recovery snapshot -- the snapshot's own
+	// database read already reflects it (see handleCandleStreamLoss's
+	// own doc comment) -- so the next NORMAL event continues from the
+	// recovery snapshot's own seq 1, landing on seq 2.
+	sub.publish(t, 1, CandleEvent{InstrumentID: 1, Kind: EventClosed, OpenTime: base.Add(time.Minute), CloseTime: base.Add(2 * time.Minute), Open: 100, High: 110, Low: 100, Close: 108, Volume: 10, Revision: 1})
 	awaitLen(t, func() int { return len(sink.byType(TypeCandleClosed)) }, 1, 2*time.Second)
 	closed := sink.byType(TypeCandleClosed)
-	// Sequence was reset by the recovery snapshot (seq 1); every
-	// message actually written consumes the next number uniformly, so
-	// the closed message that follows is seq 2 -- still consecutive,
-	// which is what review item 3 actually requires (no gap), not that
-	// the counter necessarily restarts at exactly 1 for every message
-	// type.
+	if len(closed) != 1 {
+		t.Fatalf("got %d candle_closed messages, want exactly 1 (the seq=5 event that caused the gap must not be separately delivered)", len(closed))
+	}
 	if closed[0].Seq != 2 {
-		t.Errorf("seq after reconnect recovery = %d, want 2 (consecutive after the recovery snapshot's own seq 1)", closed[0].Seq)
+		t.Errorf("seq after recovery = %d, want 2 (consecutive after the recovery snapshot's own seq 1)", closed[0].Seq)
 	}
 }
 
@@ -429,15 +489,15 @@ func TestSubscribe_PerConnectionLimitEnforced(t *testing.T) {
 	h := newTestHub(insts, newFakeCandles(), newFakeSubscriber(), clock.NewFixed(time.Now()), cfg)
 	c := NewConnection(&fakeSink{}, 1, "sess", "1.2.3.4", cfg, clock.NewFixed(time.Now()))
 
-	if _, err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
+	if err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
 		t.Fatalf("first subscribe: %v", err)
 	}
 	// Re-subscribing to the SAME key must not be blocked by the limit.
-	if _, err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
+	if err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
 		t.Errorf("re-subscribe to an already-held key: %v", err)
 	}
 	// A genuinely new subscription beyond the limit must be refused.
-	if _, err := h.Subscribe(context.Background(), c, 2, Interval1m); !errors.Is(err, ErrTooManySubscriptions) {
+	if err := h.Subscribe(context.Background(), c, 2, Interval1m); !errors.Is(err, ErrTooManySubscriptions) {
 		t.Errorf("subscribe beyond the limit: err = %v, want ErrTooManySubscriptions", err)
 	}
 }
@@ -456,7 +516,7 @@ func TestUnsubscribe_ReleasesRedisSubscriptionWhenLastGone(t *testing.T) {
 	h := newTestHub(insts, newFakeCandles(), sub, clock.NewFixed(time.Now()), testCfg())
 	c := NewConnection(&fakeSink{}, 1, "sess", "1.2.3.4", testCfg(), clock.NewFixed(time.Now()))
 
-	if _, err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
+	if err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	if sub.isCancelled(1) {
@@ -497,7 +557,7 @@ func TestSlowConsumer_SendFailureClosesConnection(t *testing.T) {
 	sink := &fakeSink{sendErr: errOverflow}
 	c := NewConnection(sink, 1, "sess", "1.2.3.4", testCfg(), clock.NewFixed(time.Now()))
 
-	if _, err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
+	if err := h.Subscribe(context.Background(), c, 1, Interval1m); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	base := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)

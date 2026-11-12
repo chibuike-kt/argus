@@ -43,16 +43,30 @@ func (k EventKind) String() string {
 // external wire format: the hub converts to decimal strings per
 // instrument scale when it builds a client envelope.
 type CandleEvent struct {
-	InstrumentID int64       `json:"instrument_id"`
-	Kind         EventKind   `json:"kind"`
-	OpenTime     time.Time   `json:"open_time"`
-	CloseTime    time.Time   `json:"close_time"`
-	Open         quant.Price `json:"open"`
-	High         quant.Price `json:"high"`
-	Low          quant.Price `json:"low"`
-	Close        quant.Price `json:"close"`
-	Volume       quant.Qty   `json:"volume"`
-	Revision     int32       `json:"revision"`
+	InstrumentID int64 `json:"instrument_id"`
+	// Seq is a per-instrument sequence the worker assigns via Redis
+	// INCR before publishing (RedisPublisher.Publish), starting at 1.
+	// This is the loss-detection mechanism itself (review item 7,
+	// revised): go-redis's own PubSub reconnects transparently after a
+	// dropped connection, but nothing about that reconnect is reliably
+	// observable from the outside (confirmed by repro: killing the
+	// subscriber's connection with CLIENT KILL TYPE pubsub produced no
+	// signal at all -- delivery just silently resumed). A gap in Seq
+	// (the next event is not exactly last+1) is detectable regardless
+	// of why it happened -- a dropped connection, a message lost in
+	// transit, a publish that never reached Redis -- because it is a
+	// property of the event stream's own content, not of whatever
+	// go-redis's internal connection happens to do.
+	Seq       uint64      `json:"seq"`
+	Kind      EventKind   `json:"kind"`
+	OpenTime  time.Time   `json:"open_time"`
+	CloseTime time.Time   `json:"close_time"`
+	Open      quant.Price `json:"open"`
+	High      quant.Price `json:"high"`
+	Low       quant.Price `json:"low"`
+	Close     quant.Price `json:"close"`
+	Volume    quant.Qty   `json:"volume"`
+	Revision  int32       `json:"revision"`
 }
 
 // Interval is one of the six values Phase 1's REST endpoint already

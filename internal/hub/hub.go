@@ -48,11 +48,16 @@ type InstrumentChecker interface {
 
 // Subscriber is the hub's own boundary onto Redis pub/sub for one
 // instrument's channel -- a consumer-defined interface so a test can
-// fake it without a real Redis connection. reconnected fires once per
-// detected drop-and-resubscribe (adr-004-ws-contract-review.md review
-// item 7); events never closes on its own while ctx is live.
+// fake it without a real Redis connection. events never closes on its
+// own while ctx is live. Deliberately minimal: loss detection
+// (adr-004-ws-contract-review.md review item 7) is driven entirely by
+// CandleEvent.Seq, not by anything this interface's own implementation
+// does or does not observe about the underlying connection -- an
+// earlier version added a second channel for exactly that, and a real
+// repro (CLIENT KILL TYPE pubsub against a connected, subscribed
+// client) showed it never fired.
 type Subscriber interface {
-	Subscribe(ctx context.Context, instrumentID int64) (events <-chan []byte, reconnected <-chan struct{}, cancel func(), err error)
+	Subscribe(ctx context.Context, instrumentID int64) (events <-chan []byte, cancel func(), err error)
 }
 
 // ErrNotEnabled and ErrNotFound are both reported to the client as the
@@ -184,35 +189,37 @@ func (h *Hub) Unregister(c *Connection) {
 
 // Subscribe handles one `subscribe` message: the enabled check (every
 // time, brief rule), idempotent re-subscribe (a fresh snapshot, seq
-// reset), and the Redis reference-count bookkeeping. Returns the
-// snapshot payload to send back, or an error (ErrNotFound/ErrNotEnabled,
-// both reported identically to the client -- see the Envelope-building
-// caller).
-func (h *Hub) Subscribe(ctx context.Context, c *Connection, instrumentID int64, interval Interval) (SnapshotPayload, error) {
+// reset), and the Redis reference-count bookkeeping. Sends the
+// snapshot itself, through c (see the doc comment on why: this used to
+// be the caller's job and that was the bug behind the snapshot-is-seq-0
+// report). Returns an error (ErrNotFound/ErrNotEnabled, both reported
+// identically to the client -- see the caller) without sending
+// anything.
+func (h *Hub) Subscribe(ctx context.Context, c *Connection, instrumentID int64, interval Interval) error {
 	key := subscriptionKey{InstrumentID: instrumentID, Interval: interval}
 	if !c.hasSubscription(key) && c.SubscriptionCount() >= h.cfg.MaxSubscriptionsPerConnection {
-		return SnapshotPayload{}, fmt.Errorf("%w: connection already holds %d subscriptions", ErrTooManySubscriptions, c.SubscriptionCount())
+		return fmt.Errorf("%w: connection already holds %d subscriptions", ErrTooManySubscriptions, c.SubscriptionCount())
 	}
 
 	inst, err := h.instruments.GetByID(ctx, instrumentID)
 	if errors.Is(err, instruments.ErrNotFound) {
-		return SnapshotPayload{}, ErrNotFound
+		return ErrNotFound
 	}
 	if err != nil {
-		return SnapshotPayload{}, fmt.Errorf("hub: get instrument %d: %w", instrumentID, err)
+		return fmt.Errorf("hub: get instrument %d: %w", instrumentID, err)
 	}
 	if !inst.Enabled {
-		return SnapshotPayload{}, ErrNotEnabled
+		return ErrNotEnabled
 	}
 
 	d, ok := interval.Duration()
 	if !ok {
-		return SnapshotPayload{}, fmt.Errorf("hub: interval %q has no known duration", interval)
+		return fmt.Errorf("hub: interval %q has no known duration", interval)
 	}
 
 	snapshot, err := h.buildSnapshot(ctx, instrumentID, interval, d)
 	if err != nil {
-		return SnapshotPayload{}, err
+		return err
 	}
 
 	h.mu.Lock()
@@ -223,7 +230,13 @@ func (h *Hub) Subscribe(ctx context.Context, c *Connection, instrumentID int64, 
 	}
 	h.mu.Unlock()
 
-	return snapshot, nil
+	// resetSubscription above zeroed this subscription's own seq
+	// counter; sending the snapshot through c.sendSnapshot (not a
+	// hand-built Envelope) is what actually assigns it seq 1, matching
+	// adr-004-ws-contract-draft.md's own "snapshot is seq 1" -- the
+	// first live update that follows is then seq 2, never seq 1 again.
+	c.sendSnapshot(key, snapshot, h.clk.Now())
+	return nil
 }
 
 // Unsubscribe handles one `unsubscribe` message. A key the connection
@@ -296,9 +309,22 @@ func (h *Hub) removeSubscriptionLocked(c *Connection, key subscriptionKey) {
 // startRedisSubscriptionLocked starts consuming instrumentID's own
 // Redis channel in a background goroutine, routing every event to
 // routeEvent. Caller holds h.mu.
+//
+// Loss detection (review item 7) happens here, against the event
+// stream's own content, not against anything the Subscriber reports
+// about its connection: lastSeq is this goroutine's own private state
+// (safe without a lock -- nothing else ever touches it, since this is
+// the only goroutine that ever processes instrumentID's own events).
+// Any event whose Seq is not exactly lastSeq+1 -- a gap (events were
+// missed) or a repeat (the same or an older one arrived again) -- means
+// something was lost between the worker's last successful publish this
+// goroutine saw and now, for whatever reason (a dropped connection, a
+// message lost in transit, anything else): handleCandleStreamLoss
+// resyncs every affected subscription from the database, which has the
+// one copy of the truth Redis's own pub/sub never promised to keep.
 func (h *Hub) startRedisSubscriptionLocked(instrumentID int64) {
 	ctx, cancel := context.WithCancel(context.Background())
-	events, reconnected, subCancel, err := h.subscriber.Subscribe(ctx, instrumentID)
+	events, subCancel, err := h.subscriber.Subscribe(ctx, instrumentID)
 	if err != nil {
 		h.logger.Error("hub: subscribe to redis", "instrument_id", instrumentID, "error", err)
 		cancel()
@@ -310,12 +336,11 @@ func (h *Hub) startRedisSubscriptionLocked(instrumentID int64) {
 	}
 
 	go func() {
+		var lastSeq uint64
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-reconnected:
-				h.handleRedisReconnect(instrumentID)
 			case raw, ok := <-events:
 				if !ok {
 					return
@@ -325,18 +350,31 @@ func (h *Hub) startRedisSubscriptionLocked(instrumentID int64) {
 					h.logger.Error("hub: decode candle event", "instrument_id", instrumentID, "error", err)
 					continue
 				}
+				if lastSeq != 0 && ev.Seq != lastSeq+1 {
+					h.logger.Warn("hub: candle stream sequence loss, resyncing",
+						"instrument_id", instrumentID, "last_seq", lastSeq, "got_seq", ev.Seq)
+					h.handleCandleStreamLoss(instrumentID)
+					lastSeq = ev.Seq
+					// The resync above reads current state from the
+					// database, which already reflects ev's own
+					// write (publish only ever happens after that
+					// write succeeds) -- delivering ev again on top
+					// would be redundant, not incorrect, but skipped
+					// for simplicity.
+					continue
+				}
+				lastSeq = ev.Seq
 				h.routeEvent(context.Background(), ev)
 			}
 		}
 	}()
 }
 
-// handleRedisReconnect is review item 7: a resubscribe means a drop
-// just happened and has already been recovered from by the time this
-// fires (go-redis's own PubSub resubscribes transparently) -- degraded,
-// then immediately a fresh snapshot per affected subscription, the same
-// recovery path an ordinary client resubscribe already uses.
-func (h *Hub) handleRedisReconnect(instrumentID int64) {
+// handleCandleStreamLoss is review item 7: degraded first, then
+// immediately a fresh snapshot per affected subscription -- the same
+// recovery path an ordinary client resubscribe already uses, just
+// triggered by a sequence gap/repeat instead of a client action.
+func (h *Hub) handleCandleStreamLoss(instrumentID int64) {
 	h.mu.Lock()
 	conns := h.instrumentConns[instrumentID]
 	targets := make(map[*Connection][]Interval, len(conns))
