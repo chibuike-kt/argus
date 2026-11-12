@@ -1,10 +1,11 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { getSetup, listSetups } from "@/api/setups";
-import { listInstruments, listInstrumentCandles } from "@/api/instruments";
+import { listInstruments } from "@/api/instruments";
 import type { ApiCandle, ApiInstrument, ApiSetup, ApiSetupEvent } from "@/api/types";
 import { listSetupEvents } from "@/api/setups";
 import { ApiClientError } from "@/api/client";
+import { useLiveCandles } from "@/lib/use-live-candles";
 
 // Centralizes every fetch the /analysis workspace's many separate panels
 // need (chart, right panel's analysis tab, other-setups strip, markets
@@ -15,14 +16,11 @@ import { ApiClientError } from "@/api/client";
 // most-recently-updated setup, so /analysis is never empty just because
 // a user landed on it directly.
 //
-// The API still has no "latest closed candle" endpoint, but order=desc
-// with no from/to at all (web-wiring-polish brief, item 1) solves the
-// actual problem that gap created: this is "give me the most recent
-// MAX_CANDLES candles," with limit still capping the result server-side
-// regardless of there being no range to bound it (enforced in SQL, see
-// ListClosedCandlesInRangeLimitedDesc's own comment in db/queries) --
-// reversed below into the ascending order the chart needs.
-const MAX_CANDLES = 1000;
+// Candles (see useLiveCandles below) are "the most recent MAX_CANDLES"
+// (that constant lives in use-live-candles.ts now, not here), not a
+// window anchored to this setup's own evaluation_time -- order=desc
+// with no from/to (web-wiring-polish brief, item 1) is what makes that
+// possible without a dedicated "latest closed candle" endpoint.
 
 interface AnalysisWorkspace {
   instruments: ApiInstrument[];
@@ -71,10 +69,6 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
 
   const [otherSetups, setOtherSetups] = useState<ApiSetup[]>([]);
   const [otherSetupsLoading, setOtherSetupsLoading] = useState(false);
-
-  const [candles, setCandles] = useState<ApiCandle[]>([]);
-  const [candlesLoading, setCandlesLoading] = useState(false);
-  const [candlesError, setCandlesError] = useState<ApiClientError | undefined>();
 
   // 1. Instruments, once.
   useEffect(() => {
@@ -179,37 +173,31 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     return () => controller.abort();
   }, [setup]);
 
-  // 5. Chart candles for the selected instrument: the most recent
-  // MAX_CANDLES, not a window anchored at the setup's own
-  // evaluation_time (web-wiring-followup brief, Part 5) -- order=desc
-  // comes back newest-first, reversed here into the ascending order the
-  // chart (and everything downstream of `candles`) expects.
-  useEffect(() => {
-    if (!setup) {
-      setCandles([]);
-      return;
-    }
-    const controller = new AbortController();
-    setCandlesLoading(true);
-    setCandlesError(undefined);
-    listInstrumentCandles(
-      setup.instrument_id,
-      { limit: MAX_CANDLES, order: "desc" },
-      { signal: controller.signal },
-    )
-      .then((data) => {
-        if (!controller.signal.aborted) setCandles([...data.candles].reverse());
-      })
-      .catch((err: unknown) => {
-        if (!controller.signal.aborted) {
-          setCandlesError(err instanceof ApiClientError ? err : new ApiClientError(String(err), 0));
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setCandlesLoading(false);
-      });
-    return () => controller.abort();
-  }, [setup]);
+  // 5. Chart candles for the selected instrument: history (the most
+  // recent MAX_CANDLES, not a window anchored at the setup's own
+  // evaluation_time -- web-wiring-followup brief, Part 5) plus the live
+  // snapshot and gap-fill (live-chart brief, phase 4, Part 2C) --
+  // useLiveCandles already returns ascending order and already
+  // subscribes to /ws, filling the review's own item 6 race (a candle
+  // closed between this REST fetch and the subscribe) into `history`
+  // itself. No series.update() call happens anywhere in this phase
+  // (Part 2D): a forming/closed/corrected message updates
+  // live.forming, read by nothing yet, and a gap-fill is the only way
+  // `history` (and so the chart) changes after the initial load.
+  //
+  // interval is fixed at "1m": the chart does not react to a timeframe
+  // change yet (ChartSurfaceInner's own comment on chartViewScopeRef
+  // already says so; timeframe only re-scopes the drawing store today
+  // -- live-chart-pipeline brief, Part 2 did not ask this phase to wire
+  // interval-aware fetching, only history+snapshot for whatever
+  // interval is used, flagged here rather than guessed).
+  const live = useLiveCandles(setup?.instrument_id, "1m");
+  const candles = useMemo(() => live.history?.candles ?? [], [live.history]);
+  const candlesLoading = live.historyLoading;
+  const candlesError = useMemo(
+    () => (live.historyError ? new ApiClientError(live.historyError.message, 0) : undefined),
+    [live.historyError],
+  );
 
   const value: AnalysisWorkspace = {
     instruments,

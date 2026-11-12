@@ -59,7 +59,17 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
   historyRef.current = history;
 
   useEffect(() => {
-    if (instrumentId === undefined) return;
+    if (instrumentId === undefined) {
+      // No instrument resolved (yet, or at all) -- reset rather than
+      // leave a previous instrument's own history on screen under a
+      // caller that has moved on from it.
+      setHistory(null);
+      historyRef.current = null;
+      setHistoryLoading(false);
+      setHistoryError(null);
+      setForming(null);
+      return;
+    }
 
     let cancelled = false;
     const controller = new AbortController();

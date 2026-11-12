@@ -196,17 +196,13 @@ export function ChartSurface({ className }: { className?: string }) {
 
 const EMPTY_BAR: OHLC = { open: 0, high: 0, low: 0, close: 0 };
 
-function ChartSurfaceInner({
-  className,
-  symbol,
-  venue,
-  candles,
-  loading,
-  loadError,
-  poiZone,
-  plan,
-  formationOutsideWindow,
-}: {
+// Exported for chart-surface-update-path.test.tsx (Part 2A's own
+// component test: switching instrument/interval must not rebuild the
+// chart) -- it renders this directly, under a real DrawingProvider, to
+// exercise the actual create/update-effect split without needing the
+// whole AnalysisWorkspaceProvider fetch chain ChartSurface itself sits
+// behind.
+export interface ChartSurfaceInnerProps {
   className?: string;
   symbol: string;
   venue: string;
@@ -216,7 +212,19 @@ function ChartSurfaceInner({
   poiZone: ChartPoiZone;
   plan: ChartPlanOverlay;
   formationOutsideWindow: boolean;
-}) {
+}
+
+export function ChartSurfaceInner({
+  className,
+  symbol,
+  venue,
+  candles,
+  loading,
+  loadError,
+  poiZone,
+  plan,
+  formationOutsideWindow,
+}: ChartSurfaceInnerProps) {
   const hasCandles = candles.length > 0;
   const lastTime = hasCandles ? unix(candles[candles.length - 1].openTime) : (0 as Time);
   const toData = (): CandlestickData<Time>[] =>
