@@ -14,10 +14,17 @@ import { DrawingProvider, useDrawing } from "../drawing-context";
 import type { DrawingsStore } from "../drawings/store";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ApiInstrument } from "@/api/types";
+import type { LiveTick } from "@/lib/use-live-candles";
 
 vi.mock("@/components/workspace/analysis-workspace", () => ({
   useAnalysisWorkspace: () => ({
     instrument: { id: 1, native_symbol: "BTC-PERP", provider: "test" } as ApiInstrument,
+    // DrawingProvider now reads timeframe/setTimeframe from this hook
+    // (Part 4, item 1) instead of owning its own state -- this test
+    // exercises ChartSurfaceInner directly, not AnalysisWorkspaceProvider,
+    // so the mock has to stand in for both.
+    timeframe: "1m",
+    setTimeframe: () => {},
   }),
 }));
 
@@ -98,11 +105,15 @@ function Providers({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Harness(props: Omit<ChartSurfaceInnerProps, "loading" | "loadError">) {
+type HarnessProps = Omit<ChartSurfaceInnerProps, "loading" | "loadError" | "forming"> & {
+  forming?: ChartSurfaceInnerProps["forming"];
+};
+
+function Harness({ forming = null, ...props }: HarnessProps) {
   return (
     <Providers>
       <AddOneDrawing onReady={() => {}} />
-      <ChartSurfaceInner {...props} loading={false} loadError={undefined} />
+      <ChartSurfaceInner {...props} forming={forming} loading={false} loadError={undefined} />
     </Providers>
   );
 }
@@ -192,6 +203,7 @@ describe("switching instrument or interval does not rebuild the chart", () => {
           poiZone={{ low: 95, high: 105 }}
           plan={basePlan}
           formationOutsideWindow={false}
+          forming={null}
         />
       </Providers>,
     );
@@ -210,6 +222,7 @@ describe("switching instrument or interval does not rebuild the chart", () => {
           poiZone={{ low: 195, high: 205 }}
           plan={{ ...basePlan, fromTime: candleSet(8, 200)[0].openTime }}
           formationOutsideWindow={false}
+          forming={null}
         />
       </Providers>,
     );
@@ -279,5 +292,137 @@ describe("switching instrument or interval does not rebuild the chart", () => {
     );
     expect(container.textContent).toMatch(/20[0-9]/); // candleSet(8, 200): closes ~200.5-207.5
     expect(container.textContent).not.toMatch(/10[0-4]\D/);
+  });
+});
+
+// liveTick builds a WireCandlePayload-shaped forming tick -- decimal
+// strings, like the real wire does (rule 2); formatMoney converts them
+// at the chart edge, inside chart-surface.tsx's own live-tick effect.
+function liveTick(openTime: string, close: number, opts: { revision?: number; seq: number }): LiveTick {
+  return {
+    candle: {
+      open_time: openTime,
+      close_time: openTime,
+      open: String(close - 1),
+      high: String(close + 1),
+      low: String(close - 2),
+      close: String(close),
+      volume: "1",
+      revision: opts.revision ?? 1,
+    },
+    seq: opts.seq,
+  };
+}
+
+describe("Part 2D: a live tick is applied through series.update(), never through the candles prop", () => {
+  beforeEach(() => {
+    createChartSpy.mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("same open_time as the last candle: replaces that bar's own OHLC on screen, candles prop unchanged", () => {
+    const candles = candleSet(5, 100);
+    const lastOpenTime = candles[candles.length - 1].openTime;
+    const { container, rerender } = render(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candles}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+    expect(container.textContent).not.toMatch(/999/);
+
+    rerender(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candles}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+        forming={liveTick(lastOpenTime, 999, { seq: 1 })}
+      />,
+    );
+    // The legend's own C value now reads the live tick's close, even
+    // though `candles` itself (and so createChart's own call count --
+    // this update went through series.update(), not a rebuild) never
+    // changed.
+    expect(container.textContent).toMatch(/999/);
+    expect(createChartSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a newer open_time: appends a new bar via series.update(), rather than being dropped or throwing", () => {
+    const candles = candleSet(5, 100);
+    const lastOpenTime = candles[candles.length - 1].openTime;
+    const nextOpenTime = new Date(new Date(lastOpenTime).getTime() + 60_000).toISOString();
+    const { container, rerender } = render(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candles}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+
+    rerender(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candles}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+        forming={liveTick(nextOpenTime, 888, { seq: 1 })}
+      />,
+    );
+    expect(container.textContent).toMatch(/888/);
+  });
+
+  it("an out-of-order/duplicate tick (not newer by (open_time, revision, seq)) is rejected -- the on-screen bar does not regress", () => {
+    const candles = candleSet(5, 100);
+    const lastOpenTime = candles[candles.length - 1].openTime;
+    const { container, rerender } = render(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candles}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+        forming={liveTick(lastOpenTime, 999, { revision: 2, seq: 10 })}
+      />,
+    );
+    expect(container.textContent).toMatch(/999/);
+
+    // A lower (revision, seq) at the same open_time -- e.g. a buffered
+    // duplicate delivered late after a resubscribe -- must not replace
+    // what a strictly newer tick already applied.
+    rerender(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candles}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+        forming={liveTick(lastOpenTime, 111, { revision: 1, seq: 5 })}
+      />,
+    );
+    expect(container.textContent).toMatch(/999/);
+    expect(container.textContent).not.toMatch(/111/);
   });
 });

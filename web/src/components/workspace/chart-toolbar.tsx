@@ -27,6 +27,7 @@ import { useCommandPalette } from "@/components/workspace/command-palette";
 import { useArgusActivity } from "@/components/workspace/argus-activity-feed";
 import { fixturesEnabled } from "@/mocks/fixtures-as-api";
 import type { ApiInstrument } from "@/api/types";
+import type { CandleInterval } from "@/lib/live-socket";
 
 function Divider() {
   return <span className="mx-0.5 h-5 w-px bg-line" />;
@@ -45,24 +46,76 @@ function ToolbarBtn({ icon, label, text }: { icon: ReactNode; label: string; tex
   );
 }
 
-// The backend has only ever evaluated 1m (cmd/argus-worker/processing.go's
-// own comment on why); showing a menu of 5m/15m/1H/etc that silently did
-// nothing, or worse, resampled 1m candles in the browser into something
-// that looks like a different timeframe but isn't, would misrepresent
-// what is actually being shown (web-wiring-followup brief, Part 2). This
-// is a locked, disabled control instead of a removed one, so the
-// timeframe ARGUS evaluates stays visible even though it cannot be
-// changed yet.
-function TimeframeLock({ tf }: { tf: string }) {
+const TIMEFRAMES: CandleInterval[] = ["1m", "5m", "15m", "1h", "4h", "1d"];
+
+// Real timeframe controls (live-chart brief, phase 4, Part 4, item 1):
+// useLiveCandles now subscribes with whatever interval is selected, not
+// a fixed "1m" (analysis-workspace.tsx's own doc comment on `timeframe`
+// explains why that state lives there, not in DrawingProvider). Which
+// buttons are enabled comes from the instrument's own
+// supported_intervals -- the backend's authoritative list (ADR-006),
+// never a client-side crypto/non-crypto guess -- so a non-crypto
+// instrument that only has ["1m"] shows every other button disabled,
+// without this component needing to know why. No instrument resolved
+// yet: nothing is known to be supported, so everything but 1m is
+// disabled (matching this control's own pre-Part-4 default).
+function TimeframePicker({ tf, instrument }: { tf: CandleInterval; instrument?: ApiInstrument }) {
+  const { setTimeframe } = useDrawing();
+  const supported = instrument?.supported_intervals ?? ["1m"];
   return (
-    <Tooltip content="More timeframes need the aggregation work (not built yet)">
-      <span
-        aria-disabled="true"
-        className="inline-flex h-7 cursor-not-allowed items-center gap-1 rounded-md px-2 text-[13px] font-semibold text-fg-subtle"
-      >
-        {tf}
-      </span>
-    </Tooltip>
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          aria-label={`Timeframe: ${tf}`}
+          className="focus-ring inline-flex h-7 items-center gap-1 rounded-md px-2 text-[13px] font-semibold text-fg transition-colors hover:bg-white/5 data-[state=open]:bg-white/5"
+        >
+          {tf}
+          <CaretDown className="size-3.5 text-fg-subtle" />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="start"
+          sideOffset={6}
+          className="glass-strong z-[60] min-w-[120px] overflow-y-auto rounded-lg p-1 shadow-xl"
+        >
+          {TIMEFRAMES.map((candidate) => {
+            const disabled = !supported.includes(candidate);
+            const item = (
+              <DropdownMenu.Item
+                key={candidate}
+                disabled={disabled}
+                onSelect={() => setTimeframe(candidate)}
+                className={cn(
+                  "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] outline-none transition-colors",
+                  "data-[highlighted]:bg-white/5",
+                  disabled
+                    ? "cursor-not-allowed text-fg-subtle opacity-50 data-[highlighted]:bg-transparent"
+                    : candidate === tf
+                      ? "text-fg"
+                      : "text-fg-muted data-[highlighted]:text-fg",
+                )}
+              >
+                <Check className={cn("size-3.5 shrink-0", candidate === tf ? "opacity-100" : "opacity-0")} />
+                <span className="font-medium">{candidate}</span>
+              </DropdownMenu.Item>
+            );
+            // Radix disables pointer events on a disabled Item, which
+            // also suppresses this Tooltip's own hover trigger if it
+            // wraps the Item directly -- wrapping in a span keeps the
+            // explanation reachable on hover even though the item
+            // itself cannot be selected.
+            return disabled ? (
+              <Tooltip key={candidate} content="This instrument's own backend data does not support this timeframe">
+                <span>{item}</span>
+              </Tooltip>
+            ) : (
+              item
+            );
+          })}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
@@ -142,7 +195,7 @@ export function ChartToolbar() {
 
       <Divider />
 
-      <TimeframeLock tf={tf} />
+      <TimeframePicker tf={tf} instrument={instrument} />
 
       <Divider />
 

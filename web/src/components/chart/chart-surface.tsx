@@ -20,6 +20,8 @@ import { useFlash } from "@/lib/use-flash";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import { formatMoney, toPlanOverlay } from "@/api/mappers";
 import { useDrawing } from "./drawing-context";
+import type { LiveTick } from "@/lib/use-live-candles";
+import { isNewerCandleKey, decideApplyAction, type CandleKey } from "@/lib/live-candles-reducer";
 import { loadChartView, saveChartView } from "./chart-view-persistence";
 import { cloneDrawing } from "./drawings/types";
 import {
@@ -105,7 +107,7 @@ export interface ChartPlanOverlay {
 // own small loading/error overlay (below) over whatever chart is
 // already there, however many instruments or setups come and go.
 export function ChartSurface({ className }: { className?: string }) {
-  const { setup, instrument, candles, candlesLoading, candlesError, setupLoading } =
+  const { setup, instrument, candles, candlesLoading, candlesError, setupLoading, forming } =
     useAnalysisWorkspace();
   const hasLoadedOnceRef = useRef(false);
   if (candles.length > 0) hasLoadedOnceRef.current = true;
@@ -190,6 +192,7 @@ export function ChartSurface({ className }: { className?: string }) {
       poiZone={{ low: overlay.poiLow, high: overlay.poiHigh }}
       plan={{ entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime }}
       formationOutsideWindow={formationOutsideWindow}
+      forming={forming}
     />
   );
 }
@@ -212,6 +215,12 @@ export interface ChartSurfaceInnerProps {
   poiZone: ChartPoiZone;
   plan: ChartPlanOverlay;
   formationOutsideWindow: boolean;
+  // Part 2D: the latest candle/candle_closed tick, applied via
+  // series.update() by its own effect below -- never through the
+  // candles prop above (rule 3). null when there is nothing live yet
+  // (no subscription, or a fresh one that has not sent its first
+  // message).
+  forming: LiveTick | null;
 }
 
 export function ChartSurfaceInner({
@@ -224,6 +233,7 @@ export function ChartSurfaceInner({
   poiZone,
   plan,
   formationOutsideWindow,
+  forming,
 }: ChartSurfaceInnerProps) {
   const hasCandles = candles.length > 0;
   const lastTime = hasCandles ? unix(candles[candles.length - 1].openTime) : (0 as Time);
@@ -298,6 +308,18 @@ export function ChartSurfaceInner({
   // forever, for exactly the reason this whole file is being split in
   // two. applyCandleData keeps this ref current instead.
   const lastBarRef = useRef<OHLC>(hasCandles ? candles[candles.length - 1] : EMPTY_BAR);
+  // lastAppliedOpenTimeRef/appliedLiveKeyRef back the live-tick effect
+  // below (Part 2D): the former is decideApplyAction's own
+  // currentLastOpenTime (replace same bar / append a new one / drop an
+  // older one, never attempted through update()), the latter is
+  // isNewerCandleKey's own "already applied" side of the (open_time,
+  // revision, seq) comparison (rule 5) -- rejecting a duplicate or
+  // out-of-order message before even reaching the apply-action
+  // decision. Both reset in applyCandleData, since any full setData
+  // (reload, gap-fill, instrument/interval switch) makes whatever was
+  // "last applied" for live-tick purposes stale.
+  const lastAppliedOpenTimeRef = useRef<string | null>(hasCandles ? candles[candles.length - 1].openTime : null);
+  const appliedLiveKeyRef = useRef<CandleKey | null>(null);
 
   // applyCandleData is this component's own "data path" (Part 2A):
   // setData plus repositioning the two system primitives (the POI zone
@@ -309,13 +331,18 @@ export function ChartSurfaceInner({
   // the create effect once at mount, and from the update effect below
   // on every later candles/plan change, so instrument and interval
   // switches "clear and reload" without rebuilding the chart (Part
-  // 2A's own rule). A real live single-bar update (Part 2D, not built
-  // in this phase) will call series.update() directly and must not
-  // route through here, which always does a full setData.
+  // 2A's own rule). A live single-bar update (Part 2D) calls
+  // series.update() directly, from its own effect below, and never
+  // routes through here, which always does a full setData.
   function applyCandleData() {
     const series = seriesRef.current;
     const chart = chartRef.current;
     if (!series || !chart) return;
+    // Any full setData makes whatever the live-tick effect last applied
+    // stale -- this is new data (a reload, a gap-fill, an instrument or
+    // interval switch), so the next live tick must be compared against
+    // THIS data's own last bar, not a previous one.
+    appliedLiveKeyRef.current = null;
     if (!hasCandles) {
       series.setData([]);
       const prev = systemPrimitivesRef.current;
@@ -323,11 +350,13 @@ export function ChartSurfaceInner({
       if (prev.plan) series.detachPrimitive(prev.plan);
       systemPrimitivesRef.current = { poi: null, plan: null };
       lastBarRef.current = EMPTY_BAR;
+      lastAppliedOpenTimeRef.current = null;
       setBar(EMPTY_BAR);
       return;
     }
 
     series.setData(toData());
+    lastAppliedOpenTimeRef.current = candles[candles.length - 1].openTime;
 
     const prev = systemPrimitivesRef.current;
     if (prev.poi) series.detachPrimitive(prev.poi);
@@ -514,6 +543,51 @@ export function ChartSurfaceInner({
     // react-hooks/exhaustive-deps); candles/poiZone/plan are the only
     // real triggers this effect needs.
   }, [candles, poiZone.low, poiZone.high, plan.entry, plan.stop, plan.fromTime, plan.targets]);
+
+  // live-tick path (Part 2D): a candle/candle_closed message, applied
+  // with series.update() -- its own path, never through the candles
+  // prop/applyCandleData above (rule 3). Two guards before it is ever
+  // allowed to touch the chart:
+  //  1. isNewerCandleKey (rule 5): reject anything not strictly newer
+  //     than the last tick actually applied, by (open_time, revision,
+  //     seq) -- a duplicate or out-of-order delivery after a resubscribe
+  //     must not re-apply or regress the bar on screen.
+  //  2. decideApplyAction: same open_time replaces (price moving within
+  //     the still-forming bar), a later open_time appends (the bar just
+  //     closed and/or a new one started), an EARLIER open_time is
+  //     dropped outright -- update() throws on an older time without
+  //     historicalUpdate=true (lightweight-charts-update-contract.test.ts),
+  //     and a live tick is never the right place to rewrite an older
+  //     bar anyway (that is candle_corrected's own job, which never
+  //     reaches `forming` at all -- see use-live-candles.ts's own doc
+  //     comment).
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series || !forming) return;
+
+    const nextKey: CandleKey = {
+      openTime: forming.candle.open_time,
+      revision: forming.candle.revision,
+      seq: forming.seq,
+    };
+    if (!isNewerCandleKey(nextKey, appliedLiveKeyRef.current)) return;
+
+    const action = decideApplyAction(forming.candle, lastAppliedOpenTimeRef.current);
+    if (action === "drop-stale") return;
+
+    const bar: OHLC = {
+      open: formatMoney(forming.candle.open),
+      high: formatMoney(forming.candle.high),
+      low: formatMoney(forming.candle.low),
+      close: formatMoney(forming.candle.close),
+    };
+    series.update({ time: unix(forming.candle.open_time), ...bar });
+
+    appliedLiveKeyRef.current = nextKey;
+    lastAppliedOpenTimeRef.current = forming.candle.open_time;
+    lastBarRef.current = bar;
+    setBar(bar);
+  }, [forming]);
 
   // keep the controller's tool/option state in sync with context, without
   // re-running chart init

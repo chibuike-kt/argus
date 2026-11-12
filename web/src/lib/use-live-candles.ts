@@ -6,14 +6,18 @@
 // connection) and live-candles-reducer.ts (the pure decision logic)
 // together behind one hook.
 //
-// This phase's own checkpoint is Part 2A-C: "history and snapshot
-// working, no live updates yet" (the brief's own words). This hook
-// already receives `candle`/`candle_closed` messages (through
-// getLiveSocket's own subscribe) and exposes the latest one via
-// `forming`, but applying it to a chart with series.update() --
-// Part 2D -- is deliberately not done here; a caller in this phase
-// only reads history/snapshot/forming for its own display, it does
-// not yet call update() with any of it.
+// Part 2D: `candle`/`candle_closed` messages are exposed via `forming`
+// (payload + the wire's own per-connection seq, needed downstream for
+// the (open_time, revision, seq) newest-wins comparison, rule 5) for a
+// caller to apply with series.update() on its own path -- this hook
+// itself never touches a chart. `candle_corrected` is deliberately NOT
+// exposed through `forming`: live-candles-reducer.ts's own doc comment
+// on decideApplyAction is explicit that a correction is never applied
+// through update() (rule 6, closed candles are immutable except via a
+// correction, and even a correction goes through a refetch+setData,
+// never a direct rewrite) -- it goes through refetchAndMergeCorrection
+// below instead, landing in `history` the same way a snapshot gap-fill
+// already does.
 import { useEffect, useRef, useState } from "react";
 import { listInstrumentCandles, type CandleInterval as ApiCandleInterval } from "@/api/instruments";
 import type { ApiCandleHistory } from "@/api/types";
@@ -29,15 +33,20 @@ import { checkSnapshotGap, INTERVAL_MS } from "./live-candles-reducer";
 
 const MAX_CANDLES = 1000;
 
+export interface LiveTick {
+  candle: WireCandlePayload;
+  seq: number;
+}
+
 export interface UseLiveCandlesResult {
   history: ApiCandleHistory | null;
   historyLoading: boolean;
   historyError: Error | null;
   connectionState: ConnectionState;
-  // The latest forming/closed candle this subscription has seen, kept
-  // here for a caller's own display -- not yet applied to any chart
-  // (see this file's own doc comment on the Part 2D boundary).
-  forming: WireCandlePayload | null;
+  // The latest candle/candle_closed message this subscription has seen
+  // -- see this file's own doc comment above on why candle_corrected is
+  // never surfaced here.
+  forming: LiveTick | null;
   lastError: WireErrorPayload | null;
 }
 
@@ -46,7 +55,7 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<Error | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("closed");
-  const [forming, setForming] = useState<WireCandlePayload | null>(null);
+  const [forming, setForming] = useState<LiveTick | null>(null);
   const [lastError, setLastError] = useState<WireErrorPayload | null>(null);
 
   // historyRef mirrors `history` for the gap-check and the live-socket
@@ -77,6 +86,14 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
     setHistoryError(null);
     setHistory(null);
     historyRef.current = null;
+    // A real instrument or interval switch (not just instrumentId going
+    // undefined, the branch above): the OLD forming tick belongs to a
+    // subscription this effect's own cleanup is about to release, and
+    // the new one may not send its first candle/candle_closed message
+    // for up to a whole interval -- chart-surface.tsx's own live-tick
+    // effect must never apply that stale tick to the freshly-loaded
+    // chart in the meantime.
+    setForming(null);
 
     listInstrumentCandles(
       instrumentId,
@@ -101,20 +118,23 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
 
     const unsubscribe = getLiveSocket().subscribe(instrumentId, interval, {
       onConnectionState: setConnectionState,
-      onSnapshot: (payload: WireSnapshotPayload) => {
-        applySnapshot(instrumentId, interval, payload);
+      onSnapshot: (payload, seq) => {
+        applySnapshot(instrumentId, interval, payload, seq);
       },
-      onCandle: (payload) => setForming(payload),
-      onCandleClosed: (payload) => setForming(payload),
-      onCandleCorrected: (payload) => setForming(payload),
+      onCandle: (payload, seq) => setForming({ candle: payload, seq }),
+      onCandleClosed: (payload, seq) => setForming({ candle: payload, seq }),
+      // Never surfaced via `forming` -- see this file's own doc comment
+      // at the top on why a correction must go through a refetch
+      // instead of series.update().
+      onCandleCorrected: (payload) => refetchAndMergeCorrection(instrumentId, interval, payload.open_time),
       onError: (payload) => setLastError(payload),
     });
 
-    function applySnapshot(id: number, iv: CandleInterval, payload: WireSnapshotPayload) {
+    function applySnapshot(id: number, iv: CandleInterval, payload: WireSnapshotPayload, seq: number) {
       const held = historyRef.current;
       const newestHeldOpenTime = held && held.candles.length > 0 ? held.candles[held.candles.length - 1].open_time : null;
       const gap = checkSnapshotGap(payload, newestHeldOpenTime, INTERVAL_MS[iv]);
-      if (payload.candle) setForming(payload.candle);
+      if (payload.candle) setForming({ candle: payload.candle, seq });
       if (!gap.hasGap || !gap.refetchFrom || !gap.refetchTo) return;
 
       // review item 6: fill exactly the missing range before any live
@@ -125,6 +145,32 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
           const merged: ApiCandleHistory = {
             ...filled,
             candles: [...historyRef.current.candles, ...filled.candles],
+          };
+          setHistory(merged);
+          historyRef.current = merged;
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) setHistoryError(err instanceof Error ? err : new Error(String(err)));
+        });
+    }
+
+    // refetchAndMergeCorrection: a candle_corrected message names an
+    // open_time that may already be a CLOSED bar on screen -- rule 6
+    // (closed candles are immutable except via a correction) and the
+    // reducer's own doc comment both say this never goes through
+    // series.update(), only a real REST read replacing that one bar in
+    // `history`, the same setData path a normal reload already uses.
+    // A no-op if that bar is not currently held (outside the MAX_CANDLES
+    // window): nothing on screen needs correcting.
+    function refetchAndMergeCorrection(id: number, iv: CandleInterval, openTime: string) {
+      const to = new Date(new Date(openTime).getTime() + INTERVAL_MS[iv]).toISOString();
+      listInstrumentCandles(id, { interval: iv as ApiCandleInterval, order: "asc", from: openTime, to })
+        .then((corrected) => {
+          if (cancelled || !historyRef.current || corrected.candles.length === 0) return;
+          const fixed = corrected.candles[0];
+          const merged: ApiCandleHistory = {
+            ...historyRef.current,
+            candles: historyRef.current.candles.map((c) => (c.open_time === openTime ? fixed : c)),
           };
           setHistory(merged);
           historyRef.current = merged;

@@ -5,7 +5,8 @@ import { listInstruments } from "@/api/instruments";
 import type { ApiCandle, ApiInstrument, ApiSetup, ApiSetupEvent } from "@/api/types";
 import { listSetupEvents } from "@/api/setups";
 import { ApiClientError } from "@/api/client";
-import { useLiveCandles } from "@/lib/use-live-candles";
+import { useLiveCandles, type LiveTick } from "@/lib/use-live-candles";
+import type { CandleInterval, ConnectionState } from "@/lib/live-socket";
 
 // Centralizes every fetch the /analysis workspace's many separate panels
 // need (chart, right panel's analysis tab, other-setups strip, markets
@@ -41,6 +42,26 @@ interface AnalysisWorkspace {
   candles: ApiCandle[];
   candlesLoading: boolean;
   candlesError: ApiClientError | undefined;
+
+  // The chart's own timeframe (live-chart brief, phase 4, Part 4, item
+  // 1) -- owned here, not in DrawingProvider (which reads it back via
+  // useAnalysisWorkspace() instead of a second copy), because it also
+  // drives useLiveCandles' own subscription below and DrawingProvider
+  // is a descendant of this provider, not an ancestor: it cannot feed
+  // a value back up to where the socket subscription lives.
+  timeframe: CandleInterval;
+  // Clamps to "1m" if the requested interval is not in the current
+  // instrument's own supported_intervals (ChartToolbar's own job is to
+  // not offer a disabled one in the first place; this is the backend's
+  // own authoritative list, never a client-side crypto/non-crypto
+  // guess, and the second line of defense if it is ever asked for
+  // anyway).
+  setTimeframe: (tf: CandleInterval) => void;
+  connectionState: ConnectionState;
+  // The latest live candle/candle_closed tick -- read by chart-surface.tsx
+  // alone, on its own series.update() path (Part 2D), never folded into
+  // `candles` above (rule 3: live ticks never go through the candles prop).
+  forming: LiveTick | null;
 }
 
 const Ctx = createContext<AnalysisWorkspace | null>(null);
@@ -69,6 +90,8 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
 
   const [otherSetups, setOtherSetups] = useState<ApiSetup[]>([]);
   const [otherSetupsLoading, setOtherSetupsLoading] = useState(false);
+
+  const [timeframe, setTimeframeState] = useState<CandleInterval>("1m");
 
   // 1. Instruments, once.
   useEffect(() => {
@@ -128,6 +151,23 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     [instruments, setup],
   );
 
+  // A genuine instrument switch can land on a timeframe the NEW
+  // instrument's own supported_intervals does not have (e.g. 1h was
+  // selected on a crypto instrument, the user then switches to a
+  // non-crypto one that only supports 1m) -- clamp rather than let
+  // useLiveCandles below subscribe with an interval the backend will
+  // reject.
+  useEffect(() => {
+    if (instrument && !instrument.supported_intervals.includes(timeframe)) {
+      setTimeframeState("1m");
+    }
+  }, [instrument, timeframe]);
+
+  function setTimeframe(tf: CandleInterval) {
+    if (instrument && !instrument.supported_intervals.includes(tf)) return;
+    setTimeframeState(tf);
+  }
+
   // 3. Evidence (the setup's own event history).
   useEffect(() => {
     if (!setup) {
@@ -180,18 +220,15 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
   // useLiveCandles already returns ascending order and already
   // subscribes to /ws, filling the review's own item 6 race (a candle
   // closed between this REST fetch and the subscribe) into `history`
-  // itself. No series.update() call happens anywhere in this phase
-  // (Part 2D): a forming/closed/corrected message updates
-  // live.forming, read by nothing yet, and a gap-fill is the only way
-  // `history` (and so the chart) changes after the initial load.
+  // itself.
   //
-  // interval is fixed at "1m": the chart does not react to a timeframe
-  // change yet (ChartSurfaceInner's own comment on chartViewScopeRef
-  // already says so; timeframe only re-scopes the drawing store today
-  // -- live-chart-pipeline brief, Part 2 did not ask this phase to wire
-  // interval-aware fetching, only history+snapshot for whatever
-  // interval is used, flagged here rather than guessed).
-  const live = useLiveCandles(setup?.instrument_id, "1m");
+  // interval is now `timeframe` (Part 4, item 1), not a fixed "1m" --
+  // useLiveCandles' own effect is keyed on [instrumentId, interval], so
+  // React runs the OLD effect's cleanup (which calls live-socket.ts's
+  // own unsubscribe) before the new one subscribes with the new
+  // interval; the old subscription is always released first, nothing
+  // extra is needed here for that.
+  const live = useLiveCandles(setup?.instrument_id, timeframe);
   const candles = useMemo(() => live.history?.candles ?? [], [live.history]);
   const candlesLoading = live.historyLoading;
   const candlesError = useMemo(
@@ -214,6 +251,10 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     candles,
     candlesLoading,
     candlesError,
+    timeframe,
+    setTimeframe,
+    connectionState: live.connectionState,
+    forming: live.forming,
   };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

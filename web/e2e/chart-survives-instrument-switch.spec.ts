@@ -1,49 +1,54 @@
 import { test, expect } from "@playwright/test";
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { AUTH_FILE, type E2EAuthState } from "./global-setup";
 
-// Real stack (live-chart brief, phase 4): the real Vite dev server
-// proxying to the real Go API/worker/Postgres/Redis (docker compose,
-// already running against the dev database, which already has two
-// enabled instruments -- BTC-PERP id=1, ETH-PERP id=2 -- seeded with
-// ~1500 real candles each and real setups). No mocked backend, no
-// fixture-only data path.
-//
-// The session cookie was created through the real signup flow
-// (POST /auth/signup/start -> read the logged verification code from
-// the API container's own logs, since LogMailer writes there in dev ->
-// /verify -> /complete -> /me/profile -> /watchlist -> /me/onboarding/
-// complete), not inserted directly into the database -- the Claude
-// Code auto-mode classifier declined a direct-DB-write attempt for
-// this (a Go program/test connecting straight to the dev database),
-// and going through the real HTTP endpoints is the correct way to do
-// this anyway, not a workaround.
-const SESSION_COOKIE = readFileSync(new URL("./.session-cookie", import.meta.url), "utf-8").trim();
+// Real stack (live-chart brief, phase 4): the production build
+// (pnpm build && pnpm preview, this config's own webServer), proxying
+// to a dedicated api+worker pair against argus_test (never the dev
+// "argus" database -- Makefile's own e2e-stack target). The session,
+// and the BTC-PERP/ETH-PERP instrument ids and a real setup id, all
+// come from global-setup.ts's own run (the real HTTP signup flow, and
+// real GET /instruments and /setups calls) -- nothing here is
+// hardcoded.
+let auth: E2EAuthState;
+
+test.beforeAll(async () => {
+  auth = JSON.parse(await readFile(AUTH_FILE, "utf-8")) as E2EAuthState;
+});
+
+test.beforeEach(async ({ context }) => {
+  const [name, value] = auth.sessionCookie.split("=");
+  await context.addCookies([{ name, value, domain: "localhost", path: "/", httpOnly: true, sameSite: "Lax" }]);
+});
 
 // The instrument picker (ChartToolbar's own SymbolPicker) is a Radix
 // DropdownMenu, not a <select> -- its trigger is the one button with
-// aria-haspopup="menu" (plain text/role queries for "BTC-PERP" match
-// several other elements on the page: the legend, the "other setups on
-// BTC-PERP" strip header, etc.) and its items are menuitem role, not
-// option.
+// aria-haspopup="menu" that plain text/role queries for "BTC-PERP"
+// cannot isolate (several other elements on the page match: the
+// legend, the "other setups on BTC-PERP" strip header, etc.), and its
+// items are menuitem role, not option. .first() is reliable because
+// the toolbar always renders before the drawing-tool buttons that also
+// carry aria-haspopup="menu".
 function symbolPickerTrigger(page: import("@playwright/test").Page) {
   return page.locator('button[aria-haspopup="menu"]').first();
 }
 
-test.beforeEach(async ({ context }) => {
-  await context.addCookies([
-    {
-      name: "argus_session",
-      value: SESSION_COOKIE,
-      domain: "localhost",
-      path: "/",
-      httpOnly: true,
-      sameSite: "Lax",
-    },
-  ]);
-});
+// argus_test (never the dev database) accumulates leftover instruments
+// from this repo's own Go integration-test runs, some enabled and
+// prefixed with the real symbol (e.g. "BTC-PERP-TestIntegration_...").
+// Each menu item's accessible name is "<icon-alt> <symbol> <provider>"
+// (chart-toolbar.tsx), so a plain substring match on "BTC-PERP" hits
+// those leftovers too ("BTC BTC-PERP-TestIntegration..."). Anchoring
+// the provider at the end, with a word boundary before the symbol,
+// is exact enough to exclude every one of those without hardcoding
+// anything not already looked up from the real API in global-setup.
+function symbolMenuItem(page: import("@playwright/test").Page, symbol: string, provider: string) {
+  const escaped = symbol.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+  return page.getByRole("menuitem", { name: new RegExp(`\\b${escaped}\\s+${provider}$`) });
+}
 
 test("switching instrument does not rebuild the chart: same canvas element, no page reload", async ({ page }) => {
-  await page.goto("/analysis?setupId=1&instrumentId=1");
+  await page.goto(`/analysis?setupId=${auth.btcSetupId}&instrumentId=${auth.btcInstrumentId}`);
 
   const canvas = page.locator("canvas").first();
   await expect(canvas).toBeVisible({ timeout: 15_000 });
@@ -68,10 +73,10 @@ test("switching instrument does not rebuild the chart: same canvas element, no p
   // a page.goto() to a new URL would reload the whole app and prove
   // nothing about rebuild avoidance within a live session.
   await symbolPickerTrigger(page).click();
-  await page.getByRole("menuitem", { name: /ETH-PERP/ }).click();
+  await symbolMenuItem(page, "ETH-PERP", auth.ethProvider).click();
 
   await expect(symbolPickerTrigger(page)).toContainText("ETH-PERP", { timeout: 15_000 });
-  await expect(page).toHaveURL(/instrumentId=2/);
+  await expect(page).toHaveURL(new RegExp(`instrumentId=${auth.ethInstrumentId}`));
 
   const pageMarkerSurvived = await page.evaluate(
     () => (window as unknown as { __pwMarker?: string }).__pwMarker,
@@ -85,7 +90,7 @@ test("switching instrument does not rebuild the chart: same canvas element, no p
 });
 
 test("switching instrument and back keeps the saved chart view for each instrument's own scope", async ({ page }) => {
-  await page.goto("/analysis?setupId=1&instrumentId=1");
+  await page.goto(`/analysis?setupId=${auth.btcSetupId}&instrumentId=${auth.btcInstrumentId}`);
   await expect(page.locator("canvas").first()).toBeVisible({ timeout: 15_000 });
 
   // Zoom in on BTC's own chart (mouse wheel over the chart host),
@@ -105,11 +110,11 @@ test("switching instrument and back keeps the saved chart view for each instrume
 
   // Switch to ETH, then back to BTC via the real UI.
   await symbolPickerTrigger(page).click();
-  await page.getByRole("menuitem", { name: /ETH-PERP/ }).click();
+  await symbolMenuItem(page, "ETH-PERP", auth.ethProvider).click();
   await expect(symbolPickerTrigger(page)).toContainText("ETH-PERP", { timeout: 15_000 });
 
   await symbolPickerTrigger(page).click();
-  await page.getByRole("menuitem", { name: /BTC-PERP/ }).click();
+  await symbolMenuItem(page, "BTC-PERP", auth.btcProvider).click();
   await expect(symbolPickerTrigger(page)).toContainText("BTC-PERP", { timeout: 15_000 });
 
   // BTC's own saved view is untouched by the trip through ETH -- it

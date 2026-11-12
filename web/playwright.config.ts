@@ -1,19 +1,30 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// Against the real stack (live-chart brief, phase 4): the real Vite
-// dev server, proxying to the real Go API/worker/Postgres/Redis
-// (docker compose, already running) -- never a mocked backend.
-// webServer is left unset deliberately: the dev server and the
-// backend containers are started once, outside this config, and
-// reused across runs rather than this file owning their lifecycle
-// (the backend is a whole docker-compose stack, not something
-// Playwright itself should start/stop per test run).
+// Against the real stack (live-chart brief, phase 4), but never the dev
+// one: the production build (pnpm build, then pnpm preview -- not the
+// dev server, which skips bundling/minification entirely), proxying to
+// a dedicated backend on argus_test (never the dev "argus" database --
+// `make e2e-stack`, documented in README's own "Running the e2e suite"
+// section and in this repo's web/e2e/README.md).
+const E2E_API_PORT = process.env.E2E_API_PORT ?? "8090";
+const BASE_URL = "http://localhost:4173";
+
 export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
+  fullyParallel: false, // the whole suite shares one backend + one throwaway user from globalSetup
+  globalSetup: "./e2e/global-setup.ts",
+  globalTeardown: "./e2e/global-teardown.ts",
   use: {
-    baseURL: "http://localhost:5173",
+    baseURL: BASE_URL,
     screenshot: "only-on-failure",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  webServer: {
+    command: "pnpm build && pnpm preview",
+    url: BASE_URL,
+    reuseExistingServer: false,
+    timeout: 60_000,
+    env: { E2E_API_PORT },
+  },
 });

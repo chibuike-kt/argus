@@ -4,6 +4,16 @@ MIGRATE_VERSION := v4.17.1
 DB_URL ?= postgres://argus:argus@localhost:5432/argus?sslmode=disable
 MIGRATIONS_DIR := db/migrations
 
+# e2e-stack's own target database/cache/port -- always argus_test, never
+# the dev argus database (web/e2e's own Playwright suite, live-chart
+# brief phase 4). Redis logical DB 14 is distinct from the dev worker's
+# own 0 and the Go integration suite's own 15, so none of the three can
+# cross-publish on the same pub/sub channels.
+E2E_DB_URL ?= postgres://argus:argus@localhost:5432/argus_test?sslmode=disable
+E2E_REDIS_URL ?= redis://localhost:6379/14
+E2E_HTTP_PORT ?= 8090
+E2E_API_LOG := /tmp/argus-e2e-api.log
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -108,3 +118,11 @@ web-dev: ## Run the frontend dev server
 .PHONY: web-build
 web-build: ## Build the frontend
 	cd web && (pnpm build || npm run build)
+
+.PHONY: e2e-stack
+e2e-stack: ## THE ONE COMMAND for web/e2e's own backend: migrates + seeds + ingests the dev fixture into argus_test (never argus), then runs a dedicated api+worker pair on E2E_HTTP_PORT (default 8090), with CORS/CSRF allowing Vite preview's own origin (4173). Needs: make infra running first (postgres+redis). Blocks in the foreground (Ctrl-C stops both); api's own stdout/stderr -- including the dev mailer's logged signup codes -- goes to $(E2E_API_LOG), which web/e2e's own global setup reads.
+	$(MAKE) migrate-up DB_URL="$(E2E_DB_URL)"
+	$(MAKE) seed-dev DB_URL="$(E2E_DB_URL)"
+	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_DEV_FIXTURE_INGEST=true go run ./cmd/argus-worker &
+	sleep 2
+	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_AUTH_ALLOWED_ORIGINS="http://localhost:4173,http://127.0.0.1:4173" go run ./cmd/argus-api 2>&1 | tee "$(E2E_API_LOG)"
