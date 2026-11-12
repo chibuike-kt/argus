@@ -68,13 +68,14 @@ func testIngestionInstrument(t *testing.T, db *sql.DB) (id int64, symbol string)
 	symbol = fmt.Sprintf("ING-%s-%d", t.Name(), time.Now().UnixNano())
 
 	inst, err := instruments.NewStore(db).Insert(context.Background(), instruments.NewInstrumentParams{
-		Provider:     "fixture",
-		NativeSymbol: symbol,
-		AssetClass:   "crypto_perp",
-		PriceScale:   &priceScale,
-		QtyScale:     &qtyScale,
-		TickSize:     1,
-		QtyStepSize:  1,
+		Provider:           "fixture",
+		NativeSymbol:       symbol,
+		AssetClass:         "crypto_perp",
+		PriceScale:         &priceScale,
+		QtyScale:           &qtyScale,
+		TickSize:           1,
+		QtyStepSize:        1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("create test instrument: %v", err)

@@ -58,6 +58,7 @@ func testInstrument(t *testing.T, db *sql.DB) int64 {
 	inst, err := instruments.NewStore(db).Insert(context.Background(), instruments.NewInstrumentParams{
 		Provider: "test-provider", NativeSymbol: symbol, AssetClass: "crypto_perp",
 		PriceScale: &priceScale, QtyScale: &qtyScale, TickSize: 1, QtyStepSize: 1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("create test instrument: %v", err)

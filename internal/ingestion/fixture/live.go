@@ -11,23 +11,8 @@ import (
 	"github.com/chibuike-kt/argus/internal/quant"
 )
 
-// LiveGenerator implements ingestion.Provider by generating new candles
-// forward from a starting price, never replaying recorded history (that
-// is Provider's own job, via the embedded-in-devfixture.go one-time
-// IngestHistorical call) -- this is Part 2G's own answer to
-// devfixture.go's own doc comment ("a later brief can add a live stream
-// if an ongoing feed is genuinely needed to demonstrate something
-// [IngestHistorical] does not"): watching a forming candle visibly move
-// and a new one appear at the boundary needs candles that keep arriving
-// after startup, which replaying a fixed, already-ingested dataset
-// cannot do no matter how many times it is repeated (idempotent
-// redelivery of identical values, not new data).
-//
-// DEV/TEST ONLY, same as the rest of this package (ADR-007 is open; no
-// code path here or in cmd/argus-worker enables an instrument). Prices
-// are a random walk in integer tick_size steps (CLAUDE.md section 13:
-// never float64 for a price) -- plausible movement for watching candles
-// change, not a market simulation with any claim to realism.
+// LiveGeneratorConfig configures LiveGenerator -- see its own doc
+// comment for what this type is for and why it exists.
 type LiveGeneratorConfig struct {
 	// StartPrices seeds each symbol's own walk at its own last
 	// historical close, read by the caller from the same dataset
@@ -78,8 +63,23 @@ type LiveGeneratorConfig struct {
 	Seed int64
 }
 
-// LiveGenerator is dev/test tooling, never a real ingestion.Provider --
-// see this file's own package doc comment.
+// LiveGenerator implements ingestion.Provider by generating new candles
+// forward from a starting price, never replaying recorded history (that
+// is Provider's own job, via the embedded-in-devfixture.go one-time
+// IngestHistorical call) -- this is Part 2G's own answer to
+// devfixture.go's own doc comment ("a later brief can add a live stream
+// if an ongoing feed is genuinely needed to demonstrate something
+// [IngestHistorical] does not"): watching a forming candle visibly move
+// and a new one appear at the boundary needs candles that keep arriving
+// after startup, which replaying a fixed, already-ingested dataset
+// cannot do no matter how many times it is repeated (idempotent
+// redelivery of identical values, not new data).
+//
+// DEV/TEST ONLY, same as the rest of this package (ADR-007 is open; no
+// code path here or in cmd/argus-worker enables an instrument). Prices
+// are a random walk in integer tick_size steps (CLAUDE.md section 13:
+// never float64 for a price) -- plausible movement for watching candles
+// change, not a market simulation with any claim to realism.
 type LiveGenerator struct {
 	cfg   LiveGeneratorConfig
 	clk   clock.Clock
@@ -110,28 +110,35 @@ func NewLiveGenerator(cfg LiveGeneratorConfig, clk clock.Clock, sleep func(ctx c
 	return &LiveGenerator{cfg: cfg, clk: clk, sleep: sleep}
 }
 
+// symbolSeed derives a per-symbol seed from base so two symbols sharing
+// one LiveGenerator never walk in lockstep. The uint64->int64
+// conversion wraps on overflow by design -- this only ever feeds
+// math/rand's own seed, never a security- or money-relevant value.
 func symbolSeed(base int64, symbol string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(symbol))
-	return base ^ int64(h.Sum64())
+	return base ^ int64(h.Sum64()) //nolint:gosec // seeds a PRNG for demo data, wraparound is harmless
 }
 
-// Instruments/HistoricalCandles/StreamQuotes are never called by
-// cmd/argus-worker's own live-replay wiring (WatchCandles only reaches
-// StreamCandles) -- implemented as empty/blocking stubs purely to
-// satisfy ingestion.Provider, the same composition-over-reimplementation
-// choice ScriptedProvider makes by embedding a real Provider for these;
-// this type has no recorded dataset to delegate to, so a stub is
-// simpler and equally correct for a type that is never asked to do more
-// than stream live candles.
+// Instruments is never called by cmd/argus-worker's own live-replay
+// wiring (WatchCandles only reaches StreamCandles) -- an empty stub
+// purely to satisfy ingestion.Provider, the same composition-over-
+// reimplementation choice ScriptedProvider makes by embedding a real
+// Provider for these; this type has no recorded dataset to delegate
+// to, so a stub is simpler and equally correct for a type that is
+// never asked to do more than stream live candles.
 func (g *LiveGenerator) Instruments(_ context.Context) ([]ingestion.ProviderInstrument, error) {
 	return nil, nil
 }
 
+// HistoricalCandles is Instruments' own sibling stub -- see its doc
+// comment.
 func (g *LiveGenerator) HistoricalCandles(_ context.Context, _ string, _, _ time.Time) ([]ingestion.ProviderCandle, error) {
 	return nil, nil
 }
 
+// StreamQuotes is Instruments' own sibling stub -- see its doc
+// comment.
 func (g *LiveGenerator) StreamQuotes(ctx context.Context, _ string, _ func(ctx context.Context, q ingestion.ProviderQuote) error) error {
 	<-ctx.Done()
 	return nil

@@ -172,6 +172,7 @@ func seedDevFixtureInstrument(t *testing.T, db *sql.DB, store *instruments.Store
 	inst, err := store.Insert(context.Background(), instruments.NewInstrumentParams{
 		Provider: devFixtureProviderName, NativeSymbol: symbol, AssetClass: "crypto_perp",
 		PriceScale: &priceScale, QtyScale: &qtyScale, TickSize: 1, QtyStepSize: 1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("create dev fixture instrument: %v", err)

@@ -82,13 +82,14 @@ func TestIntegration_Insert_WithExplicitScale_Succeeds(t *testing.T) {
 	qtyScale := quant.Scale(6)
 
 	inst, err := store.Insert(context.Background(), NewInstrumentParams{
-		Provider:     "test-provider",
-		NativeSymbol: fmt.Sprintf("OK-%d", time.Now().UnixNano()),
-		AssetClass:   "crypto_perp",
-		PriceScale:   &priceScale,
-		QtyScale:     &qtyScale,
-		TickSize:     1,
-		QtyStepSize:  1,
+		Provider:           "test-provider",
+		NativeSymbol:       fmt.Sprintf("OK-%d", time.Now().UnixNano()),
+		AssetClass:         "crypto_perp",
+		PriceScale:         &priceScale,
+		QtyScale:           &qtyScale,
+		TickSize:           1,
+		QtyStepSize:        1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("Insert with explicit scale: %v", err)
@@ -114,13 +115,14 @@ func TestIntegration_Insert_DuplicateProviderSymbol_Rejected(t *testing.T) {
 	symbol := fmt.Sprintf("DUP-%d", time.Now().UnixNano())
 
 	params := NewInstrumentParams{
-		Provider:     "test-provider",
-		NativeSymbol: symbol,
-		AssetClass:   "crypto_perp",
-		PriceScale:   &priceScale,
-		QtyScale:     &qtyScale,
-		TickSize:     1,
-		QtyStepSize:  1,
+		Provider:           "test-provider",
+		NativeSymbol:       symbol,
+		AssetClass:         "crypto_perp",
+		PriceScale:         &priceScale,
+		QtyScale:           &qtyScale,
+		TickSize:           1,
+		QtyStepSize:        1,
+		SupportedIntervals: []string{"1m"},
 	}
 	if _, err := store.Insert(context.Background(), params); err != nil {
 		t.Fatalf("first Insert: %v", err)
@@ -143,13 +145,14 @@ func TestIntegration_ScaleIsImmutable(t *testing.T) {
 	qtyScale := quant.Scale(6)
 
 	inst, err := store.Insert(context.Background(), NewInstrumentParams{
-		Provider:     "test-provider",
-		NativeSymbol: fmt.Sprintf("IMMUT-%d", time.Now().UnixNano()),
-		AssetClass:   "crypto_perp",
-		PriceScale:   &priceScale,
-		QtyScale:     &qtyScale,
-		TickSize:     1,
-		QtyStepSize:  1,
+		Provider:           "test-provider",
+		NativeSymbol:       fmt.Sprintf("IMMUT-%d", time.Now().UnixNano()),
+		AssetClass:         "crypto_perp",
+		PriceScale:         &priceScale,
+		QtyScale:           &qtyScale,
+		TickSize:           1,
+		QtyStepSize:        1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("Insert: %v", err)
@@ -196,13 +199,14 @@ func TestIntegration_ListAllFiltered_KeysetAndLimit(t *testing.T) {
 	qtyScale := quant.Scale(6)
 	insertOne := func(label string) Instrument {
 		inst, err := store.Insert(ctx, NewInstrumentParams{
-			Provider:     "test-provider",
-			NativeSymbol: fmt.Sprintf("PAGE-%s-%d", label, time.Now().UnixNano()),
-			AssetClass:   "crypto_perp",
-			PriceScale:   &priceScale,
-			QtyScale:     &qtyScale,
-			TickSize:     1,
-			QtyStepSize:  1,
+			Provider:           "test-provider",
+			NativeSymbol:       fmt.Sprintf("PAGE-%s-%d", label, time.Now().UnixNano()),
+			AssetClass:         "crypto_perp",
+			PriceScale:         &priceScale,
+			QtyScale:           &qtyScale,
+			TickSize:           1,
+			QtyStepSize:        1,
+			SupportedIntervals: []string{"1m"},
 		})
 		if err != nil {
 			t.Fatalf("Insert (%s): %v", label, err)
@@ -268,13 +272,14 @@ func TestIntegration_ListAllFiltered_EnabledFilter(t *testing.T) {
 	qtyScale := quant.Scale(6)
 	insertOne := func(label string) Instrument {
 		inst, err := store.Insert(ctx, NewInstrumentParams{
-			Provider:     "test-provider",
-			NativeSymbol: fmt.Sprintf("ENABLED-%s-%d", label, time.Now().UnixNano()),
-			AssetClass:   "crypto_perp",
-			PriceScale:   &priceScale,
-			QtyScale:     &qtyScale,
-			TickSize:     1,
-			QtyStepSize:  1,
+			Provider:           "test-provider",
+			NativeSymbol:       fmt.Sprintf("ENABLED-%s-%d", label, time.Now().UnixNano()),
+			AssetClass:         "crypto_perp",
+			PriceScale:         &priceScale,
+			QtyScale:           &qtyScale,
+			TickSize:           1,
+			QtyStepSize:        1,
+			SupportedIntervals: []string{"1m"},
 		})
 		if err != nil {
 			t.Fatalf("Insert (%s): %v", label, err)

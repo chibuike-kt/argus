@@ -258,6 +258,7 @@ func TestIntegration_WS_EndToEnd_SubscribeFormingClosed(t *testing.T) {
 	inst, err := instrumentsStore.Insert(context.Background(), instruments.NewInstrumentParams{
 		Provider: providerName, NativeSymbol: symbol, AssetClass: "crypto_perp",
 		PriceScale: &priceScale, QtyScale: &qtyScale, TickSize: 1, QtyStepSize: 1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("insert instrument: %v", err)
@@ -355,6 +356,7 @@ func TestIntegration_WS_RedisDrop_RecoversViaSequenceGap(t *testing.T) {
 	inst, err := instrumentsStore.Insert(context.Background(), instruments.NewInstrumentParams{
 		Provider: "redisdrop-test", NativeSymbol: symbol, AssetClass: "crypto_perp",
 		PriceScale: &priceScale, QtyScale: &qtyScale, TickSize: 1, QtyStepSize: 1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("insert instrument: %v", err)

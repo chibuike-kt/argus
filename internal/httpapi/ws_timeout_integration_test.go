@@ -58,6 +58,7 @@ func wsTimeoutTestFixture(t *testing.T, readTimeout, writeTimeout, heartbeatInte
 	inst, err := instrumentsStore.Insert(context.Background(), instruments.NewInstrumentParams{
 		Provider: "timeout-test", NativeSymbol: symbol, AssetClass: "crypto_perp",
 		PriceScale: &priceScale, QtyScale: &qtyScale, TickSize: 1, QtyStepSize: 1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("insert instrument: %v", err)

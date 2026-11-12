@@ -11,13 +11,14 @@ func validParams() NewInstrumentParams {
 	priceScale := quant.Scale(2)
 	qtyScale := quant.Scale(6)
 	return NewInstrumentParams{
-		Provider:     "binance",
-		NativeSymbol: "BTCUSDT",
-		AssetClass:   "crypto_perp",
-		PriceScale:   &priceScale,
-		QtyScale:     &qtyScale,
-		TickSize:     1,
-		QtyStepSize:  1,
+		Provider:           "binance",
+		NativeSymbol:       "BTCUSDT",
+		AssetClass:         "crypto_perp",
+		PriceScale:         &priceScale,
+		QtyScale:           &qtyScale,
+		TickSize:           1,
+		QtyStepSize:        1,
+		SupportedIntervals: []string{"1m"},
 	}
 }
 
@@ -39,6 +40,16 @@ func TestNewInstrumentParams_Validate(t *testing.T) {
 		{"nil qty scale", func(p *NewInstrumentParams) { p.QtyScale = nil }, ErrQtyScaleRequired},
 		{"negative tick size", func(p *NewInstrumentParams) { p.TickSize = -1 }, ErrTickSizeNegative},
 		{"negative qty step size", func(p *NewInstrumentParams) { p.QtyStepSize = -1 }, ErrQtyStepSizeNegative},
+		{
+			"empty supported_intervals (owner approved 12 November 2026)",
+			func(p *NewInstrumentParams) { p.SupportedIntervals = nil },
+			ErrSupportedIntervalsMissing1m,
+		},
+		{
+			"supported_intervals set but missing 1m -- the refusal is specifically about 1m, not just non-empty",
+			func(p *NewInstrumentParams) { p.SupportedIntervals = []string{"5m", "15m"} },
+			ErrSupportedIntervalsMissing1m,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
