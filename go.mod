@@ -4,6 +4,7 @@ go 1.26.11
 
 require (
 	github.com/caarlos0/env/v11 v11.2.0
+	github.com/coder/websocket v1.8.15
 	github.com/getkin/kin-openapi v0.152.0
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/joho/godotenv v1.5.1
@@ -16,7 +17,6 @@ require (
 require (
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/go-openapi/jsonpointer v0.22.5 // indirect
 	github.com/go-openapi/swag/jsonname v0.25.5 // indirect

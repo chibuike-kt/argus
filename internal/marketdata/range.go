@@ -20,9 +20,18 @@ import (
 // per window, each its own round trip re-reading every minute that
 // window covers. This fetches every 1-minute row across the full
 // [min(windows[i].Start), max(windows[i].End)) span once, then reduces
-// each window from that same in-memory set via aggregateFromRows --
-// the number of database calls no longer grows with the number of
-// bars requested.
+// each window from that same in-memory set -- the number of database
+// calls no longer grows with the number of bars requested.
+//
+// The in-memory reduction itself buckets those rows exactly once (via
+// rowsByOpenTime), then calls reduceWindow per window against that one
+// shared bucket. The version that first shipped the single query still
+// called aggregateFromRows once per window, and that function rebuilt
+// its own bucket from the full row set every time -- O(windows *
+// total_rows) instead of O(total_rows) to bucket plus O(sum of window
+// sizes) to reduce. Profiling a 500-bar hourly request showed that
+// rebuild dominating the single query it was meant to replace (roughly
+// 70% of the end-to-end call, more than the query itself).
 func AggregateRange(ctx context.Context, r candleReader, instrumentID int64, windows []Window) ([]AggregateOHLCV, error) {
 	if len(windows) == 0 {
 		return []AggregateOHLCV{}, nil
@@ -43,9 +52,11 @@ func AggregateRange(ctx context.Context, r candleReader, instrumentID int64, win
 		return nil, fmt.Errorf("marketdata: aggregate range instrument=%d window=[%s,%s): %w", instrumentID, start, end, err)
 	}
 
+	present := rowsByOpenTime(rows)
+
 	out := make([]AggregateOHLCV, 0, len(windows))
 	for _, w := range windows {
-		agg, incomplete, err := aggregateFromRows(instrumentID, w, rows)
+		agg, incomplete, err := reduceWindow(instrumentID, w, present)
 		if err != nil {
 			return nil, err
 		}

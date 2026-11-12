@@ -117,3 +117,83 @@ func TestAggregateRange_OneQueryRegardlessOfWindowCount(t *testing.T) {
 		t.Errorf("calls = %d, want exactly 1 for %d windows (addendum item B)", r.calls, hours)
 	}
 }
+
+// TestAggregateRange_BucketedReduction_MatchesPerWindowAggregate proves
+// the bucket-once-per-request reduction (rowsByOpenTime built once by
+// AggregateRange, reduceWindow run per window against that one shared
+// bucket) produces byte-identical output to calling Aggregate
+// individually per window -- Aggregate's own path independently fetches
+// and buckets for just that one window every time, so any divergence
+// here would mean the shared-bucket optimization changed behavior, not
+// just performance. Covers the same 500-bar hourly shape the addendum's
+// own timing ask uses, with deliberate gaps (incomplete windows must
+// still be excluded identically) and a correction (the derived-revision
+// sum must still come out identically through the shared bucket).
+func TestAggregateRange_BucketedReduction_MatchesPerWindowAggregate(t *testing.T) {
+	r := newFakeCandleReader()
+	base := utc(2026, time.October, 1, 0, 0)
+	const hours = 500
+	for h := 0; h < hours; h++ {
+		for m := 0; m < 60; m++ {
+			if h%7 == 3 && m == 42 {
+				continue // a deliberate gap: hour h%7==3 is incomplete
+			}
+			r.put(base.Add(time.Duration(h)*time.Hour+time.Duration(m)*time.Minute), true, 100+int64(m), 110+int64(m), 95+int64(m), 105+int64(m), 10+int64(m))
+		}
+	}
+	// A correction inside an otherwise-complete hour, so that window's
+	// own derived revision must come out as 2 through both paths.
+	r.putRevision(base.Add(11*time.Hour+30*time.Minute), 2)
+
+	windows := WindowsInRange(base, base.Add(hours*time.Hour), time.Hour, false, hours)
+	if len(windows) != hours {
+		t.Fatalf("test setup error: got %d windows, want %d", len(windows), hours)
+	}
+
+	gotRange, err := AggregateRange(context.Background(), r, 1, windows)
+	if err != nil {
+		t.Fatalf("AggregateRange: %v", err)
+	}
+
+	var gotIndividual []AggregateOHLCV
+	for _, w := range windows {
+		agg, incomplete, err := Aggregate(context.Background(), r, 1, w)
+		if err != nil {
+			t.Fatalf("Aggregate(%s): %v", w.Start, err)
+		}
+		if incomplete != nil {
+			continue
+		}
+		gotIndividual = append(gotIndividual, *agg)
+	}
+
+	if len(gotRange) != len(gotIndividual) {
+		t.Fatalf("AggregateRange returned %d complete windows, per-window Aggregate returned %d -- want identical counts", len(gotRange), len(gotIndividual))
+	}
+	for i := range gotRange {
+		if gotRange[i] != gotIndividual[i] {
+			t.Errorf("window %d: AggregateRange = %+v, per-window Aggregate = %+v -- want byte identical", i, gotRange[i], gotIndividual[i])
+		}
+	}
+
+	// Sanity: the gap and the correction were actually exercised, not
+	// silently absent from both paths alike.
+	wantIncomplete := 0
+	for h := 0; h < hours; h++ {
+		if h%7 == 3 {
+			wantIncomplete++
+		}
+	}
+	if len(gotRange) != hours-wantIncomplete {
+		t.Fatalf("got %d complete windows, want %d (%d hours minus %d deliberately gapped)", len(gotRange), hours-wantIncomplete, hours, wantIncomplete)
+	}
+	foundCorrected := false
+	for _, agg := range gotRange {
+		if agg.Revision == 2 {
+			foundCorrected = true
+		}
+	}
+	if !foundCorrected {
+		t.Error("no window came back with Revision=2 -- the deliberate correction was not exercised by this test")
+	}
+}

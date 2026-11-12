@@ -64,10 +64,15 @@ func partialFromRows(w Window, rows []store.Candle) (PartialAggregate, error) {
 		return PartialAggregate{}, err
 	}
 
-	present := make(map[time.Time]store.Candle, len(rows))
+	// Keyed by UnixNano of the UTC instant, not by time.Time -- see
+	// aggregate.go's aggregateFromRows for why a raw time.Time map key
+	// silently fails to match rows read back from a Postgres server
+	// whose own "TimeZone" session setting is a UTC-equivalent but
+	// non-literal zone name (e.g. "Etc/UTC").
+	present := make(map[int64]store.Candle, len(rows))
 	for _, row := range rows {
 		if !row.OpenTime.Before(w.Start.Time()) && row.OpenTime.Before(w.End.Time()) {
-			present[row.OpenTime] = row
+			present[row.OpenTime.UTC().UnixNano()] = row
 		}
 	}
 
@@ -77,7 +82,7 @@ func partialFromRows(w Window, rows []store.Candle) (PartialAggregate, error) {
 	first := true
 	for i := 0; i < expected; i++ {
 		slot := w.Start.Time().Add(time.Duration(i) * time.Minute)
-		row, ok := present[slot]
+		row, ok := present[slot.UTC().UnixNano()]
 		if !ok {
 			continue // a gap, or a minute that has not happened yet: skip, do not guess
 		}
