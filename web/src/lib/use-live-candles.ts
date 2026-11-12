@@ -28,6 +28,7 @@ import {
   type WireCandlePayload,
   type WireErrorPayload,
   type WireSnapshotPayload,
+  type WireStatusPayload,
 } from "./live-socket";
 import { checkSnapshotGap, INTERVAL_MS } from "./live-candles-reducer";
 
@@ -48,6 +49,15 @@ export interface UseLiveCandlesResult {
   // never surfaced here.
   forming: LiveTick | null;
   lastError: WireErrorPayload | null;
+  // Part 2F: the server's own freshness verdict for this subscription
+  // (live/stale/degraded) and provider name -- read directly off the
+  // wire's own `status` message, never derived or guessed client-side.
+  // null until the first one arrives.
+  status: WireStatusPayload | null;
+  // Part 2E: set when the connection closed for a reason this client
+  // will not retry (the session itself is invalid) -- a caller shows
+  // this instead of a spinner, since no amount of waiting fixes it.
+  fatalReason: string | null;
 }
 
 export function useLiveCandles(instrumentId: number | undefined, interval: CandleInterval): UseLiveCandlesResult {
@@ -57,6 +67,8 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
   const [connectionState, setConnectionState] = useState<ConnectionState>("closed");
   const [forming, setForming] = useState<LiveTick | null>(null);
   const [lastError, setLastError] = useState<WireErrorPayload | null>(null);
+  const [status, setStatus] = useState<WireStatusPayload | null>(null);
+  const [fatalReason, setFatalReason] = useState<string | null>(null);
 
   // historyRef mirrors `history` for the gap-check and the live-socket
   // callbacks below, which run outside React's own render cycle and
@@ -77,6 +89,8 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
       setHistoryLoading(false);
       setHistoryError(null);
       setForming(null);
+      setStatus(null);
+      setFatalReason(null);
       return;
     }
 
@@ -94,6 +108,8 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
     // effect must never apply that stale tick to the freshly-loaded
     // chart in the meantime.
     setForming(null);
+    setStatus(null);
+    setFatalReason(null);
 
     listInstrumentCandles(
       instrumentId,
@@ -128,6 +144,8 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
       // instead of series.update().
       onCandleCorrected: (payload) => refetchAndMergeCorrection(instrumentId, interval, payload.open_time),
       onError: (payload) => setLastError(payload),
+      onStatus: (payload) => setStatus(payload),
+      onFatalClose: (reason) => setFatalReason(reason),
     });
 
     function applySnapshot(id: number, iv: CandleInterval, payload: WireSnapshotPayload, seq: number) {
@@ -187,5 +205,5 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
     };
   }, [instrumentId, interval]);
 
-  return { history, historyLoading, historyError, connectionState, forming, lastError };
+  return { history, historyLoading, historyError, connectionState, forming, lastError, status, fatalReason };
 }

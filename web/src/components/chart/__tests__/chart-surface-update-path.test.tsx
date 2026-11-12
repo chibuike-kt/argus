@@ -105,15 +105,35 @@ function Providers({ children }: { children: React.ReactNode }) {
   );
 }
 
-type HarnessProps = Omit<ChartSurfaceInnerProps, "loading" | "loadError" | "forming"> & {
+type HarnessProps = Omit<
+  ChartSurfaceInnerProps,
+  "loading" | "loadError" | "forming" | "connectionState" | "status" | "fatalReason"
+> & {
   forming?: ChartSurfaceInnerProps["forming"];
+  connectionState?: ChartSurfaceInnerProps["connectionState"];
+  status?: ChartSurfaceInnerProps["status"];
+  fatalReason?: ChartSurfaceInnerProps["fatalReason"];
 };
 
-function Harness({ forming = null, ...props }: HarnessProps) {
+function Harness({
+  forming = null,
+  connectionState = "open",
+  status = null,
+  fatalReason = null,
+  ...props
+}: HarnessProps) {
   return (
     <Providers>
       <AddOneDrawing onReady={() => {}} />
-      <ChartSurfaceInner {...props} forming={forming} loading={false} loadError={undefined} />
+      <ChartSurfaceInner
+        {...props}
+        forming={forming}
+        connectionState={connectionState}
+        status={status}
+        fatalReason={fatalReason}
+        loading={false}
+        loadError={undefined}
+      />
     </Providers>
   );
 }
@@ -204,6 +224,9 @@ describe("switching instrument or interval does not rebuild the chart", () => {
           plan={basePlan}
           formationOutsideWindow={false}
           forming={null}
+          connectionState="open"
+          status={null}
+          fatalReason={null}
         />
       </Providers>,
     );
@@ -223,6 +246,9 @@ describe("switching instrument or interval does not rebuild the chart", () => {
           plan={{ ...basePlan, fromTime: candleSet(8, 200)[0].openTime }}
           formationOutsideWindow={false}
           forming={null}
+          connectionState="open"
+          status={null}
+          fatalReason={null}
         />
       </Providers>,
     );

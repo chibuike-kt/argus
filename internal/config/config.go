@@ -55,6 +55,30 @@ type Config struct {
 	// accidentally interpreted as "safe to enable this too". Defaulted
 	// false; opt in explicitly.
 	DevFixtureIngest bool `env:"ARGUS_DEV_FIXTURE_INGEST" envDefault:"false"`
+
+	// DevFixtureLiveReplay turns on cmd/argus-worker's own live
+	// candle generator (internal/ingestion/fixture.LiveGenerator,
+	// live-chart-pipeline brief Part 2G) -- new candles forming and
+	// closing forward from each seeded instrument's own last
+	// historical close, published through the hub exactly like a
+	// real provider's candles would be, so a human can watch ticks
+	// move on screen (this brief's own report: "what I will use to
+	// watch ticks move on screen"). Separate from DevFixtureIngest
+	// (the one-time historical backfill) because IngestHistorical
+	// replaying the SAME recorded dataset again would only redeliver
+	// identical, already-closed candles (devfixture.go's own doc
+	// comment) -- it cannot show a forming candle moving or a new one
+	// appearing at a boundary. Same safety posture: never true in a
+	// real deployment, opt in explicitly, defaulted false.
+	DevFixtureLiveReplay bool `env:"ARGUS_DEV_FIXTURE_LIVE_REPLAY" envDefault:"false"`
+
+	// DevFixtureLiveReplaySpeed scales simulated time against real
+	// time for DevFixtureLiveReplay (fixture.LiveGeneratorConfig's own
+	// Speed) -- [U], a demo/legibility choice, not a measured value.
+	// Placeholder 60: one simulated 1-minute candle every real second,
+	// so a human watching the chart sees a new candle about once a
+	// second instead of waiting a full minute for each one.
+	DevFixtureLiveReplaySpeed float64 `env:"ARGUS_DEV_FIXTURE_LIVE_REPLAY_SPEED" envDefault:"60"` // [U]
 }
 
 // Load reads a local .env file when present, parses the environment and

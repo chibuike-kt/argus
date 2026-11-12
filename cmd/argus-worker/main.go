@@ -83,16 +83,34 @@ func main() {
 
 	proc := newProcessor(db, logger, clk, instrumentStore, candleSource, engine, analysisStore, setupsStore, cursorStore)
 
-	if cfg.DevFixtureIngest {
-		logger.Warn("worker: ARGUS_DEV_FIXTURE_INGEST is enabled -- replaying the checked-in dev dataset, never do this against a production database")
+	if cfg.DevFixtureIngest || cfg.DevFixtureLiveReplay {
 		devData, err := fixture.DevDataset()
 		if err != nil {
 			logger.Error("startup: load dev dataset", "error", err)
 			os.Exit(1)
 		}
-		if err := runDevFixtureIngest(ctx, logger, devData, instrumentStore, marketdataStore, candlePublisher); err != nil {
-			logger.Error("startup: dev fixture ingest failed", "error", err)
-			os.Exit(1)
+
+		if cfg.DevFixtureIngest {
+			logger.Warn("worker: ARGUS_DEV_FIXTURE_INGEST is enabled -- replaying the checked-in dev dataset, never do this against a production database")
+			if err := runDevFixtureIngest(ctx, logger, devData, instrumentStore, marketdataStore, candlePublisher); err != nil {
+				logger.Error("startup: dev fixture ingest failed", "error", err)
+				os.Exit(1)
+			}
+		}
+
+		// Part 2G: a continuing live feed, separate from the one-time
+		// historical backfill above -- see startDevFixtureLiveReplay's
+		// own doc comment on why IngestHistorical alone cannot show a
+		// forming candle moving or a new one appearing at a boundary.
+		// Seeded from devData regardless of whether DevFixtureIngest
+		// also ran this time (idempotent re-runs, or a database that
+		// was already seeded by an earlier run) -- it reads the
+		// dataset file's own last recorded close, not the database.
+		if cfg.DevFixtureLiveReplay {
+			if err := startDevFixtureLiveReplay(ctx, logger, cfg.DevFixtureLiveReplaySpeed, devData, instrumentStore, marketdataStore, candlePublisher, clk); err != nil {
+				logger.Error("startup: dev fixture live replay failed", "error", err)
+				os.Exit(1)
+			}
 		}
 	}
 

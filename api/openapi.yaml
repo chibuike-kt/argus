@@ -107,9 +107,13 @@ paths:
         (web-wiring-polish brief, item 1) for 1m; above 1m both from and to
         are required regardless of order (see the handler's own comment on
         why the open-ended "latest N" shortcut is not built for aggregated
-        intervals). Calendar-aware (session-bounded) windows for forex are
-        not built: an interval above 1m for a non-crypto instrument is a
-        400, not a guess at session boundaries.
+        intervals). Which intervals this endpoint serves for a given
+        instrument is read entirely from that instrument's own
+        supported_intervals (owner approved 12 November 2026) -- an
+        interval not in that list is a 400, never an asset-class guess.
+        Calendar-aware (session-bounded) windows for forex are not built,
+        which is exactly why a forex instrument's own row does not list
+        anything above 1m today.
       parameters:
         - name: id
           in: path
@@ -124,9 +128,10 @@ paths:
             1m (default): the canonical series, served directly. 5m, 15m,
             1h, 4h, 1d: computed on read by server-side aggregation: never
             built client-side, so the live stream and REST history always
-            agree. Any other value is a 400. Above 1m, only crypto
-            instruments are served today (a clear 400 otherwise) --
-            calendar-aware forex windows are a later brief.
+            agree. Any other value is a 400. Whether a given interval is
+            served for this instrument is read from its own
+            supported_intervals, not guessed from asset class -- an
+            interval not in that list is a clear 400.
           schema:
             type: string
             enum: [1m, 5m, 15m, 1h, 4h, 1d]

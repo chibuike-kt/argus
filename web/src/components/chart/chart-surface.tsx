@@ -21,6 +21,7 @@ import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace"
 import { formatMoney, toPlanOverlay } from "@/api/mappers";
 import { useDrawing } from "./drawing-context";
 import type { LiveTick } from "@/lib/use-live-candles";
+import type { ConnectionState, WireStatusPayload } from "@/lib/live-socket";
 import { isNewerCandleKey, decideApplyAction, type CandleKey } from "@/lib/live-candles-reducer";
 import { loadChartView, saveChartView } from "./chart-view-persistence";
 import { cloneDrawing } from "./drawings/types";
@@ -107,7 +108,7 @@ export interface ChartPlanOverlay {
 // own small loading/error overlay (below) over whatever chart is
 // already there, however many instruments or setups come and go.
 export function ChartSurface({ className }: { className?: string }) {
-  const { setup, instrument, candles, candlesLoading, candlesError, setupLoading, forming } =
+  const { setup, instrument, candles, candlesLoading, candlesError, setupLoading, forming, connectionState, status, fatalReason } =
     useAnalysisWorkspace();
   const hasLoadedOnceRef = useRef(false);
   if (candles.length > 0) hasLoadedOnceRef.current = true;
@@ -193,6 +194,9 @@ export function ChartSurface({ className }: { className?: string }) {
       plan={{ entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime }}
       formationOutsideWindow={formationOutsideWindow}
       forming={forming}
+      connectionState={connectionState}
+      status={status}
+      fatalReason={fatalReason}
     />
   );
 }
@@ -221,6 +225,57 @@ export interface ChartSurfaceInnerProps {
   // (no subscription, or a fresh one that has not sent its first
   // message).
   forming: LiveTick | null;
+  // Part 2F: the status badge's own three inputs, read straight off
+  // live-socket.ts/use-live-candles.ts -- never derived or guessed
+  // here.
+  connectionState: ConnectionState;
+  status: WireStatusPayload | null;
+  fatalReason: string | null;
+}
+
+// LiveStatusBadge (Part 2F): one badge, three layers of truth, cheapest
+// first. A fatal close (Part 2E: the session itself is invalid) always
+// wins, since no amount of waiting fixes it. Otherwise the socket's own
+// connecting/closed/open lifecycle is shown until the server's own
+// per-subscription `status` message (live/stale/degraded, with
+// provider) arrives -- that message is the one source of truth for
+// "live" vs "stale" vs "degraded"; this badge never computes that
+// itself from staleness/latency on its own.
+function LiveStatusBadge({
+  connectionState,
+  status,
+  fatalReason,
+}: {
+  connectionState: ConnectionState;
+  status: WireStatusPayload | null;
+  fatalReason: string | null;
+}) {
+  if (fatalReason) {
+    return (
+      <span className="flex items-center gap-1 rounded-md border border-down/30 bg-down/10 px-1.5 py-0.5 text-[11px] text-down">
+        <span className="size-1.5 rounded-full bg-down" />
+        Disconnected -- sign in again
+      </span>
+    );
+  }
+  if (connectionState === "connecting" || connectionState === "closed") {
+    return (
+      <span className="flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
+        <span className="size-1.5 animate-pulse rounded-full bg-fg-subtle" />
+        {connectionState === "connecting" ? "Connecting…" : "Reconnecting…"}
+      </span>
+    );
+  }
+  if (!status) return null; // open, but the server has not sent a status message yet
+  const dotColor = status.state === "live" ? "bg-up" : status.state === "degraded" ? "bg-down" : "bg-fg-subtle";
+  const textColor = status.state === "live" ? "text-up" : status.state === "degraded" ? "text-down" : "text-fg-subtle";
+  return (
+    <span className={cn("flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px]", textColor)}>
+      <span className={cn("size-1.5 rounded-full", dotColor)} />
+      {status.state[0].toUpperCase() + status.state.slice(1)}
+      {status.provider && <span className="text-fg-subtle">· {status.provider}</span>}
+    </span>
+  );
 }
 
 export function ChartSurfaceInner({
@@ -234,6 +289,9 @@ export function ChartSurfaceInner({
   plan,
   formationOutsideWindow,
   forming,
+  connectionState,
+  status,
+  fatalReason,
 }: ChartSurfaceInnerProps) {
   const hasCandles = candles.length > 0;
   const lastTime = hasCandles ? unix(candles[candles.length - 1].openTime) : (0 as Time);
@@ -749,6 +807,7 @@ export function ChartSurfaceInner({
             <span className={cn("ml-1 size-1.5 rounded-full", up ? "bg-up" : "bg-down")} />
           </div>
           <SampleDataBadge label="Sample % change" />
+          <LiveStatusBadge connectionState={connectionState} status={status} fatalReason={fatalReason} />
           {formationOutsideWindow && (
             <span className="rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
               Setup formed before this window
@@ -794,6 +853,7 @@ export function ChartSurfaceInner({
             <span>
               C{" "}
               <span
+                data-testid="legend-close"
                 className={cn(
                   "transition-base rounded px-0.5",
                   bar.close >= bar.open ? "text-up" : "text-down",

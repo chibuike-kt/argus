@@ -6,7 +6,7 @@ import type { ApiCandle, ApiInstrument, ApiSetup, ApiSetupEvent } from "@/api/ty
 import { listSetupEvents } from "@/api/setups";
 import { ApiClientError } from "@/api/client";
 import { useLiveCandles, type LiveTick } from "@/lib/use-live-candles";
-import type { CandleInterval, ConnectionState } from "@/lib/live-socket";
+import type { CandleInterval, ConnectionState, WireStatusPayload } from "@/lib/live-socket";
 
 // Centralizes every fetch the /analysis workspace's many separate panels
 // need (chart, right panel's analysis tab, other-setups strip, markets
@@ -62,6 +62,14 @@ interface AnalysisWorkspace {
   // alone, on its own series.update() path (Part 2D), never folded into
   // `candles` above (rule 3: live ticks never go through the candles prop).
   forming: LiveTick | null;
+  // Part 2F: the server's own freshness verdict (live/stale/degraded)
+  // and provider name for the status badge -- read straight off the
+  // wire, never derived or guessed client-side.
+  status: WireStatusPayload | null;
+  // Part 2E: set once the connection closes for a reason this client
+  // will not retry (the session itself is invalid) -- chart-surface.tsx
+  // shows this instead of a spinner.
+  fatalReason: string | null;
 }
 
 const Ctx = createContext<AnalysisWorkspace | null>(null);
@@ -255,6 +263,8 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     setTimeframe,
     connectionState: live.connectionState,
     forming: live.forming,
+    status: live.status,
+    fatalReason: live.fatalReason,
   };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

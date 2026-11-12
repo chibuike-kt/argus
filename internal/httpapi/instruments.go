@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/chibuike-kt/argus/internal/instruments"
@@ -105,14 +106,6 @@ func (h *apiHandler) ListInstruments(ctx context.Context, request ListInstrument
 	return out, nil
 }
 
-// cryptoAssetClass is the one asset_class value instruments.Store rows
-// actually carry today (db/seed/dev_fixture_instruments.sql); there is
-// no enum constraint in the schema and no forex instrument exists yet
-// (ADR-007 is open), so "intervals above 1m need a session-aware
-// calendar, not built for forex" is enforced as "anything that is not
-// confirmed crypto is refused," never a guess at what else might count.
-const cryptoAssetClass = "crypto_perp"
-
 // intervalDuration maps a validated ListInstrumentCandlesParamsInterval
 // to its duration. Called only after interval.Valid() has already
 // confirmed membership, so the default case is unreachable in practice;
@@ -193,8 +186,15 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 		return nil, fmt.Errorf("get instrument %d: %w", request.Id, err)
 	}
 
-	if interval != N1m && inst.AssetClass != cryptoAssetClass {
-		return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", "intervals above 1m are only served for crypto instruments today -- calendar-aware forex session boundaries are not built")), nil
+	// The instrument's own supported_intervals is the single source of
+	// truth for what this endpoint serves (owner approved 12 November
+	// 2026, superseding the earlier asset_class-based gate): calendar-
+	// aware forex session boundaries are still not built, so a forex
+	// instrument's own row simply never lists anything above 1m --
+	// there is no separate asset-class special case here to keep in
+	// sync with that fact.
+	if !slices.Contains(inst.SupportedIntervals, string(interval)) {
+		return ListInstrumentCandles400JSONResponse(apiError("invalid_argument", fmt.Sprintf("interval %s is not in this instrument's own supported_intervals", interval))), nil
 	}
 
 	d, err := intervalDuration(interval)

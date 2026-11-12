@@ -20,7 +20,7 @@ class MockWebSocket {
   sent: string[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number; reason: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   url: string;
 
@@ -33,9 +33,14 @@ class MockWebSocket {
     this.sent.push(data);
   }
 
-  close() {
+  // code/reason mirror the real WebSocket close event's own fields --
+  // live-socket.ts's own classifyClose reads event.reason to tell a
+  // fatal/rate-limited/transient close apart (internal/hub's own
+  // CloseSessionInvalid etc. are all sent this way, never by code
+  // alone, since several of them share websocket.StatusPolicyViolation).
+  close(code = 1000, reason = "") {
     this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.();
+    this.onclose?.({ code, reason });
   }
 
   // Test helper, not part of the real WebSocket API.
@@ -231,5 +236,217 @@ describe("LiveSocket: reconnect on open resends every held subscription", () => 
       .filter((env) => env.type === "subscribe")
       .map((env) => env.sub);
     expect(subscribedKeys.sort()).toEqual(["1:1m", "2:5m"]);
+  });
+});
+
+// Part 2E: exponential backoff with full jitter, dead-connection-via-
+// missed-heartbeats, and policy-close handling. These constants mirror
+// live-socket.ts's own [U] placeholders (themselves a mirror of
+// internal/config/live_feed.go's own defaults) -- asserted directly
+// rather than exported, since the point is proving the OBSERABLE
+// schedule an owner-set config value would also have to match.
+const BACKOFF_BASE_MS = 1_000;
+const BACKOFF_CAP_MS = 30_000;
+const HEARTBEAT_TIMEOUT_MS = 15_000 * 2.5;
+const RATE_LIMITED_MIN_ATTEMPT = 5;
+
+describe("LiveSocket: Part 2E reconnect backoff", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a transient close reconnects after a delay uniformly distributed in [0, base] for the first attempt", () => {
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1); // picks the max of the range
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers());
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+    ws.close(1006, ""); // an ordinary drop, no close frame reason
+
+    vi.advanceTimersByTime(BACKOFF_BASE_MS - 1);
+    expect(MockWebSocket.instances.length).toBe(1); // not yet
+    vi.advanceTimersByTime(1);
+    expect(MockWebSocket.instances.length).toBe(2); // reconnected at exactly base*2^0*1(random)
+
+    randomSpy.mockRestore();
+  });
+
+  it("each further transient close doubles the attempt exponent, capped", () => {
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1);
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers());
+
+    let ws = MockWebSocket.instances[0];
+    ws.open();
+    ws.close(1006, "");
+    vi.advanceTimersByTime(BACKOFF_BASE_MS); // attempt 0 -> reconnect #2
+
+    ws = MockWebSocket.instances[1];
+    ws.close(1006, ""); // never reached "open" this time -- still schedules attempt 1
+    vi.advanceTimersByTime(BACKOFF_BASE_MS * 2 - 1);
+    expect(MockWebSocket.instances.length).toBe(2); // not yet -- needs base*2^1
+    vi.advanceTimersByTime(1);
+    expect(MockWebSocket.instances.length).toBe(3);
+
+    randomSpy.mockRestore();
+  });
+
+  it("a successful open resets the backoff curve back to attempt 0", () => {
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1);
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers());
+
+    let ws = MockWebSocket.instances[0];
+    ws.open();
+    ws.close(1006, "");
+    vi.advanceTimersByTime(BACKOFF_BASE_MS); // attempt 0 consumed -> reconnect
+
+    ws = MockWebSocket.instances[1];
+    ws.open(); // success -- attempt counter resets to 0
+    ws.close(1006, "");
+    // If the reset did not happen, this would need base*2^1 (2000ms);
+    // the reset means it is base*2^0 (1000ms) again.
+    vi.advanceTimersByTime(BACKOFF_BASE_MS - 1);
+    expect(MockWebSocket.instances.length).toBe(2);
+    vi.advanceTimersByTime(1);
+    expect(MockWebSocket.instances.length).toBe(3);
+
+    randomSpy.mockRestore();
+  });
+
+  it("the delay never exceeds the cap even at a high attempt count", () => {
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1);
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers());
+    let ws = MockWebSocket.instances[0];
+    ws.open();
+
+    // Run through enough closes that base*2^attempt would vastly exceed
+    // the cap if it were not clamped.
+    for (let i = 0; i < 10; i++) {
+      ws.close(1006, "");
+      vi.advanceTimersByTime(BACKOFF_CAP_MS);
+      ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    }
+    expect(MockWebSocket.instances.length).toBe(11); // one reconnect per close, never stalled past the cap
+
+    randomSpy.mockRestore();
+  });
+
+  it("'session no longer valid' is fatal: no reconnect is scheduled, onFatalClose fires, connection state becomes failed", () => {
+    const onFatalClose = vi.fn();
+    const onConnectionState = vi.fn();
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers({ onFatalClose, onConnectionState }));
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    ws.close(1008, "session no longer valid");
+
+    expect(onFatalClose).toHaveBeenCalledWith("session no longer valid");
+    expect(onConnectionState).toHaveBeenCalledWith("failed");
+    vi.advanceTimersByTime(BACKOFF_CAP_MS * 2); // long enough for any real schedule
+    expect(MockWebSocket.instances.length).toBe(1); // never reconnected
+  });
+
+  it("a rate-limited close ('too many connections') skips ahead on the backoff curve instead of retrying immediately", () => {
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1);
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers());
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    ws.close(1008, "too many connections");
+
+    const expectedDelay = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** RATE_LIMITED_MIN_ATTEMPT);
+    vi.advanceTimersByTime(expectedDelay - 1);
+    expect(MockWebSocket.instances.length).toBe(1); // not yet -- this is well past attempt 0's own short delay
+    vi.advanceTimersByTime(1);
+    expect(MockWebSocket.instances.length).toBe(2);
+
+    randomSpy.mockRestore();
+  });
+
+  it("'subscribe/unsubscribe rate exceeded' is treated the same as a rate limit, not fatal", () => {
+    const onFatalClose = vi.fn();
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers({ onFatalClose }));
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+    ws.close(1008, "subscribe/unsubscribe rate exceeded");
+
+    expect(onFatalClose).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(BACKOFF_CAP_MS);
+    expect(MockWebSocket.instances.length).toBeGreaterThan(1); // it did eventually retry
+  });
+
+  it("no message at all within the heartbeat timeout force-closes the socket and reconnects", () => {
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers());
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    vi.advanceTimersByTime(HEARTBEAT_TIMEOUT_MS);
+    expect(ws.readyState).toBe(MockWebSocket.CLOSED); // the watchdog force-closed it
+
+    vi.advanceTimersByTime(BACKOFF_CAP_MS); // whatever the (randomized) delay is, this is long enough
+    expect(MockWebSocket.instances.length).toBe(2); // and the normal reconnect flow picked it up
+  });
+
+  it("any message (not just heartbeat) resets the watchdog, so a quiet-but-alive connection is not force-closed", () => {
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers());
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    // A message arrives just before the timeout would otherwise fire,
+    // twice in a row -- if the watchdog did not reset, the second
+    // advance alone would already exceed the original timeout.
+    vi.advanceTimersByTime(HEARTBEAT_TIMEOUT_MS - 100);
+    ws.receive({ v: 1, type: "heartbeat", ts: "t" });
+    vi.advanceTimersByTime(HEARTBEAT_TIMEOUT_MS - 100);
+    ws.receive({ v: 1, type: "heartbeat", ts: "t" });
+
+    expect(ws.readyState).toBe(MockWebSocket.OPEN); // never force-closed
+    expect(MockWebSocket.instances.length).toBe(1);
+  });
+});
+
+describe("LiveSocket: Part 2F status routing", () => {
+  it("a status message is routed to the matching subscription's own onStatus", () => {
+    const onStatus = vi.fn();
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers({ onStatus }));
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    ws.receive({
+      v: 1,
+      type: "status",
+      ts: "t",
+      sub: "1:1m",
+      seq: 1,
+      payload: { state: "stale", provider: "fixture" },
+    });
+
+    expect(onStatus).toHaveBeenCalledWith({ state: "stale", provider: "fixture" });
+  });
+
+  it("a connection-level error (no sub field) reaches every currently held subscription's own onError, not just one", () => {
+    const onError1 = vi.fn();
+    const onError2 = vi.fn();
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers({ onError: onError1 }));
+    socket.subscribe(2, "5m", handlers({ onError: onError2 }));
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    ws.receive({ v: 1, type: "error", ts: "t", payload: { code: "bad_request", message: "malformed message" } });
+
+    expect(onError1).toHaveBeenCalledWith({ code: "bad_request", message: "malformed message" });
+    expect(onError2).toHaveBeenCalledWith({ code: "bad_request", message: "malformed message" });
   });
 });

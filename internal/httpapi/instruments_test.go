@@ -107,11 +107,18 @@ func (f *fakeCandlesStore) LatestCompleteWindow(_ context.Context, _ int64, _ ti
 
 func timePtr(t time.Time) *time.Time { return &t }
 
+// testInstrumentDomain's own SupportedIntervals lists all six (matching
+// db/seed/dev_fixture_instruments.sql's own real default, owner
+// approved 12 November 2026): most tests below are not about the
+// interval gate itself, and the gate reads this list as its single
+// source of truth (internal/httpapi/instruments.go), not AssetClass --
+// a test that cares specifically about the gate sets its own narrower
+// list instead (see TestListInstrumentCandles_IntervalNotInSupportedIntervalsIs400).
 func testInstrumentDomain(id int64) instruments.Instrument {
 	return instruments.Instrument{
 		ID: id, Provider: "test-provider", NativeSymbol: "BTC-PERP", AssetClass: "crypto_perp",
 		PriceScale: 2, QtyScale: 4, TickSize: 1, QtyStepSize: 1,
-		SupportedIntervals: []string{"1m"}, Enabled: false,
+		SupportedIntervals: []string{"1m", "5m", "15m", "1h", "4h", "1d"}, Enabled: false,
 	}
 }
 
@@ -482,9 +489,19 @@ func TestListInstrumentCandles_UnknownIntervalIs400(t *testing.T) {
 	}
 }
 
-func TestListInstrumentCandles_NonCryptoAboveOneMinuteIs400(t *testing.T) {
+// TestListInstrumentCandles_IntervalNotInSupportedIntervalsIs400 is the
+// gate itself (owner approved 12 November 2026, superseding the earlier
+// asset_class-based check): an interval absent from the instrument's
+// own supported_intervals is a 400, regardless of asset_class -- this
+// instrument is "crypto_perp" (the asset class that used to be
+// sufficient on its own) and still gets refused, because 5m is not in
+// its own list. A forex instrument reaches the exact same 400 the same
+// way, simply because its own row has never listed anything above 1m
+// (ADR-007/calendar-aware sessions are still not built) -- there is no
+// separate asset-class branch left to test.
+func TestListInstrumentCandles_IntervalNotInSupportedIntervalsIs400(t *testing.T) {
 	inst := testInstrumentDomain(1)
-	inst.AssetClass = "forex_spot" // anything that is not "crypto_perp"
+	inst.SupportedIntervals = []string{"1m"}
 	h := &apiHandler{
 		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: inst}},
 		candles:     &fakeCandlesStore{},
@@ -500,15 +517,20 @@ func TestListInstrumentCandles_NonCryptoAboveOneMinuteIs400(t *testing.T) {
 	}
 	got, ok := resp.(ListInstrumentCandles400JSONResponse)
 	if !ok {
-		t.Fatalf("got %#v, want 400 for a non-crypto instrument at 5m", resp)
+		t.Fatalf("got %#v, want 400 for an interval absent from supported_intervals", resp)
 	}
 	if got.Error.Code != "invalid_argument" {
 		t.Errorf("Error.Code = %q, want invalid_argument", got.Error.Code)
 	}
 }
 
-func TestListInstrumentCandles_CryptoAboveOneMinuteUsesAggregateRange(t *testing.T) {
-	inst := testInstrumentDomain(1) // AssetClass crypto_perp
+// TestListInstrumentCandles_IntervalInSupportedIntervalsUsesAggregateRange
+// is the other half of the same gate: an interval that IS in the
+// instrument's own supported_intervals is served normally, through the
+// aggregation path -- same instrument shape as the 400 case above,
+// differing only in which intervals its own row lists.
+func TestListInstrumentCandles_IntervalInSupportedIntervalsUsesAggregateRange(t *testing.T) {
+	inst := testInstrumentDomain(1) // SupportedIntervals includes 5m
 	agg := marketdata.AggregateOHLCV{
 		Window: marketdata.Window{
 			Start: clock.NewEventTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
@@ -543,6 +565,44 @@ func TestListInstrumentCandles_CryptoAboveOneMinuteUsesAggregateRange(t *testing
 	}
 	if c.Revision != 1 {
 		t.Errorf("Revision = %d, want 1 (the fake's own AggregateOHLCV.Revision, carried through unchanged)", c.Revision)
+	}
+}
+
+// TestListInstrumentCandles_NonCryptoWithSupportedIntervalIsServed is
+// the proof there is no leftover asset_class special case anywhere in
+// the gate: a "forex_spot" instrument whose own row lists 5m (something
+// no real forex row does today, since calendar-aware sessions are not
+// built -- but the gate itself must not know or care why a row lists
+// what it lists) is served normally, exactly like a crypto one would
+// be. If asset_class were still checked anywhere, this would wrongly
+// 400.
+func TestListInstrumentCandles_NonCryptoWithSupportedIntervalIsServed(t *testing.T) {
+	inst := testInstrumentDomain(1)
+	inst.AssetClass = "forex_spot"
+	inst.SupportedIntervals = []string{"1m", "5m"}
+	agg := marketdata.AggregateOHLCV{
+		Window: marketdata.Window{
+			Start: clock.NewEventTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
+			End:   clock.NewEventTime(time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)),
+		},
+		Open: 10000, High: 10200, Low: 9900, Close: 10100, Volume: 500, Revision: 1,
+	}
+	h := &apiHandler{
+		instruments: &fakeInstrumentsStore{byID: map[int64]instruments.Instrument{1: inst}},
+		candles:     &fakeCandlesStore{aggregates: []marketdata.AggregateOHLCV{agg}, joinPoint: &agg},
+		logger:      slog.Default(),
+	}
+	interval := N5m
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
+	resp, err := h.ListInstrumentCandles(context.Background(), ListInstrumentCandlesRequestObject{
+		Id: 1, Params: ListInstrumentCandlesParams{Interval: &interval, From: &from, To: &to},
+	})
+	if err != nil {
+		t.Fatalf("ListInstrumentCandles: %v", err)
+	}
+	if _, ok := resp.(ListInstrumentCandles200JSONResponse); !ok {
+		t.Fatalf("got %#v, want 200: a non-crypto instrument whose own supported_intervals lists 5m is served, asset_class is not checked", resp)
 	}
 }
 

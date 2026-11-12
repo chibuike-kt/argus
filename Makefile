@@ -78,6 +78,13 @@ run-api: ## Run the API server locally
 run-worker: ## Run the worker locally
 	go run ./cmd/argus-worker
 
+LIVE_DEMO_SPEED ?= 60
+
+.PHONY: live-demo
+live-demo: ## THE ONE COMMAND to watch ticks move on screen (live-chart brief, Part 2G): seeds the dev fixture against DB_URL (default: the dev argus database), then runs the worker with the one-time historical ingest AND a continuing live replay -- new candles forming and closing forward from each instrument's own last historical close, published through the hub exactly like a real feed. Needs: make infra, then make run-api (or make up), already running; open the frontend (make web-dev) on /analysis for BTC-PERP or ETH-PERP to watch it. Blocks in the foreground (Ctrl-C stops it); LIVE_DEMO_SPEED overrides the pace (default 60: about one new candle per real second).
+	$(MAKE) seed-dev DB_URL="$(DB_URL)"
+	ARGUS_DEV_FIXTURE_INGEST=true ARGUS_DEV_FIXTURE_LIVE_REPLAY=true ARGUS_DEV_FIXTURE_LIVE_REPLAY_SPEED="$(LIVE_DEMO_SPEED)" go run ./cmd/argus-worker
+
 .PHONY: fmt
 fmt: ## Format Go code
 	gofmt -w .
@@ -120,9 +127,9 @@ web-build: ## Build the frontend
 	cd web && (pnpm build || npm run build)
 
 .PHONY: e2e-stack
-e2e-stack: ## THE ONE COMMAND for web/e2e's own backend: migrates + seeds + ingests the dev fixture into argus_test (never argus), then runs a dedicated api+worker pair on E2E_HTTP_PORT (default 8090), with CORS/CSRF allowing Vite preview's own origin (4173). Needs: make infra running first (postgres+redis). Blocks in the foreground (Ctrl-C stops both); api's own stdout/stderr -- including the dev mailer's logged signup codes -- goes to $(E2E_API_LOG), which web/e2e's own global setup reads.
+e2e-stack: ## THE ONE COMMAND for web/e2e's own backend: migrates + seeds + ingests the dev fixture into argus_test (never argus), then runs a dedicated api+worker pair on E2E_HTTP_PORT (default 8090), with CORS/CSRF allowing Vite preview's own origin (4173). The worker also runs Part 2G's own live replay, so a forming candle visibly moves and a new one appears at the boundary -- exactly what the Playwright scenario in web/e2e needs. Needs: make infra running first (postgres+redis). Blocks in the foreground (Ctrl-C stops both); api's own stdout/stderr -- including the dev mailer's logged signup codes -- goes to $(E2E_API_LOG), which web/e2e's own global setup reads.
 	$(MAKE) migrate-up DB_URL="$(E2E_DB_URL)"
 	$(MAKE) seed-dev DB_URL="$(E2E_DB_URL)"
-	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_DEV_FIXTURE_INGEST=true go run ./cmd/argus-worker &
+	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_DEV_FIXTURE_INGEST=true ARGUS_DEV_FIXTURE_LIVE_REPLAY=true ARGUS_DEV_FIXTURE_LIVE_REPLAY_SPEED="$(LIVE_DEMO_SPEED)" go run ./cmd/argus-worker &
 	sleep 2
 	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_AUTH_ALLOWED_ORIGINS="http://localhost:4173,http://127.0.0.1:4173" go run ./cmd/argus-api 2>&1 | tee "$(E2E_API_LOG)"
