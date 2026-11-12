@@ -25,10 +25,13 @@ export interface ListCandlesParams {
   from?: string; // ISO-8601
   to?: string; // ISO-8601
   limit?: number; // server caps at 1000 regardless
-  // "desc" is the most-recent-N shortcut (web-wiring-followup brief,
-  // Part 4): newest first, still capped by limit, still enforced
-  // server-side. Omitted/"asc" is the original, unchanged oldest-first
-  // order.
+  // "desc" is the most-recent-N shortcut: newest first, still capped by
+  // limit, still enforced server-side. Extended to every interval, not
+  // only 1m (live-chart-pipeline brief, adr-004-ws-contract-review.md
+  // addendum item C) -- from/to are only required when order is "asc"
+  // or omitted, regardless of interval. Omitted/"asc" is the original,
+  // unchanged oldest-first order, which still needs both at every
+  // interval.
   order?: "asc" | "desc";
 }
 

@@ -25,6 +25,10 @@ export default defineConfig({
       "/api": "http://127.0.0.1:8080",
       "/healthz": "http://127.0.0.1:8080",
       "/readyz": "http://127.0.0.1:8080",
+      // /ws (live-chart brief, phase 4, Part 2B): same target as the
+      // REST proxy above, with ws: true so Vite upgrades the proxied
+      // connection instead of treating it as a plain HTTP request.
+      "/ws": { target: "http://127.0.0.1:8080", ws: true },
     },
   },
 });
