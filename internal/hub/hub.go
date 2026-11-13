@@ -187,6 +187,47 @@ func (h *Hub) Unregister(c *Connection) {
 	}
 }
 
+// CloseAll closes every currently registered connection with
+// CloseGoingAway and reason, for an orderly shutdown -- net/http's own
+// Shutdown does not touch hijacked connections such as WebSockets
+// (its own doc comment says so), so the caller (cmd/argus-api/main.go)
+// must do this itself before or alongside srv.Shutdown.
+//
+// Each connection's own close handshake runs in its own goroutine,
+// concurrently, so one slow or stuck client cannot delay the rest.
+// CloseAll itself returns as soon as every connection has closed or
+// ctx is done, whichever comes first -- it must never block the
+// caller's own shutdown past ctx's deadline, so goroutines still
+// waiting on a handshake when ctx expires are abandoned rather than
+// awaited (the process is exiting regardless).
+func (h *Hub) CloseAll(ctx context.Context, reason string) {
+	h.mu.Lock()
+	conns := make([]*Connection, 0, len(h.conns))
+	for c := range h.conns {
+		conns = append(conns, c)
+	}
+	h.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(len(conns))
+		for _, c := range conns {
+			go func(c *Connection) {
+				defer wg.Done()
+				c.Close(CloseGoingAway, reason)
+			}(c)
+		}
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
 // Subscribe handles one `subscribe` message: the enabled check (every
 // time, brief rule), idempotent re-subscribe (a fresh snapshot, seq
 // reset), and the Redis reference-count bookkeeping. Sends the

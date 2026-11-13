@@ -446,6 +446,34 @@ describe("LiveSocket: Part 2E reconnect backoff", () => {
     expect(MockWebSocket.instances.length).toBeGreaterThan(1); // it did eventually retry
   });
 
+  it("a 1001 'going away' close (the server's own orderly shutdown) is a normal transient reconnect: no error, no fatal handling, attempt 0's own short delay -- not the rate-limited jump-ahead", () => {
+    const onFatalClose = vi.fn();
+    const onConnectionState = vi.fn();
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(1); // picks the max of the range
+    const socket = getLiveSocket();
+    socket.subscribe(1, "1m", handlers({ onFatalClose, onConnectionState }));
+    const ws = MockWebSocket.instances[0];
+    ws.open();
+
+    // Reason text that would, on its own, classify as rate-limited
+    // ("too many connections" matches classifyClose's own rate-limit
+    // check) -- paired here with code 1001 to prove the code is what
+    // actually governs this close, not the reason text, exactly as
+    // classifyClose's own doc comment claims. The real server always
+    // sends 1001 with "server shutting down"; this reason is chosen
+    // deliberately to isolate which input the classification reads.
+    ws.close(1001, "too many connections");
+
+    expect(onFatalClose).not.toHaveBeenCalled();
+    expect(onConnectionState).not.toHaveBeenCalledWith("failed");
+    vi.advanceTimersByTime(BACKOFF_BASE_MS - 1);
+    expect(MockWebSocket.instances.length).toBe(1); // not yet -- attempt 0's own delay hasn't elapsed
+    vi.advanceTimersByTime(1);
+    expect(MockWebSocket.instances.length).toBe(2); // reconnected at exactly base*2^0*1(random): proves code 1001 took the transient path, not the rate-limited jump-ahead the reason text alone would trigger
+
+    randomSpy.mockRestore();
+  });
+
   it("no message at all within the heartbeat timeout force-closes the socket and reconnects", () => {
     const socket = getLiveSocket();
     socket.subscribe(1, "1m", handlers());

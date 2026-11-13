@@ -612,6 +612,77 @@ func TestRegister_ConnectionLimitsEnforced(t *testing.T) {
 	}
 }
 
+func TestCloseAll_ClosesEveryConnectionWithGoingAway(t *testing.T) {
+	insts := &fakeInstruments{}
+	h := newTestHub(insts, newFakeCandles(), newFakeSubscriber(), clock.NewFixed(time.Now()), testCfg())
+
+	sink1 := &fakeSink{}
+	sink2 := &fakeSink{}
+	c1 := NewConnection(sink1, 1, "sess1", "1.2.3.4", testCfg(), clock.NewFixed(time.Now()))
+	c2 := NewConnection(sink2, 2, "sess2", "5.6.7.8", testCfg(), clock.NewFixed(time.Now()))
+	if err := h.Register(c1); err != nil {
+		t.Fatalf("register c1: %v", err)
+	}
+	if err := h.Register(c2); err != nil {
+		t.Fatalf("register c2: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	h.CloseAll(ctx, "server shutting down")
+
+	for i, sink := range []*fakeSink{sink1, sink2} {
+		sink.mu.Lock()
+		closed, code, reason := sink.closed, sink.closeCode, sink.closeReason
+		sink.mu.Unlock()
+		if !closed {
+			t.Fatalf("connection %d was not closed by CloseAll", i+1)
+		}
+		if code != CloseGoingAway {
+			t.Errorf("connection %d closed with code %d, want CloseGoingAway (%d)", i+1, code, CloseGoingAway)
+		}
+		if reason != "server shutting down" {
+			t.Errorf("connection %d closed with reason %q, want %q", i+1, reason, "server shutting down")
+		}
+	}
+}
+
+// slowCloseSink never returns from Close on its own -- it only unblocks
+// if explicitly released, simulating a client whose close handshake
+// never completes (e.g. a dead peer the TCP stack has not yet noticed).
+type slowCloseSink struct {
+	release chan struct{}
+}
+
+func (s *slowCloseSink) Send(context.Context, []byte) error { return nil }
+func (s *slowCloseSink) Close(int, string) error {
+	<-s.release
+	return nil
+}
+
+func TestCloseAll_ReturnsAtItsOwnDeadlineDespiteAStuckConnection(t *testing.T) {
+	insts := &fakeInstruments{}
+	h := newTestHub(insts, newFakeCandles(), newFakeSubscriber(), clock.NewFixed(time.Now()), testCfg())
+
+	stuck := &slowCloseSink{release: make(chan struct{})}
+	defer close(stuck.release) // let the leaked goroutine finish, not leak past the test
+	c := NewConnection(stuck, 1, "sess", "1.2.3.4", testCfg(), clock.NewFixed(time.Now()))
+	if err := h.Register(c); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	h.CloseAll(ctx, "server shutting down")
+	elapsed := time.Since(start)
+
+	if elapsed > time.Second {
+		t.Fatalf("CloseAll took %v to return with a stuck connection and a 100ms ctx deadline -- it must not block shutdown past its own deadline", elapsed)
+	}
+}
+
 func TestSlowConsumer_SendFailureClosesConnection(t *testing.T) {
 	insts := &fakeInstruments{byID: map[int64]instruments.Instrument{1: enabledInstrument(1)}}
 	sub := newFakeSubscriber()

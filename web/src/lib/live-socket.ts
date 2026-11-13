@@ -56,11 +56,20 @@ const HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 2.5; // [U]
 //    would just get closed again right away -- skip ahead on the same
 //    backoff curve instead of hammering it.
 //  - "transient": anything else, including a clean 1000 close (e.g. a
-//    deploy) or no close frame at all (a network drop) -- the normal
-//    backoff schedule from attempt 0.
+//    deploy), code 1001 "going away" (the server's own orderly shutdown
+//    -- Hub.CloseAll, adr-004 v3) or no close frame at all (a network
+//    drop) -- the normal backoff schedule from attempt 0.
+//
+// 1001 is checked by code, not reason text, deliberately: it is a
+// standard WebSocket status with a fixed meaning, unlike the 1008
+// reason-text cases above (which exist only because the server shares
+// one code across several different conditions) -- classifying it by
+// code keeps this correct regardless of whatever reason string the
+// server happens to send with it.
 type ClosePolicy = "transient" | "rate-limited" | "fatal";
 
-function classifyClose(reason: string): ClosePolicy {
+function classifyClose(code: number, reason: string): ClosePolicy {
+  if (code === 1001) return "transient"; // going away: an ordinary server-initiated close, never fatal or rate-limited
   if (reason.includes("session no longer valid")) return "fatal";
   if (reason.includes("rate exceeded") || reason.includes("too many connections") || reason.includes("slow consumer")) {
     return "rate-limited";
@@ -315,7 +324,7 @@ class LiveSocket {
       this.setState("closed");
       if (this.subs.size === 0) return; // nothing wants this connection anymore
 
-      const policy = classifyClose(event.reason);
+      const policy = classifyClose(event.code, event.reason);
       if (policy === "fatal") {
         // The session itself is invalid -- reconnecting would just get
         // closed again immediately with the same reason. Tell every

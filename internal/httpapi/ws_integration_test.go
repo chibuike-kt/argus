@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -614,6 +615,10 @@ func TestIntegration_WS_GracefulShutdown_ClosesOpenConnections(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		// Mirrors cmd/argus-api/main.go's own shutdown sequence: Shutdown
+		// does not close hijacked connections on its own, so CloseAll
+		// runs first, within the same deadline.
+		deps.Hub.CloseAll(ctx, "server shutting down")
 		shutdownDone <- srv.Shutdown(ctx)
 	}()
 
@@ -626,14 +631,45 @@ func TestIntegration_WS_GracefulShutdown_ClosesOpenConnections(t *testing.T) {
 		t.Fatal("Shutdown did not return within its own 5s deadline -- an open WebSocket connection blocked it from completing, want it closed instead")
 	}
 
-	// The client side must see its own connection actually close
-	// (Read returns an error), not just that Shutdown returned on the
-	// server -- a server that gives up waiting without telling the
-	// client anything is not what "graceful" means here.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if _, _, err := conn.Read(ctx); err == nil {
-		t.Fatal("client Read after server Shutdown = nil error, want the connection closed")
+	// The client side must see its own connection actually close with a
+	// real WebSocket close frame, status 1001 (going away) -- proof
+	// that Hub.CloseAll ran, not just any error (a half-open TCP
+	// connection timing out, or this test's own read timeout, would
+	// both also produce "an error" without proving the server did
+	// anything). A single Read right after Shutdown is not reliable
+	// either way: an in-flight heartbeat already queued before the
+	// close can legitimately be read first (confirmed flaky under real
+	// timing -- about 1 run in 3 got that heartbeat instead of the
+	// close on the very first Read). Read in a loop instead, for up to
+	// an overall 3s budget, and only fail if no error ever arrives in
+	// that window. A short per-read timeout is deliberately not itself
+	// treated as that error: if the connection is merely silent (still
+	// open, nothing to read yet), each short attempt times out on its
+	// own without anything having gone wrong server-side, and that must
+	// not be mistaken for the close this test is actually looking for
+	// -- only once the overall budget itself is spent does "no error
+	// arrived" become the real, reported failure.
+	budget, cancelBudget := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelBudget()
+	var closeErr error
+	for budget.Err() == nil {
+		readCtx, cancelRead := context.WithTimeout(budget, 500*time.Millisecond)
+		_, _, err := conn.Read(readCtx)
+		cancelRead()
+		if err == nil {
+			continue // a real message (e.g. an in-flight heartbeat) -- keep reading
+		}
+		if errors.Is(err, context.DeadlineExceeded) && budget.Err() == nil {
+			continue // this read's own short timeout, not a real close -- the overall budget is not exhausted yet
+		}
+		closeErr = err
+		break
+	}
+	if closeErr == nil {
+		t.Fatal("no error arrived from the server within 3s after Shutdown -- the connection was never actually closed")
+	}
+	if status := websocket.CloseStatus(closeErr); status != websocket.StatusGoingAway {
+		t.Fatalf("connection closed with %v (status %v), want a real close frame with status 1001 (going away) -- Hub.CloseAll did not run, or ran with the wrong code", closeErr, status)
 	}
 }
 

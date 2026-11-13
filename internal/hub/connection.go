@@ -27,6 +27,7 @@ type Sink interface {
 // github.com/coder/websocket so this package never imports it.
 const (
 	CloseNormal          = 1000
+	CloseGoingAway       = 1001
 	CloseSlowConsumer    = 1008
 	CloseSessionInvalid  = 1008
 	CloseSubscribeFlood  = 1008

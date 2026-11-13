@@ -114,6 +114,9 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
+	// srv.Shutdown does not close hijacked WebSocket connections on its
+	// own -- CloseAll does that explicitly, within the same deadline.
+	liveHub.CloseAll(shutdownCtx, "server shutting down")
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 		os.Exit(1)

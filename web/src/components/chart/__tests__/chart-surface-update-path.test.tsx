@@ -452,3 +452,54 @@ describe("Part 2D: a live tick is applied through series.update(), never through
     expect(container.textContent).not.toMatch(/111/);
   });
 });
+
+describe("Part 2F: the status badge never shows the word \"Live\" (no decided freshness threshold), shows an age instead", () => {
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it("a wire state of \"live\" renders as \"Connected\" with the last candle's own age, never the word \"Live\"", () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-11-13T00:00:12Z");
+    vi.setSystemTime(now);
+    const lastEventAt = new Date("2026-11-13T00:00:00Z").toISOString(); // exactly 12s before "now"
+
+    const { container } = render(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candleSet(5, 100)}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+        connectionState="open"
+        status={{ state: "live", provider: "fixture", last_event_at: lastEventAt }}
+      />,
+    );
+
+    expect(container.textContent).toMatch(/Connected/);
+    expect(container.textContent).not.toMatch(/\bLive\b/);
+    expect(container.textContent).toMatch(/last candle 12s ago/);
+  });
+
+  it("\"degraded\" is unchanged: no age shown, label stays \"Degraded\"", () => {
+    const { container } = render(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candleSet(5, 100)}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+        connectionState="open"
+        status={{ state: "degraded" }}
+      />,
+    );
+    expect(container.textContent).toMatch(/Degraded/);
+    expect(container.textContent).not.toMatch(/ago/);
+    expect(container.textContent).not.toMatch(/\bLive\b/);
+  });
+});

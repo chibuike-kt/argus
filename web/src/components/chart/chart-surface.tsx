@@ -233,14 +233,51 @@ export interface ChartSurfaceInnerProps {
   fatalReason: string | null;
 }
 
+// useNow re-renders every intervalMs so a duration computed against it
+// (this badge's own "last candle Xs ago") actually counts up on
+// screen, instead of staying frozen at whatever it read when the one
+// status message that set it arrived.
+function useNow(intervalMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+// formatAge renders a millisecond duration as the coarsest unit that
+// keeps it readable ("12s", "3m", "4h", "2d") -- a badge, not a
+// precise timer.
+function formatAge(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 // LiveStatusBadge (Part 2F): one badge, three layers of truth, cheapest
 // first. A fatal close (Part 2E: the session itself is invalid) always
 // wins, since no amount of waiting fixes it. Otherwise the socket's own
 // connecting/closed/open lifecycle is shown until the server's own
-// per-subscription `status` message (live/stale/degraded, with
-// provider) arrives -- that message is the one source of truth for
-// "live" vs "stale" vs "degraded"; this badge never computes that
-// itself from staleness/latency on its own.
+// per-subscription `status` message arrives -- that message is the one
+// source of truth for degraded vs. not; this badge never computes
+// that itself from staleness/latency on its own.
+//
+// The wire's own "live" state is shown as "Connected", with the age of
+// the last candle (status.last_event_at) next to it -- never the word
+// "Live": nothing in this project has a decided freshness/latency
+// threshold (appendix-c-unresolved-decisions.md; ADR-006's own
+// "Freshness targets... must be defined numerically before release"),
+// so claiming data IS live/fresh would be a claim this badge cannot
+// back up yet. "Connected, last candle 12s ago" is exactly what is
+// known: the subscription is live, and here is how old its own last
+// candle actually is -- the viewer judges staleness themselves until
+// that threshold exists. "Degraded" is unchanged: a real stream-loss
+// event, not a guess.
 function LiveStatusBadge({
   connectionState,
   status,
@@ -250,6 +287,7 @@ function LiveStatusBadge({
   status: WireStatusPayload | null;
   fatalReason: string | null;
 }) {
+  const now = useNow(1000);
   if (fatalReason) {
     return (
       <span className="flex items-center gap-1 rounded-md border border-down/30 bg-down/10 px-1.5 py-0.5 text-[11px] text-down">
@@ -267,13 +305,23 @@ function LiveStatusBadge({
     );
   }
   if (!status) return null; // open, but the server has not sent a status message yet
-  const dotColor = status.state === "live" ? "bg-up" : status.state === "degraded" ? "bg-down" : "bg-fg-subtle";
-  const textColor = status.state === "live" ? "text-up" : status.state === "degraded" ? "text-down" : "text-fg-subtle";
+  if (status.state === "degraded") {
+    return (
+      <span className="flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-down">
+        <span className="size-1.5 rounded-full bg-down" />
+        Degraded
+        {status.provider && <span className="text-fg-subtle">· {status.provider}</span>}
+      </span>
+    );
+  }
+  const label = status.state === "live" ? "Connected" : status.state[0].toUpperCase() + status.state.slice(1);
+  const age = status.last_event_at ? formatAge(now - new Date(status.last_event_at).getTime()) : null;
   return (
-    <span className={cn("flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px]", textColor)}>
-      <span className={cn("size-1.5 rounded-full", dotColor)} />
-      {status.state[0].toUpperCase() + status.state.slice(1)}
-      {status.provider && <span className="text-fg-subtle">· {status.provider}</span>}
+    <span className="flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
+      <span className="size-1.5 rounded-full bg-up" />
+      {label}
+      {age && <span>· last candle {age} ago</span>}
+      {status.provider && <span>· {status.provider}</span>}
     </span>
   );
 }
