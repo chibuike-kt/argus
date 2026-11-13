@@ -23,11 +23,19 @@
 -- key in internal/ingestion/fixture/testdata/dev_dataset.json -- both
 -- sides of that match are what let ingestion.InstrumentCache resolve
 -- these rows at ingest time. Idempotent: safe to re-run.
+--
+-- supported_intervals lists all six (owner approved 12 November 2026):
+-- GET /instruments/{id}/candles now reads this list as its own single
+-- source of truth for which intervals it serves for a given instrument
+-- (internal/httpapi/instruments.go), not an asset_class check -- these
+-- two rows are what let 5m/15m/1h/4h/1d actually be requestable in dev,
+-- server-side aggregation off the same 1-minute fixture rows
+-- (internal/marketdata.AggregateRange), never a second dataset.
 INSERT INTO instruments (
     provider, native_symbol, asset_class, base_asset, quote_asset,
     contract_type, price_scale, qty_scale, tick_size, qty_step_size,
     supported_intervals, enabled
 ) VALUES
-    ('fixture', 'BTC-PERP', 'crypto_perp', 'BTC', 'USD', 'perpetual', 0, 0, 1, 1, ARRAY['1m'], TRUE),
-    ('fixture', 'ETH-PERP', 'crypto_perp', 'ETH', 'USD', 'perpetual', 0, 0, 1, 1, ARRAY['1m'], TRUE)
-ON CONFLICT (provider, native_symbol) DO UPDATE SET enabled = TRUE;
+    ('fixture', 'BTC-PERP', 'crypto_perp', 'BTC', 'USD', 'perpetual', 0, 0, 1, 1, ARRAY['1m','5m','15m','1h','4h','1d'], TRUE),
+    ('fixture', 'ETH-PERP', 'crypto_perp', 'ETH', 'USD', 'perpetual', 0, 0, 1, 1, ARRAY['1m','5m','15m','1h','4h','1d'], TRUE)
+ON CONFLICT (provider, native_symbol) DO UPDATE SET enabled = TRUE, supported_intervals = EXCLUDED.supported_intervals;

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
+	"github.com/chibuike-kt/argus/internal/hub"
 	"github.com/chibuike-kt/argus/internal/marketdata"
 )
 
@@ -63,6 +64,43 @@ type Service struct {
 	store        candleStore
 	calendar     marketdata.Calendar
 	logger       *slog.Logger
+	publisher    hub.Publisher
+}
+
+// SetPublisher wires the live-chart-pipeline brief's own Phase 3 fan
+// out: after this call, every store write applyCandle makes also
+// publishes a hub.CandleEvent (forming, closed, or corrected) so the
+// API process's own Hub can relay it to subscribed WebSocket clients.
+// Optional and additive by design, kept out of NewService's own
+// parameter list (CLAUDE.md rule 4: no exported-API break without
+// asking) -- nil (the zero value, and every existing caller's state
+// until it opts in) means "do not publish," not an error; a Redis
+// publish failure is logged and never fails the ingestion call itself
+// (the write to marketdata.Store is the system of record; the live
+// stream is a relay of it, not the other way around).
+func (s *Service) SetPublisher(p hub.Publisher) {
+	s.publisher = p
+}
+
+func (s *Service) publishCandleEvent(ctx context.Context, kind hub.EventKind, c marketdata.Candle) {
+	if s.publisher == nil {
+		return
+	}
+	ev := hub.CandleEvent{
+		InstrumentID: c.InstrumentID,
+		Kind:         kind,
+		OpenTime:     c.OpenTime.Time(),
+		CloseTime:    c.CloseTime.Time(),
+		Open:         c.Open,
+		High:         c.High,
+		Low:          c.Low,
+		Close:        c.Close,
+		Volume:       c.Volume,
+		Revision:     c.Revision,
+	}
+	if err := s.publisher.Publish(ctx, ev); err != nil {
+		s.logger.Warn("ingestion: publish candle event", "instrument_id", c.InstrumentID, "open_time", c.OpenTime, "kind", kind, "error", err)
+	}
 }
 
 // NewService wires a Service. providerName identifies provider in the
@@ -201,24 +239,28 @@ func (s *Service) applyCandle(ctx context.Context, nc NormalizedCandle) error {
 	current, err := s.store.GetCurrent(ctx, nc.InstrumentID, nc.OpenTime)
 	switch {
 	case errors.Is(err, marketdata.ErrCandleNotFound):
-		if _, err := s.store.UpsertForming(ctx, toTick(nc)); err != nil {
+		forming, err := s.store.UpsertForming(ctx, toTick(nc))
+		if err != nil {
 			return err
 		}
 		if nc.IsFinal {
 			return s.closeCandle(ctx, nc)
 		}
+		s.publishCandleEvent(ctx, hub.EventForming, forming)
 		return nil
 
 	case err != nil:
 		return err
 
 	case !current.IsClosed:
-		if _, err := s.store.UpsertForming(ctx, toTick(nc)); err != nil {
+		forming, err := s.store.UpsertForming(ctx, toTick(nc))
+		if err != nil {
 			return err
 		}
 		if nc.IsFinal {
 			return s.closeCandle(ctx, nc)
 		}
+		s.publishCandleEvent(ctx, hub.EventForming, forming)
 		return nil
 
 	case candleValuesEqual(current, nc):
@@ -255,15 +297,21 @@ func (s *Service) applyCandle(ctx context.Context, nc NormalizedCandle) error {
 			"current_open", current.Open, "current_high", current.High, "current_low", current.Low, "current_close", current.Close, "current_volume", current.Volume,
 			"incoming_open", nc.Open, "incoming_high", nc.High, "incoming_low", nc.Low, "incoming_close", nc.Close, "incoming_volume", nc.Volume,
 		)
-		_, err := s.store.SupersedeCandle(ctx, nc.InstrumentID, nc.OpenTime, toCorrection(nc))
-		return err
+		superseded, err := s.store.SupersedeCandle(ctx, nc.InstrumentID, nc.OpenTime, toCorrection(nc))
+		if err != nil {
+			return err
+		}
+		s.publishCandleEvent(ctx, hub.EventCorrected, superseded)
+		return nil
 	}
 }
 
 func (s *Service) closeCandle(ctx context.Context, nc NormalizedCandle) error {
-	if _, err := s.store.Close(ctx, nc.InstrumentID, nc.OpenTime); err != nil {
+	closed, err := s.store.Close(ctx, nc.InstrumentID, nc.OpenTime)
+	if err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
+	s.publishCandleEvent(ctx, hub.EventClosed, closed)
 	return nil
 }
 

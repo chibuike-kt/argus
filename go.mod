@@ -4,6 +4,7 @@ go 1.26.11
 
 require (
 	github.com/caarlos0/env/v11 v11.2.0
+	github.com/coder/websocket v1.8.15
 	github.com/getkin/kin-openapi v0.152.0
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/joho/godotenv v1.5.1

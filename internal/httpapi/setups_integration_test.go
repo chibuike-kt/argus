@@ -175,6 +175,17 @@ func testInstrument(t *testing.T, db *sql.DB) int64 {
 	inst, err := instruments.NewStore(db).Insert(context.Background(), instruments.NewInstrumentParams{
 		Provider: "test-provider", NativeSymbol: symbol, AssetClass: "crypto_perp",
 		PriceScale: &priceScale, QtyScale: &qtyScale, TickSize: 1, QtyStepSize: 1,
+		// Owner approved 12 November 2026: instruments.Store.Insert now
+		// refuses a row whose own supported_intervals is empty or
+		// missing "1m" -- GET /instruments/{id}/candles reads it as its
+		// single source of truth for which intervals it serves
+		// (internal/httpapi/instruments.go), with no fallback of its
+		// own. This is also the fix for the 4 failing
+		// TestIntegration_InstrumentsAndCandlesEndpoints_RealStore
+		// candle subtests: without this, every candles call defaulting
+		// to interval=1m got a 400, since this helper's own instrument
+		// had no supported_intervals at all before this change.
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("create test instrument: %v", err)

@@ -61,6 +61,17 @@ type AggregateOHLCV struct {
 	Low    quant.Price
 	Close  quant.Price
 	Volume quant.Qty
+	// Revision is the derived-candle revision rule
+	// (adr-004-ws-contract-review.md, review item 4): 1 + the sum of
+	// (revision - 1) over every source 1-minute candle in Window. It
+	// starts at 1 (every source candle at its own revision 1
+	// contributes 0) and rises by exactly 1 for every supersession of
+	// any source minute inside the window -- identical wherever the
+	// same window is computed, so the REST endpoint and the WebSocket
+	// snapshot/candle_corrected payload (not built in this phase) never
+	// disagree about it. For a 1-minute window (a single source
+	// candle), this reduces to exactly that candle's own revision.
+	Revision int32
 }
 
 // IncompleteWindow explains why a window could not be aggregated: at least
@@ -115,25 +126,71 @@ var _ candleReader = (*Store)(nil)
 // returned *AggregateOHLCV is non-nil only when *IncompleteWindow is nil,
 // and vice versa -- exactly one of the two carries meaning.
 func Aggregate(ctx context.Context, r candleReader, instrumentID int64, w Window) (*AggregateOHLCV, *IncompleteWindow, error) {
+	rows, err := r.ListCurrentCandlesInRange(ctx, instrumentID, w.Start.Time(), w.End.Time())
+	if err != nil {
+		return nil, nil, fmt.Errorf("marketdata: aggregate instrument=%d window=[%s,%s): %w", instrumentID, w.Start, w.End, err)
+	}
+	return aggregateFromRows(instrumentID, w, rows)
+}
+
+// rowsByOpenTime buckets rows once, keyed by UnixNano of the UTC
+// instant -- never by time.Time itself. time.Time equality (and so
+// map-key equality) considers the *Location pointer, not just the
+// instant: lib/pq sets each row's own Location by calling
+// time.LoadLocation on the session's "TimeZone" server parameter
+// (conn.go's own processParameterStatus), and that function returns
+// the time.UTC singleton only for the literal name "UTC" -- a server
+// configured with the equally-valid, equally-UTC-offset zone name
+// "Etc/UTC" (a common Postgres default) gets back a different
+// *time.Location object. reduceWindow's own lookups are built through
+// clock.EventTime, whose constructor always normalizes via .UTC() to
+// the time.UTC singleton -- so keying this map by the raw time.Time
+// would silently never match a single row fetched from such a server,
+// and every window would be reported incomplete regardless of what is
+// actually stored. UnixNano has no Location to disagree about.
+//
+// Built once per request (by Aggregate for its own one window, by
+// AggregateRange once for every window in the request) rather than
+// once per window: a row belongs to at most one open_time, so one
+// shared map serves any number of windows without re-scanning rows
+// per window (see reduceWindow's own doc comment for the complexity
+// this avoids).
+func rowsByOpenTime(rows []store.Candle) map[int64]store.Candle {
+	present := make(map[int64]store.Candle, len(rows))
+	for _, row := range rows {
+		present[row.OpenTime.UTC().UnixNano()] = row
+	}
+	return present
+}
+
+// aggregateFromRows is Aggregate's own in-memory half: bucket rows
+// once, then reduce the one window from that bucket. AggregateRange
+// instead buckets once for every window in the request and calls
+// reduceWindow directly per window, sharing the one bucket (addendum
+// item B's own follow-up: bucketing per request, not per window, is
+// what actually keeps this at O(rows), see reduceWindow).
+func aggregateFromRows(instrumentID int64, w Window, rows []store.Candle) (*AggregateOHLCV, *IncompleteWindow, error) {
+	return reduceWindow(instrumentID, w, rowsByOpenTime(rows))
+}
+
+// reduceWindow computes w's own AggregateOHLCV from present, a bucket
+// already keyed by rowsByOpenTime -- never re-scanning the full row
+// set this bucket came from. Before this, AggregateRange built a fresh
+// bucket by scanning every fetched row for every window it reduced:
+// O(windows * total_rows) instead of O(total_rows) to bucket once plus
+// O(sum of window sizes) to reduce, which is why a 500-bar hourly
+// request spent more time reducing in memory (profiled ~70% of the
+// end-to-end call) than running its own single database query.
+func reduceWindow(instrumentID int64, w Window, present map[int64]store.Candle) (*AggregateOHLCV, *IncompleteWindow, error) {
 	expected, err := w.minutes()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	rows, err := r.ListCurrentCandlesInRange(ctx, instrumentID, w.Start.Time(), w.End.Time())
-	if err != nil {
-		return nil, nil, fmt.Errorf("marketdata: aggregate instrument=%d window=[%s,%s): %w", instrumentID, w.Start, w.End, err)
-	}
-
-	present := make(map[time.Time]store.Candle, len(rows))
-	for _, row := range rows {
-		present[row.OpenTime] = row
-	}
-
 	var missing []clock.EventTime
 	for i := 0; i < expected; i++ {
 		slot := w.Start.Time().Add(time.Duration(i) * time.Minute)
-		row, ok := present[slot]
+		row, ok := present[slot.UTC().UnixNano()]
 		if !ok || !row.IsClosed {
 			// Absent, or present but still forming: either way, not yet a
 			// reliable source for this window.
@@ -153,7 +210,7 @@ func Aggregate(ctx context.Context, r candleReader, instrumentID int64, w Window
 	ordered := make([]store.Candle, expected)
 	for i := 0; i < expected; i++ {
 		slot := w.Start.Time().Add(time.Duration(i) * time.Minute)
-		ordered[i] = present[slot]
+		ordered[i] = present[slot.UTC().UnixNano()]
 	}
 
 	agg := AggregateOHLCV{
@@ -164,6 +221,7 @@ func Aggregate(ctx context.Context, r candleReader, instrumentID int64, w Window
 		Close:  quant.Price(ordered[len(ordered)-1].Close),
 	}
 	var volume int64
+	revision := int32(1)
 	for _, c := range ordered {
 		if quant.Price(c.High) > agg.High {
 			agg.High = quant.Price(c.High)
@@ -172,8 +230,10 @@ func Aggregate(ctx context.Context, r candleReader, instrumentID int64, w Window
 			agg.Low = quant.Price(c.Low)
 		}
 		volume += c.Volume
+		revision += c.Revision - 1
 	}
 	agg.Volume = quant.Qty(volume)
+	agg.Revision = revision
 
 	return &agg, nil, nil
 }

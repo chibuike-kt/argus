@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/chibuike-kt/argus/internal/quant"
 )
@@ -26,6 +27,16 @@ var (
 
 	ErrTickSizeNegative    = errors.New("instruments: tick size must not be negative")
 	ErrQtyStepSizeNegative = errors.New("instruments: qty step size must not be negative")
+
+	// ErrSupportedIntervalsMissing1m is returned when SupportedIntervals
+	// is empty or does not include "1m" (owner approved 12 November
+	// 2026): GET /instruments/{id}/candles reads SupportedIntervals as
+	// its own single source of truth for which intervals it serves
+	// (internal/httpapi/instruments.go) with no fallback of its own --
+	// an instrument that cannot even serve its own canonical 1-minute
+	// series would be unservable at any interval, which is never a
+	// legitimate row to register, not an edge case to tolerate.
+	ErrSupportedIntervalsMissing1m = errors.New(`instruments: supported_intervals must include "1m"`)
 )
 
 // NewInstrumentParams are the required inputs to register a new
@@ -93,6 +104,9 @@ func (p NewInstrumentParams) validate() error {
 	}
 	if p.QtyStepSize < 0 {
 		return ErrQtyStepSizeNegative
+	}
+	if !slices.Contains(p.SupportedIntervals, "1m") {
+		return ErrSupportedIntervalsMissing1m
 	}
 	return nil
 }

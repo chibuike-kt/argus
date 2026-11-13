@@ -61,13 +61,14 @@ func testInstrument(t *testing.T, db *sql.DB, label string) int64 {
 	symbol := fmt.Sprintf("BT-%s-%s-%d", t.Name(), label, time.Now().UnixNano())
 
 	inst, err := instruments.NewStore(db).Insert(context.Background(), instruments.NewInstrumentParams{
-		Provider:     "test-provider",
-		NativeSymbol: symbol,
-		AssetClass:   "crypto_perp",
-		PriceScale:   &priceScale,
-		QtyScale:     &qtyScale,
-		TickSize:     1,
-		QtyStepSize:  1,
+		Provider:           "test-provider",
+		NativeSymbol:       symbol,
+		AssetClass:         "crypto_perp",
+		PriceScale:         &priceScale,
+		QtyScale:           &qtyScale,
+		TickSize:           1,
+		QtyStepSize:        1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("create test instrument: %v", err)

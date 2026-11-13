@@ -20,6 +20,9 @@ import { useFlash } from "@/lib/use-flash";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import { formatMoney, toPlanOverlay } from "@/api/mappers";
 import { useDrawing } from "./drawing-context";
+import type { LiveTick } from "@/lib/use-live-candles";
+import type { ConnectionState, WireStatusPayload } from "@/lib/live-socket";
+import { isNewerCandleKey, decideApplyAction, type CandleKey } from "@/lib/live-candles-reducer";
 import { loadChartView, saveChartView } from "./chart-view-persistence";
 import { cloneDrawing } from "./drawings/types";
 import {
@@ -85,46 +88,90 @@ export interface ChartPlanOverlay {
   fromTime: string;
 }
 
-// ChartSurface is a thin data-loading wrapper: lightweight-charts and
-// the drawing controller are initialised once per mount
-// (ChartSurfaceInner's own effect, unchanged), so this only ever mounts
-// that inner component once real candles exist -- never re-running chart
-// init mid-flight while a fetch is pending, which would fight the
-// controller's own StrictMode-aware remount handling.
+// ChartSurface is a thin data-loading wrapper. lightweight-charts and the
+// drawing controller are created exactly once per mount
+// (ChartSurfaceInner's own create-effect, deps []); candles going in and
+// out of a loading state must not force that -- live-chart brief, phase
+// 4, Part 2A: "switching instrument or interval clears and reloads
+// [through the data path] without destroying the chart."
+//
+// Before this: this component conditionally rendered either a loading/
+// error/empty placeholder OR <ChartSurfaceInner>, swapping one React
+// element tree for a structurally different one every time setup/
+// candles changed. React has no way to know those two trees are "the
+// same chart, new data" -- it tears down ChartSurfaceInner (destroying
+// the chart, drawings layer, zoom, scroll) and mounts a fresh instance
+// once candles arrive again. hasLoadedOnceRef is what fixes that:
+// the full-page loading/error/empty states are shown only until the
+// first successful load, for the first instrument this page ever
+// shows. After that, ChartSurfaceInner stays mounted and renders its
+// own small loading/error overlay (below) over whatever chart is
+// already there, however many instruments or setups come and go.
 export function ChartSurface({ className }: { className?: string }) {
-  const { setup, instrument, candles, candlesLoading, candlesError, setupLoading } =
+  const { setup, instrument, candles, candlesLoading, candlesError, setupLoading, forming, connectionState, status, fatalReason } =
     useAnalysisWorkspace();
+  const hasLoadedOnceRef = useRef(false);
+  if (candles.length > 0) hasLoadedOnceRef.current = true;
 
-  if (setupLoading || candlesLoading) {
-    return (
-      <div className={cn("flex h-full w-full items-center justify-center gap-2 text-fg-subtle", className)}>
-        <CircleNotch className="size-5 animate-spin" />
-        Loading chart…
-      </div>
-    );
+  if (!hasLoadedOnceRef.current) {
+    if (setupLoading || candlesLoading) {
+      return (
+        <div className={cn("flex h-full w-full items-center justify-center gap-2 text-fg-subtle", className)}>
+          <CircleNotch className="size-5 animate-spin" />
+          Loading chart…
+        </div>
+      );
+    }
+    if (candlesError) {
+      return (
+        <div className={cn("flex h-full w-full items-center justify-center text-[13px] text-down", className)}>
+          Could not load candles: {candlesError.message}
+        </div>
+      );
+    }
+    if (!setup || !instrument || candles.length === 0) {
+      return (
+        <div className={cn("flex h-full w-full items-center justify-center text-[13px] text-fg-subtle", className)}>
+          No candles in range for this instrument.
+        </div>
+      );
+    }
   }
-  if (candlesError) {
-    return (
-      <div className={cn("flex h-full w-full items-center justify-center text-[13px] text-down", className)}>
-        Could not load candles: {candlesError.message}
-      </div>
-    );
-  }
-  if (!setup || !instrument || candles.length === 0) {
-    return (
+  // Past the first successful load: setup/instrument are only ever
+  // cleared together with candles (AnalysisWorkspaceProvider's own
+  // candle-fetch effect), so if candles is non-empty here, setup and
+  // instrument already are too -- but TypeScript cannot see that
+  // across a hook boundary, so this still needs the same guard, now
+  // reached only on the (rare, transient) in-between render where
+  // candles has not cleared yet but setup/instrument briefly have.
+  if (!setup || !instrument) {
+    return hasLoadedOnceRef.current ? null : (
       <div className={cn("flex h-full w-full items-center justify-center text-[13px] text-fg-subtle", className)}>
         No candles in range for this instrument.
       </div>
     );
   }
 
-  const chartCandles: ChartCandle[] = candles.map((c) => ({
-    openTime: c.open_time,
-    open: formatMoney(c.open),
-    high: formatMoney(c.high),
-    low: formatMoney(c.low),
-    close: formatMoney(c.close),
-  }));
+  // chartCandles/overlay/formationOutsideWindow read setup together
+  // with candles; during a setup switch, AnalysisWorkspaceProvider's
+  // own candle-fetch effect sets candlesLoading before clearing
+  // candles, so for one render these are a real, previous instrument's
+  // own candles paired with the new setup. ChartSurfaceInner's own
+  // update effect (see below) only re-applies data when candles
+  // actually changes, so this stale pairing is never drawn -- but
+  // formationOutsideWindow computed from it here, this render, would
+  // be meaningless. Skip it (false) whenever a fetch for the current
+  // setup has not resolved even once.
+  const chartCandles: ChartCandle[] =
+    candles.length === 0
+      ? []
+      : candles.map((c) => ({
+          openTime: c.open_time,
+          open: formatMoney(c.open),
+          high: formatMoney(c.high),
+          low: formatMoney(c.low),
+          close: formatMoney(c.close),
+        }));
   const overlay = toPlanOverlay(setup);
   // The chart window is now "the most recent MAX_CANDLES," not anchored
   // at this setup's own evaluation_time (web-wiring-followup brief, Part
@@ -132,7 +179,8 @@ export function ChartSurface({ className }: { className?: string }) {
   // starts. Rather than silently clipping the plan box/POI zone to
   // whatever candle happens to be first on screen, this is surfaced as a
   // small, honest label instead of hidden.
-  const formationOutsideWindow = new Date(overlay.fromTime) < new Date(chartCandles[0].openTime);
+  const formationOutsideWindow =
+    chartCandles.length > 0 && new Date(overlay.fromTime) < new Date(chartCandles[0].openTime);
 
   return (
     <ChartSurfaceInner
@@ -140,31 +188,161 @@ export function ChartSurface({ className }: { className?: string }) {
       symbol={instrument.native_symbol}
       venue={instrument.provider}
       candles={chartCandles}
+      loading={candlesLoading}
+      loadError={candlesError?.message}
       poiZone={{ low: overlay.poiLow, high: overlay.poiHigh }}
       plan={{ entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime }}
       formationOutsideWindow={formationOutsideWindow}
+      forming={forming}
+      connectionState={connectionState}
+      status={status}
+      fatalReason={fatalReason}
     />
   );
 }
 
-function ChartSurfaceInner({
-  className,
-  symbol,
-  venue,
-  candles,
-  poiZone,
-  plan,
-  formationOutsideWindow,
-}: {
+const EMPTY_BAR: OHLC = { open: 0, high: 0, low: 0, close: 0 };
+
+// Exported for chart-surface-update-path.test.tsx (Part 2A's own
+// component test: switching instrument/interval must not rebuild the
+// chart) -- it renders this directly, under a real DrawingProvider, to
+// exercise the actual create/update-effect split without needing the
+// whole AnalysisWorkspaceProvider fetch chain ChartSurface itself sits
+// behind.
+export interface ChartSurfaceInnerProps {
   className?: string;
   symbol: string;
   venue: string;
   candles: ChartCandle[];
+  loading: boolean;
+  loadError: string | undefined;
   poiZone: ChartPoiZone;
   plan: ChartPlanOverlay;
   formationOutsideWindow: boolean;
+  // Part 2D: the latest candle/candle_closed tick, applied via
+  // series.update() by its own effect below -- never through the
+  // candles prop above (rule 3). null when there is nothing live yet
+  // (no subscription, or a fresh one that has not sent its first
+  // message).
+  forming: LiveTick | null;
+  // Part 2F: the status badge's own three inputs, read straight off
+  // live-socket.ts/use-live-candles.ts -- never derived or guessed
+  // here.
+  connectionState: ConnectionState;
+  status: WireStatusPayload | null;
+  fatalReason: string | null;
+}
+
+// useNow re-renders every intervalMs so a duration computed against it
+// (this badge's own "last candle Xs ago") actually counts up on
+// screen, instead of staying frozen at whatever it read when the one
+// status message that set it arrived.
+function useNow(intervalMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+// formatAge renders a millisecond duration as the coarsest unit that
+// keeps it readable ("12s", "3m", "4h", "2d") -- a badge, not a
+// precise timer.
+function formatAge(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+// LiveStatusBadge (Part 2F): one badge, three layers of truth, cheapest
+// first. A fatal close (Part 2E: the session itself is invalid) always
+// wins, since no amount of waiting fixes it. Otherwise the socket's own
+// connecting/closed/open lifecycle is shown until the server's own
+// per-subscription `status` message arrives -- that message is the one
+// source of truth for degraded vs. not; this badge never computes
+// that itself from staleness/latency on its own.
+//
+// The wire's own "live" state is shown as "Connected", with the age of
+// the last candle (status.last_event_at) next to it -- never the word
+// "Live": nothing in this project has a decided freshness/latency
+// threshold (appendix-c-unresolved-decisions.md; ADR-006's own
+// "Freshness targets... must be defined numerically before release"),
+// so claiming data IS live/fresh would be a claim this badge cannot
+// back up yet. "Connected, last candle 12s ago" is exactly what is
+// known: the subscription is live, and here is how old its own last
+// candle actually is -- the viewer judges staleness themselves until
+// that threshold exists. "Degraded" is unchanged: a real stream-loss
+// event, not a guess.
+function LiveStatusBadge({
+  connectionState,
+  status,
+  fatalReason,
+}: {
+  connectionState: ConnectionState;
+  status: WireStatusPayload | null;
+  fatalReason: string | null;
 }) {
-  const lastTime = unix(candles[candles.length - 1].openTime);
+  const now = useNow(1000);
+  if (fatalReason) {
+    return (
+      <span className="flex items-center gap-1 rounded-md border border-down/30 bg-down/10 px-1.5 py-0.5 text-[11px] text-down">
+        <span className="size-1.5 rounded-full bg-down" />
+        Disconnected -- sign in again
+      </span>
+    );
+  }
+  if (connectionState === "connecting" || connectionState === "closed") {
+    return (
+      <span className="flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
+        <span className="size-1.5 animate-pulse rounded-full bg-fg-subtle" />
+        {connectionState === "connecting" ? "Connecting…" : "Reconnecting…"}
+      </span>
+    );
+  }
+  if (!status) return null; // open, but the server has not sent a status message yet
+  if (status.state === "degraded") {
+    return (
+      <span className="flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-down">
+        <span className="size-1.5 rounded-full bg-down" />
+        Degraded
+        {status.provider && <span className="text-fg-subtle">· {status.provider}</span>}
+      </span>
+    );
+  }
+  const label = status.state === "live" ? "Connected" : status.state[0].toUpperCase() + status.state.slice(1);
+  const age = status.last_event_at ? formatAge(now - new Date(status.last_event_at).getTime()) : null;
+  return (
+    <span className="flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
+      <span className="size-1.5 rounded-full bg-up" />
+      {label}
+      {age && <span>· last candle {age} ago</span>}
+      {status.provider && <span>· {status.provider}</span>}
+    </span>
+  );
+}
+
+export function ChartSurfaceInner({
+  className,
+  symbol,
+  venue,
+  candles,
+  loading,
+  loadError,
+  poiZone,
+  plan,
+  formationOutsideWindow,
+  forming,
+  connectionState,
+  status,
+  fatalReason,
+}: ChartSurfaceInnerProps) {
+  const hasCandles = candles.length > 0;
+  const lastTime = hasCandles ? unix(candles[candles.length - 1].openTime) : (0 as Time);
   const toData = (): CandlestickData<Time>[] =>
     candles.map((c) => ({
       time: unix(c.openTime),
@@ -178,7 +356,17 @@ function ChartSurfaceInner({
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const controllerRef = useRef<DrawingController | null>(null);
   const attachedRef = useRef<Map<string, ISeriesPrimitive<Time>>>(new Map());
-  const [bar, setBar] = useState<OHLC>(candles[candles.length - 1]);
+  // System annotations (POI zone, plan overlay) are tracked here, not
+  // user drawings -- attachedRef above is the drawing store's own
+  // reconciliation target, scoped to the drawings the user actually
+  // placed. These two are recreated (never mutated in place: neither
+  // primitive type exposes an update() the way user-drawing primitives
+  // do via updatePrimitive) whenever candles or the plan itself changes.
+  const systemPrimitivesRef = useRef<{ poi: RectanglePrimitive | null; plan: PositionPrimitive | null }>({
+    poi: null,
+    plan: null,
+  });
+  const [bar, setBar] = useState<OHLC>(hasCandles ? candles[candles.length - 1] : EMPTY_BAR);
   const [toolbarTick, setToolbarTick] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   // Bumped once the chart/series/controller are (re)created. React 18
@@ -208,6 +396,30 @@ function ChartSurfaceInner({
   // candle set regardless), so this just needs to match whatever scope
   // the drawings store itself was given at that same moment.
   const chartViewScopeRef = useRef(`${symbol}:${timeframe}`);
+  // pendingRestoreScopeRef: the scope a restore-or-default is still owed
+  // for, set the moment chartViewScopeRef changes and cleared only once
+  // that restore actually runs against real data. A plain one-shot
+  // boolean (checked once, on the same render the scope changed) is not
+  // enough: a slow instrument switch clears candles to empty before the
+  // new history has loaded, so the render where the scope first changes
+  // can easily be the one render where hasCandles is false -- without
+  // tracking this across renders, that one-shot moment is spent on an
+  // empty chart and the restore never gets a real turn once data
+  // actually arrives.
+  const pendingRestoreScopeRef = useRef<string | null>(null);
+  // isProgrammaticRangeChangeRef brackets a call that moves the chart's
+  // own visible range but is not a user gesture (applyCandleData's own
+  // setData, the saved-view restore, the no-saved-view default fit).
+  // subscribeVisibleLogicalRangeChange's own handler (below) reads this
+  // to skip saving exactly those changes -- only a range change the
+  // trader actually made (wheel, drag, scroll, a toolbar zoom control)
+  // may overwrite what is persisted. Before this, EVERY range change
+  // was saved, including the ones setData triggers while switching
+  // instruments with little or no data yet -- a real, reproduced bug:
+  // the saved view for an instrument could be silently overwritten by
+  // whatever near-empty range the library picked for a different
+  // instrument's data, while that one was still loading.
+  const isProgrammaticRangeChangeRef = useRef(false);
   const {
     drawings: list,
     selectedId,
@@ -219,6 +431,128 @@ function ChartSurfaceInner({
     bringToFront,
     store,
   } = drawings;
+  // The crosshair handler's own "nothing under the cursor" fallback
+  // needs the latest last bar, but it is registered once, in the
+  // create effect below, and never re-registered -- a closure over
+  // candles there would be stuck on whatever candles were at mount
+  // forever, for exactly the reason this whole file is being split in
+  // two. applyCandleData keeps this ref current instead.
+  const lastBarRef = useRef<OHLC>(hasCandles ? candles[candles.length - 1] : EMPTY_BAR);
+  // lastAppliedOpenTimeRef/appliedLiveKeyRef back the live-tick effect
+  // below (Part 2D): the former is decideApplyAction's own
+  // currentLastOpenTime (replace same bar / append a new one / drop an
+  // older one, never attempted through update()), the latter is
+  // isNewerCandleKey's own "already applied" side of the (open_time,
+  // revision, seq) comparison (rule 5) -- rejecting a duplicate or
+  // out-of-order message before even reaching the apply-action
+  // decision. Both reset in applyCandleData, since any full setData
+  // (reload, gap-fill, instrument/interval switch) makes whatever was
+  // "last applied" for live-tick purposes stale.
+  const lastAppliedOpenTimeRef = useRef<string | null>(hasCandles ? candles[candles.length - 1].openTime : null);
+  const appliedLiveKeyRef = useRef<CandleKey | null>(null);
+
+  // withProgrammaticRangeChange brackets fn so any visible-range change
+  // it causes is not mistaken for a user gesture by
+  // subscribeVisibleLogicalRangeChange's own handler, below. Safe to
+  // call synchronously like this: lightweight-charts fires that event
+  // synchronously, inline, from within the very call that changes the
+  // range (TimeScale's own _setVisibleRange, read directly from the
+  // library's source) -- never deferred to a microtask or animation
+  // frame, so a plain try/finally around fn correctly brackets it.
+  function withProgrammaticRangeChange(fn: () => void): void {
+    isProgrammaticRangeChangeRef.current = true;
+    try {
+      fn();
+    } finally {
+      isProgrammaticRangeChangeRef.current = false;
+    }
+  }
+
+  // applyCandleData is this component's own "data path" (Part 2A):
+  // setData plus repositioning the two system primitives (the POI zone
+  // and the plan box, recreated rather than mutated -- neither
+  // primitive type exposes an update() the way a user drawing's own
+  // primitive does), told to the drawing controller, and the OHLC
+  // legend reset to the new last bar. Never touches createChart,
+  // addSeries, or the DrawingController instance itself -- called from
+  // the create effect once at mount, and from the update effect below
+  // on every later candles/plan change, so instrument and interval
+  // switches "clear and reload" without rebuilding the chart (Part
+  // 2A's own rule). A live single-bar update (Part 2D) calls
+  // series.update() directly, from its own effect below, and never
+  // routes through here, which always does a full setData.
+  function applyCandleData() {
+    const series = seriesRef.current;
+    const chart = chartRef.current;
+    if (!series || !chart) return;
+    // Any full setData makes whatever the live-tick effect last applied
+    // stale -- this is new data (a reload, a gap-fill, an instrument or
+    // interval switch), so the next live tick must be compared against
+    // THIS data's own last bar, not a previous one.
+    appliedLiveKeyRef.current = null;
+    if (!hasCandles) {
+      series.setData([]);
+      const prev = systemPrimitivesRef.current;
+      if (prev.poi) series.detachPrimitive(prev.poi);
+      if (prev.plan) series.detachPrimitive(prev.plan);
+      systemPrimitivesRef.current = { poi: null, plan: null };
+      lastBarRef.current = EMPTY_BAR;
+      lastAppliedOpenTimeRef.current = null;
+      setBar(EMPTY_BAR);
+      return;
+    }
+
+    series.setData(toData());
+    lastAppliedOpenTimeRef.current = candles[candles.length - 1].openTime;
+
+    const prev = systemPrimitivesRef.current;
+    if (prev.poi) series.detachPrimitive(prev.poi);
+    if (prev.plan) series.detachPrimitive(prev.plan);
+
+    // SMC annotations: ARGUS's own read-only output, in its own layer.
+    // Anchored at the POI's own real formation candle (plan.fromTime),
+    // not a fixture array index. If that candle fell outside the fetched
+    // window (the chart's own candle request is bounded, the setup's
+    // formation candle might predate it), fall back to the first visible
+    // candle rather than throwing.
+    const fromIndex = Math.max(0, candles.findIndex((c) => c.openTime === plan.fromTime));
+    const poi = new RectanglePrimitive({
+      p1: { time: unix(candles[fromIndex].openTime), price: poiZone.high },
+      p2: { time: lastTime, price: poiZone.low },
+      style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
+      label: "Order block",
+    });
+    const planPrimitive = new PositionPrimitive({
+      kind: "position-long",
+      time: unix(candles[fromIndex].openTime),
+      rightTime: lastTime,
+      entry: plan.entry,
+      stop: plan.stop,
+      targets: plan.targets,
+      style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
+    });
+    series.attachPrimitive(poi);
+    series.attachPrimitive(planPrimitive);
+    systemPrimitivesRef.current = { poi, plan: planPrimitive };
+
+    // Structure labels (confirmed swings, BOS/CHOCH, the equilibrium
+    // line) are deliberately NOT drawn here: they come from
+    // structure_events/structure_state, which have no per-setup API
+    // today (see the wiring brief's own report). Overlaying fixture
+    // values for these on top of real candles would misrepresent them as
+    // findings about this real data, which this wiring is specifically
+    // meant not to do -- so this real-data path draws only the POI zone
+    // and the plan box above, both read directly from the setup's own
+    // plan_snapshot.
+
+    // Premium/discount split (spec section 8, the active range's
+    // equilibrium) is likewise not drawn here: no per-setup API field
+    // carries it today. See the comment above this block.
+
+    controllerRef.current?.setCandles(candles);
+    lastBarRef.current = candles[candles.length - 1];
+    setBar(candles[candles.length - 1]);
+  }
 
   // chart init (once)
   useEffect(() => {
@@ -266,70 +600,34 @@ function ChartSurfaceInner({
       priceLineVisible: true,
       priceLineColor: "rgba(255,255,255,0.3)",
     });
-    series.setData(toData());
     seriesRef.current = series;
-
-    // SMC annotations: ARGUS's own read-only output, in its own layer.
-    // Anchored at the POI's own real formation candle (plan.fromTime),
-    // not a fixture array index. If that candle fell outside the fetched
-    // window (the chart's own candle request is bounded, the setup's
-    // formation candle might predate it), fall back to the first visible
-    // candle rather than throwing.
-    const fromIndex = Math.max(0, candles.findIndex((c) => c.openTime === plan.fromTime));
-    series.attachPrimitive(
-      new RectanglePrimitive({
-        p1: { time: unix(candles[fromIndex].openTime), price: poiZone.high },
-        p2: { time: lastTime, price: poiZone.low },
-        style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
-        label: "Order block",
-      }),
-    );
-    series.attachPrimitive(
-      new PositionPrimitive({
-        kind: "position-long",
-        time: unix(candles[fromIndex].openTime),
-        rightTime: lastTime,
-        entry: plan.entry,
-        stop: plan.stop,
-        targets: plan.targets,
-        style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
-      }),
-    );
-
-    // Structure labels (confirmed swings, BOS/CHOCH, the equilibrium
-    // line) are deliberately NOT drawn here: they come from
-    // structure_events/structure_state, which have no per-setup API
-    // today (see the wiring brief's own report). Overlaying fixture
-    // values for these on top of real candles would misrepresent them as
-    // findings about this real data, which this wiring is specifically
-    // meant not to do -- so this real-data path draws only the POI zone
-    // and the plan box above, both read directly from the setup's own
-    // plan_snapshot.
-
-    // Premium/discount split (spec section 8, the active range's
-    // equilibrium) is likewise not drawn here: no per-setup API field
-    // carries it today. See the comment above this block.
 
     // Restore wherever the trader last left the view (per instrument +
     // timeframe); only fall back to the default fit (and the explicit
     // thinner spacing fitContent's own wide auto-fit would otherwise
-    // leave in place) if nothing was saved yet.
-    const savedView = loadChartView(chartViewScopeRef.current);
-    if (savedView) {
-      chart.timeScale().setVisibleLogicalRange(savedView);
-    } else {
-      chart.timeScale().fitContent();
-      chart.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
-    }
+    // leave in place) if nothing was saved yet. Programmatic: must not
+    // be mistaken for a user gesture by the save handler just below.
+    withProgrammaticRangeChange(() => {
+      const savedView = loadChartView(chartViewScopeRef.current);
+      if (savedView) {
+        chart.timeScale().setVisibleLogicalRange(savedView);
+      } else {
+        chart.timeScale().fitContent();
+        chart.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
+      }
+    });
 
     chart.subscribeCrosshairMove((param) => {
       const d = param.seriesData.get(series) as CandlestickData<Time> | undefined;
       if (d) setBar({ open: d.open, high: d.high, low: d.low, close: d.close });
-      else setBar(candles[candles.length - 1]);
+      else setBar(lastBarRef.current);
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
       setToolbarTick((t) => t + 1);
-      if (range) saveChartView(chartViewScopeRef.current, range);
+      // Persist only a range change the trader actually made -- never
+      // one caused by this component's own setData/restore/default-fit
+      // calls (see withProgrammaticRangeChange's own doc comment).
+      if (range && !isProgrammaticRangeChangeRef.current) saveChartView(chartViewScopeRef.current, range);
     });
 
     const controller = new DrawingController(chart, series, hostRef.current, store, {
@@ -337,9 +635,9 @@ function ChartSurfaceInner({
       onContextMenu: (id, x, y) => setContextMenu({ id, x, y }),
       onSelectionChange: () => setToolbarTick((t) => t + 1),
     });
-    controller.setCandles(candles);
     controller.attach();
     controllerRef.current = controller;
+    withProgrammaticRangeChange(() => applyCandleData());
     setChartGeneration((g) => g + 1);
 
     return () => {
@@ -355,6 +653,103 @@ function ChartSurfaceInner({
     // re-runs on mount/unmount -- re-initialising the whole chart on every
     // drawing change would defeat the point of the primitive layer.
   }, []);
+
+  // data path (Part 2A): candles or the plan overlay changed after
+  // mount -- apply the new data without touching createChart/addSeries/
+  // DrawingController. Skipped on the render that created the chart
+  // (chartGeneration still 0 then; the create effect above already
+  // called applyCandleData for that first render's own data) so the
+  // very first load is not applied twice.
+  const isFirstDataEffectRef = useRef(true);
+  useEffect(() => {
+    if (isFirstDataEffectRef.current) {
+      isFirstDataEffectRef.current = false;
+      return;
+    }
+    if (!chartRef.current || !seriesRef.current) return;
+    const chart = chartRef.current;
+
+    // A genuine instrument switch resets the view (fitContent, or the
+    // new scope's own saved one): the old zoom/scroll was over a
+    // different price range entirely and generally means nothing for
+    // the new one. chartViewScopeRef must track the new scope too --
+    // it was captured once at mount (see its own declaration, above),
+    // which was correct while symbol/timeframe genuinely never changed
+    // after that; now they can.
+    const newScope = `${symbol}:${timeframe}`;
+    if (chartViewScopeRef.current !== newScope) {
+      chartViewScopeRef.current = newScope;
+      // Owe this scope a restore-or-default -- not necessarily on THIS
+      // render. See pendingRestoreScopeRef's own doc comment, above: a
+      // slow switch can mean candles is still empty right here, below.
+      pendingRestoreScopeRef.current = newScope;
+    }
+
+    withProgrammaticRangeChange(() => applyCandleData());
+
+    if (pendingRestoreScopeRef.current === newScope && hasCandles) {
+      pendingRestoreScopeRef.current = null;
+      withProgrammaticRangeChange(() => {
+        const savedView = loadChartView(newScope);
+        if (savedView) {
+          chart.timeScale().setVisibleLogicalRange(savedView);
+        } else {
+          chart.timeScale().fitContent();
+          chart.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
+        }
+      });
+    }
+    // applyCandleData/symbol/timeframe/hasCandles are read fresh each
+    // run via closure, same convention the create effect above already
+    // uses (this project's own lint config does not enforce
+    // react-hooks/exhaustive-deps); candles/poiZone/plan are the only
+    // real triggers this effect needs.
+  }, [candles, poiZone.low, poiZone.high, plan.entry, plan.stop, plan.fromTime, plan.targets]);
+
+  // live-tick path (Part 2D): a candle/candle_closed message, applied
+  // with series.update() -- its own path, never through the candles
+  // prop/applyCandleData above (rule 3). Two guards before it is ever
+  // allowed to touch the chart:
+  //  1. isNewerCandleKey (rule 5): reject anything not strictly newer
+  //     than the last tick actually applied, by (open_time, revision,
+  //     seq) -- a duplicate or out-of-order delivery after a resubscribe
+  //     must not re-apply or regress the bar on screen.
+  //  2. decideApplyAction: same open_time replaces (price moving within
+  //     the still-forming bar), a later open_time appends (the bar just
+  //     closed and/or a new one started), an EARLIER open_time is
+  //     dropped outright -- update() throws on an older time without
+  //     historicalUpdate=true (lightweight-charts-update-contract.test.ts),
+  //     and a live tick is never the right place to rewrite an older
+  //     bar anyway (that is candle_corrected's own job, which never
+  //     reaches `forming` at all -- see use-live-candles.ts's own doc
+  //     comment).
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series || !forming) return;
+
+    const nextKey: CandleKey = {
+      openTime: forming.candle.open_time,
+      revision: forming.candle.revision,
+      seq: forming.seq,
+    };
+    if (!isNewerCandleKey(nextKey, appliedLiveKeyRef.current)) return;
+
+    const action = decideApplyAction(forming.candle, lastAppliedOpenTimeRef.current);
+    if (action === "drop-stale") return;
+
+    const bar: OHLC = {
+      open: formatMoney(forming.candle.open),
+      high: formatMoney(forming.candle.high),
+      low: formatMoney(forming.candle.low),
+      close: formatMoney(forming.candle.close),
+    };
+    series.update({ time: unix(forming.candle.open_time), ...bar });
+
+    appliedLiveKeyRef.current = nextKey;
+    lastAppliedOpenTimeRef.current = forming.candle.open_time;
+    lastBarRef.current = bar;
+    setBar(bar);
+  }, [forming]);
 
   // keep the controller's tool/option state in sync with context, without
   // re-running chart init
@@ -433,7 +828,7 @@ function ChartSurfaceInner({
   // endpoint for a day-level $ / % change (see the wiring brief's own
   // report), so that cluster is a SampleDataBadge below, not a computed
   // number dressed up to look real.
-  const lastCandle = candles[candles.length - 1];
+  const lastCandle = hasCandles ? candles[candles.length - 1] : EMPTY_BAR;
   const up = lastCandle.close >= lastCandle.open;
   const last = lastCandle.close;
 
@@ -449,6 +844,30 @@ function ChartSurfaceInner({
       <div className="relative min-h-0 flex-1">
         <div className="dot-grid pointer-events-none absolute inset-0" />
         <div ref={hostRef} className="absolute inset-0" />
+
+        {/* A later instrument/setup switch's own loading or error state,
+            layered over whatever chart is already on screen -- never a
+            full replace (ChartSurface's own doc comment explains why:
+            that is what used to destroy the chart on every switch). */}
+        {(loading || loadError) && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-10 z-10 flex justify-center">
+            <div
+              className={cn(
+                "flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium shadow-sm",
+                loadError
+                  ? "border-down/30 bg-down/10 text-down"
+                  : "border-line bg-surface text-fg-subtle",
+              )}
+            >
+              {loadError ? `Could not load candles: ${loadError}` : (
+                <>
+                  <CircleNotch className="size-3 animate-spin" />
+                  Loading…
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {selected && toolbarPos && (
           <ContextToolbar
@@ -492,6 +911,7 @@ function ChartSurfaceInner({
             <span className={cn("ml-1 size-1.5 rounded-full", up ? "bg-up" : "bg-down")} />
           </div>
           <SampleDataBadge label="Sample % change" />
+          <LiveStatusBadge connectionState={connectionState} status={status} fatalReason={fatalReason} />
           {formationOutsideWindow && (
             <span className="rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
               Setup formed before this window
@@ -537,6 +957,7 @@ function ChartSurfaceInner({
             <span>
               C{" "}
               <span
+                data-testid="legend-close"
                 className={cn(
                   "transition-base rounded px-0.5",
                   bar.close >= bar.open ? "text-up" : "text-down",

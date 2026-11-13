@@ -40,13 +40,14 @@ func TestIntegration_CheckFixtureOnly_RefusesNonFixtureInstrument(t *testing.T) 
 	priceScale := quant.Scale(0)
 	qtyScale := quant.Scale(0)
 	inst, err := instStore.Insert(context.Background(), instruments.NewInstrumentParams{
-		Provider:     "not-fixture",
-		NativeSymbol: fmt.Sprintf("GUARD-%s-%d", t.Name(), time.Now().UnixNano()),
-		AssetClass:   "crypto_perp",
-		PriceScale:   &priceScale,
-		QtyScale:     &qtyScale,
-		TickSize:     1,
-		QtyStepSize:  1,
+		Provider:           "not-fixture",
+		NativeSymbol:       fmt.Sprintf("GUARD-%s-%d", t.Name(), time.Now().UnixNano()),
+		AssetClass:         "crypto_perp",
+		PriceScale:         &priceScale,
+		QtyScale:           &qtyScale,
+		TickSize:           1,
+		QtyStepSize:        1,
+		SupportedIntervals: []string{"1m"},
 	})
 	if err != nil {
 		t.Fatalf("create non-fixture instrument: %v", err)

@@ -2,3 +2,11 @@ node_modules
 dist
 .vite
 *.tsbuildinfo
+
+# A real (dev-only, throwaway) session, generated fresh by every
+# Playwright run's own global-setup.ts -- never committed, never
+# hand-made (CLAUDE.md rule 7: no secrets in code or config).
+e2e/.auth
+test-results
+playwright-report
+e2e/screenshots

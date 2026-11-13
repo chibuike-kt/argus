@@ -95,6 +95,36 @@ func (e ListInstrumentsParamsEnabled) Valid() bool {
 	}
 }
 
+// Defines values for ListInstrumentCandlesParamsInterval.
+const (
+	N15m ListInstrumentCandlesParamsInterval = "15m"
+	N1d  ListInstrumentCandlesParamsInterval = "1d"
+	N1h  ListInstrumentCandlesParamsInterval = "1h"
+	N1m  ListInstrumentCandlesParamsInterval = "1m"
+	N4h  ListInstrumentCandlesParamsInterval = "4h"
+	N5m  ListInstrumentCandlesParamsInterval = "5m"
+)
+
+// Valid indicates whether the value is a known member of the ListInstrumentCandlesParamsInterval enum.
+func (e ListInstrumentCandlesParamsInterval) Valid() bool {
+	switch e {
+	case N15m:
+		return true
+	case N1d:
+		return true
+	case N1h:
+		return true
+	case N1m:
+		return true
+	case N4h:
+		return true
+	case N5m:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListInstrumentCandlesParamsOrder.
 const (
 	Asc  ListInstrumentCandlesParamsOrder = "asc"
@@ -168,6 +198,13 @@ type Candle struct {
 	OpenTime  time.Time `json:"open_time"`
 	Revision  int32     `json:"revision"`
 	Volume    string    `json:"volume"`
+}
+
+// CandleHistory GET /instruments/{id}/candles' own response shape (live-chart- pipeline brief, Phase 1, corrected by adr-004-ws-contract-review.md review items 4 and 5): the candle array plus the join point with the live WebSocket stream (adr-004-ws-contract-draft.md's own `snapshot` message uses the same last_closed_open_time/ last_closed_revision field names) -- the latest COMPLETE window of the requested interval (not always the latest closed 1-minute candle: a 1h request's own join point is its latest complete hour), independent of this response's own from/to range, so a client that paged backward through history still gets the real current join point, not whatever the requested range happened to end at. last_closed_revision follows the same derived-revision rule as every candle in this response at interval > 1m (see Candle's own revision field doc below): 1 + the sum of (revision - 1) over every source 1-minute candle in that window. Both last_closed_* fields are null only when no complete window of the requested interval exists yet.
+type CandleHistory struct {
+	Candles            []Candle   `json:"candles"`
+	LastClosedOpenTime *time.Time `json:"last_closed_open_time,omitempty"`
+	LastClosedRevision *int32     `json:"last_closed_revision,omitempty"`
 }
 
 // Error defines model for Error.
@@ -332,15 +369,20 @@ type ListInstrumentsParamsEnabled string
 
 // ListInstrumentCandlesParams defines parameters for ListInstrumentCandles.
 type ListInstrumentCandlesParams struct {
-	From *time.Time `form:"from,omitempty" json:"from,omitempty"`
-	To   *time.Time `form:"to,omitempty" json:"to,omitempty"`
+	// Interval 1m (default): the canonical series, served directly. 5m, 15m, 1h, 4h, 1d: computed on read by server-side aggregation: never built client-side, so the live stream and REST history always agree. Any other value is a 400. Whether a given interval is served for this instrument is read from its own supported_intervals, not guessed from asset class -- an interval not in that list is a clear 400.
+	Interval *ListInstrumentCandlesParamsInterval `form:"interval,omitempty" json:"interval,omitempty"`
+	From     *time.Time                           `form:"from,omitempty" json:"from,omitempty"`
+	To       *time.Time                           `form:"to,omitempty" json:"to,omitempty"`
 
-	// Limit Maximum candles returned. Default 500, maximum 1000 -- a client cannot request the whole table in one call regardless of how wide [from, to) is.
+	// Limit Maximum candles returned. Default 500, maximum 1000 -- a client cannot request the whole table in one call regardless of how wide [from, to) is, at any interval.
 	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Order asc (default): oldest first, unchanged from before this parameter existed. desc: newest first -- "the most recent N" without already knowing a [from, to) range narrow enough to contain them (web-wiring-followup brief, Part 4). limit still applies either way, enforced in SQL.
+	// Order asc (default): oldest first, unchanged from before this parameter existed, at every interval -- from and to are both required. desc: newest first -- "the most recent N" without already knowing a [from, to) range narrow enough to contain them (web-wiring-followup brief, Part 4; extended to every interval, not just 1m, by adr-004-ws-contract-review.md's own addendum item C). limit still applies either way. desc with from/to both omitted is allowed at any interval: at 1m, enforced in SQL; above 1m, anchored at the per-interval join point (last_closed_open_time) and walked backward in the handler, over the aggregated windows.
 	Order *ListInstrumentCandlesParamsOrder `form:"order,omitempty" json:"order,omitempty"`
 }
+
+// ListInstrumentCandlesParamsInterval defines parameters for ListInstrumentCandles.
+type ListInstrumentCandlesParamsInterval string
 
 // ListInstrumentCandlesParamsOrder defines parameters for ListInstrumentCandles.
 type ListInstrumentCandlesParamsOrder string
@@ -412,7 +454,7 @@ type ServerInterface interface {
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams)
-	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1); the handler itself still requires both, with the same message as before, when order is asc or omitted -- see its own comment.
+	// ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams)
 	// CompleteOnboarding Records onboarding_completed_at (ADR-015), but only once the authenticated user already has a display name and at least one watchlist item -- 409 onboarding_incomplete otherwise: the request itself is well formed, the account's current state is just not yet eligible.
@@ -505,7 +547,7 @@ func (_ Unimplemented) ListInstruments(w http.ResponseWriter, r *http.Request, p
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1); the handler itself still requires both, with the same message as before, when order is asc or omitted -- see its own comment.
+// ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 // (GET /instruments/{id}/candles)
 func (_ Unimplemented) ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -782,6 +824,19 @@ func (siw *ServerInterfaceWrapper) ListInstrumentCandles(w http.ResponseWriter, 
 
 	// Parameter object where we will unmarshal all parameters from the context
 	var params ListInstrumentCandlesParams
+
+	// ------------- Optional query parameter "interval" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "interval", r.URL.Query(), &params.Interval, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "interval"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "interval", Err: err})
+		}
+		return
+	}
 
 	// ------------- Optional query parameter "from" -------------
 
@@ -1533,7 +1588,7 @@ type ListInstrumentCandlesResponseObject interface {
 	VisitListInstrumentCandlesResponse(w http.ResponseWriter) error
 }
 
-type ListInstrumentCandles200JSONResponse []Candle
+type ListInstrumentCandles200JSONResponse CandleHistory
 
 func (response ListInstrumentCandles200JSONResponse) VisitListInstrumentCandlesResponse(w http.ResponseWriter) error {
 
@@ -1866,7 +1921,7 @@ type StrictServerInterface interface {
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(ctx context.Context, request ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error)
-	// ListInstrumentCandles Closed 1-minute candles for one instrument in [from, to), oldest first -- internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses. A forming candle's own values can still change, so it is never included. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1); the handler itself still requires both, with the same message as before, when order is asc or omitted -- see its own comment.
+	// ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(ctx context.Context, request ListInstrumentCandlesRequestObject) (ListInstrumentCandlesResponseObject, error)
 	// CompleteOnboarding Records onboarding_completed_at (ADR-015), but only once the authenticated user already has a display name and at least one watchlist item -- 409 onboarding_incomplete otherwise: the request itself is well formed, the account's current state is just not yet eligible.
@@ -2450,79 +2505,97 @@ func (sh *strictHandler) UpdateWatchlist(w http.ResponseWriter, r *http.Request)
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"7Httbxu3sv9XGez/DzQGVg92nQJVcV+4aU4RnLbJjdN7XtSFQO2OJNZcckNypegU+e4XM+SudqWVLDt2",
-	"kgPcd7aWSw7n4Te/GXL/TjJTlEaj9i6Z/J24bImF4D+vKr+8Ruek0fRvaU2J1kvkh5lF4TGfCk//zY0t",
-	"6K8kFx4HXhaYpInflJhMEuet1IvkY5pklbWo+YX4bGaMQqHpocw7E0ntv7vcTiK1xwVaHljSQF0pJWYK",
-	"k4m3FfYspoTzU4eo7yVi5dBOxSJKecciH9PE4vtKWsyTyR+0g7Stlx0Ztvv/s5nJzP7CzNPCpOzfHdrH",
-	"0XQuXanEZqpFgSdpCwshVcswO0+mK7RyLjH/RNsZPTPC5lIvpuR2Cn3/lH2aDSLuCbSj8t4V+hT+Quhc",
-	"YY+6lXHYqwl+MmWVn2yIpVwseyeTbsrzHdCoMuve10yJ+uCDe8pmcSXr4G7b7tuLXtutjKqKPs3sGGsr",
-	"SUdlUfaokrDDOCBpJm/rpSVgn/1eWmt6ogX7f85M3m/UAp0Ti/5ntCt0firzu3fNC2yn25d4Z3yQs29j",
-	"P6NGK7OrLMMyhkd3L84LX7m7RYrj+tZ4pZ23VRFhrju9cA79NFPCuV6tzITDKQ86DVk0Pf5U4NDCyxVO",
-	"3aaYmX6cKq3McOoyofBEhy6tWck8QO7edO/95l6Tva+Mv49aXFWWxhJs0SR2JRRrW3os+tUefxDWig3/",
-	"L7PbqZP/PiEiGT6b3e4qM+1YvKvIth7aS/bLvzV2n8/9YhZSvw0h1RO3dQJqdF3j/b6lhXNrY08IynqK",
-	"5o0+ud68fnWtRemWpkesXFrMfATJe6C7nubSZaY6xHYO4rvN0U5nymS304wz1PT05Lr/7j0hvj3DAxLK",
-	"+8JO55Sc7yv57ov3FJuwLPOVFWrq1pT5T144/HKXG/HTtOULdfaKqazfaMcNckjZvVo8oqH+3Xc9sNfr",
-	"ldAPdXvU3m76QdhI+v3/W5wnk+T/jba1xSgWFqN2uAUQ9pgRjtzTdAezID0yZT+GCrtA3wXaY7K+4/Ft",
-	"cbso3J9wu54SlBWF2ooQdNW7/15zWTOXCn8vKQAPgugu7T/u1p3RfYteo6/KHoKgFsZKvyyIhLtDTvKw",
-	"suWo262EqgQ9vicunV5aNrTodD/kGg9XR945wAXaTEQJPXWtaDwaQO3IDTE3daayGd4bd/dfvSfy0gQH",
-	"MDREKD9BXRXscBhcnSgHm5m1kibeysUCLQbcWgklyZztQGhPaoXHxeao75EjzG1/EKRJxUF0H8/s41Nd",
-	"X2mv2VLLAet0EWJvS7Xqjhpo12v24yPtidSdarmlioMA8HLVXyY8GQo8OM5DFNb++FCvSxNRoM6Lbqfm",
-	"AWjyHxvVjsx+6np9sdFM0LHJvsceCI6jXn9vL+91bLnQVfkiNogO5tMjlUaohtCfwB7DuDuqkCDRtRfW",
-	"HxRHxJbA1KPtVImtwuLkOupAqbSzxmFR/wetnG8Oynqw4fKpAvLEd4vlSqNdT3vvnlbrW2iHFe4toXCF",
-	"/T0Ka+9eOLzNY/sW/5fw2VJJ5195LPbXfgiDKY2T/lR02A33nSzYzHVU9jtobGfSQGzRZVaWQcrkNVVO",
-	"IDX4pXTAXBxmmJkCHaDIlkDk/hsHtTBDQvia759cFR4g+TvC9TT6mEjOzb7cb19ev4OrN69gbixcvf35",
-	"9+shvDBFIXTuUhAZV2tAmmB8cykspfPGykwoeF+hlehA6BwsBniEQmixQBIGhEXgBSpN2hmJUo5W5/Ds",
-	"6qe3g/H48mwIv8gVQsj4jofnqOSKMiCYFVr4F86uDXl9WIRGuBIzbrODw1IQTVGb4Y1muuOJ0Sa8DdpU",
-	"kiYNEUjGw/PhuG5Li1Imk+Rb/olQ0C/ZECNR+eVImYUMx0smuEKz/Vc5TV/5JTeOkqYd+6PJNwFhtI/M",
-	"RJSlkhm/NfrLBU8OifWutNtpSn3s2prYOv8QsISFvhiPH23t5siH191x8X+S9i7H54+2WuiX9yz1uyZD",
-	"GCv/jTkvevH90y/6zhj4VegNRN07jjNXFYWwm2RSN8EhErNpZjFH7aVQjqOn0rfarDVwVkhhbY1eQJ1g",
-	"wVgQGipdHxI1sSWUvMUYE+fPz4bwWoOrsgydS8GR5/slgguHnpAZcysxRpyvrA6PK4eWgoAkbpzYVP5O",
-	"L6Yxe/50uY8Tvxl4EbXf1cpbXJlbDFLEw8RGWJIyUyhsfMyyD+FVjkVpaK7hnsADodQpQl8p9Thy4wrt",
-	"ppF4hsrohdQL8IZlJtHIyBlRt6DmlsyhEljgAVF/xeQLxmpnu+/u3EtUgTu6o1+k89f1wE/c20ntrvaB",
-	"/34afOi+v3FAkUq116qJLdenjdHfMv8Y3Ipoeb9Wgi/VYlI+oaLbo3XJ5A/iDsmEcwyfcxSc2fNkF9bT",
-	"lmrurnD+vK/zE3JfPj2I/mY8/MNUOj8QbkYjmPmB0IpmaewBV01gyhz8UnjAD9J5B7PKx1h1FKkCcjmf",
-	"I4MPTQTSweX4MgVtPFyOv23gdQLSQ1E5z0+oEITM6Lm0RZhe5vSqRaHOunDqmMmP6vP74xDVLeWeiCb0",
-	"14tfIV8YP73X/Shy2Gqg7XcvjHYVkXABwYQQqqiQm7giD8kppuMUhLIo8g00iXrrOzeJNrAUal6PdjfJ",
-	"GQwGPMFcWhemNVptoDSSkju7owNr1uRYsQXAdIELhbky6yFwXTttylzhR/GnyF6Z92amJGnm1hSBEYTt",
-	"OCrPw2RxZ6Qa1LnjoQ+nE2kYKAoE4YA5cW9IsACnxAM3Ep40GDqtipMi4eLRJNi9ItHjpdtnXyIsvhIW",
-	"zTZyRIctuvB3HZoTcOy3Ar4b5HIhfaDSmENm8i1FhpvYV4nBVl+uuknOhnCl1mLj4GJ8AWvpl+zDMg9p",
-	"RsEiUviZyTf8Nr6vhAIvC6J86yX6JVp+h1emkNW4Zu4eUcHiQjrPBepgwHEsdEhKNEPN6Tkc681o42WG",
-	"QEU6ipyyn+ANpSwBLVaP8A7VnBZ1t7IsqcKVCrVXG3imiaeCgMuL789AhgRaoh0EOZemsmoDShbS0/u1",
-	"tK5E7X8gGXAdt0RakZrW4lz73ZjSHYlKWKBy+m3RoAQFf5Bhq1FtaIIFWBw4JMB0JuTOsHomNARhc+n4",
-	"2lR42sLYOomjJHUPaU8kNMMmv1lv7tWbMOmQnUlagvFOL3ACFNa9sMTwvTkFl0J77kmBqduY/Mw5urcJ",
-	"+dXm6yVmt20I4NAXOk/J6zNjLWY+bZIVQYdeKBxUDncSPBfpHKHfjqGQuqJM3ymzscGDpqSnxTioQ/me",
-	"An4oyUppU90bC/hhKSrna1waDEA3tJb8XTryfQKESrplk+4RMqFUq07ftu0OF11UcL1qjdsrLrqKJV+C",
-	"ZznORaX82STGVLgBBa31hjAXymEckEvHI4YglJrEkpgoi8WFsLlC52h3YR7u7D1jjNQ5s5xI20uLK2kq",
-	"B3H5FGY4NxYDGjZih+jHnMBab8Aw5K6EqlhxAi7H49DO47LpfYV8VSHWTfVlrnaxFJeLu+frDXzKxkUV",
-	"bzNNhFI9B2cf0139/RM3Dj1klXXGTqKbtRUXMFDmQHNkBM0L5nRkYBG7v7yZFPgyDeYw24DMh/C6kJ58",
-	"pkARWVZgjKVY4BDe0Yu8/20lwxMQ1DLnI+fhxgSNrFVfQ/JWvQ6EJzPyvLSONdViCc9YilAQzTZQ37wj",
-	"OTR0Lt8xoZUc/dJooYg1Iv9gtVBtpx1ee2MxWp8c9Uqpf0jF2XEU/wdXKukPG1TMPdrQp79P+btnuF/F",
-	"B1lUBXmti2Yjf/4p+AZcjMcpFHHM8/GY9oh6bmzGccHmYMliEqbBPuM89/PLdzDi08PQg+b/W1rgDsEo",
-	"HAq6qIxMlO7wnjmn9bswybl/4BEFTybP6XEhdfjv/KS+wBM0ZVpXdU/syXzxvELuWAPblsJtzVg7fb+P",
-	"D3e8u3Es7j7U+Mq+x4D6bI2zwVpS8A5Ko6RbwsxKnKd8DAQXZxMO9IC64NH50Vx+8JVFht25DKEuyJGI",
-	"B1Isw1o4WMo8YABykyLtx/Z3DM7hQfDqLfoSP1sTI6ZMpoWl9Yig9WWljmufmKJexNGfpQuW/t0bYISX",
-	"/YBy9EJN/2TePGiqfniKuuxBqOdthDofB4gSkClJ3pkJTcgdGSrbf700CsGTlQnBiIFQitjJ2UuzZnPD",
-	"H6SUFLw5A/kwbHp+HJtI5jvAaU8twmUdtqJy2h3nRWJc2VLoRd3zOEomhtz1mFCd08xACrxJSFWFcaS7",
-	"jDT5203CSdNUvimTiNmFeGtpydLadYSg5izqDRCAiZAxik6cz41SZl2VdaS/EdbD5dkw1kXOS6WAMQ/r",
-	"0gfWYpN28tD1f/9y2DbMBw5QH+GyLfOJ/5FK+ljPZ8kR8Vumrzg/fOGO+Av+pAjOB6E2aaCBigUK5lZu",
-	"krrlmGknTDp5qxD2Fn0uvGilrbDOK/2W/PkX8kUqZ5ryniIACJYhK/KRsIvKDdbG3jbd+GDI63C4Xznk",
-	"tjzBAEVMEDqOZN7rOMMEbw/xyx2C0JcIjQGpM1XlFLS0qZE33N+cGb8EUwbSCaJuorB6gW+g0DwcA/9F",
-	"GuZ1iEzHIFeC8ij8Rhw3Bm9TsWnEHPOb5K7EfH72A2tmyduydUcm7MbWPQiSNN22l1iN8SMrEC4CVQrr",
-	"JSfZPBxHENSRZWMVMBgEWh3bMJkpyNJNEi5wtG1snXDqUB8DvG5eSr5w1/8ztBpfGD1XMts/2c2MzR30",
-	"fXY5FX7bA0j5GIkJm9EZHjiUarLEUoTyjG+og+bGuM7JUxUK5zlo1/V1ouBPgwFcjr9vSyJ1LUuofNeS",
-	"qvDA50Ju33YB16gUR1odsLF/9o3bnrR74blu/qs+09qgB1RyIWcK2+5Uhtv67EJVjweF+0/xTv8TNcN6",
-	"vxj4vxOrnQZ53X3tPR9tu188ry4p2g+R8zePAAXdm3CHv0792Hvv7I4D+hdGa8y8XEm/gWyJ2W3TLoun",
-	"X5jzBTVX2bnI6k2HgvxoTXIdhvQXIjvUavfO4CcWJTt7JoS5Sc6Lm4RClXKW1It5pcCbXGzgGWWC3exL",
-	"AZuhc1IvhgvzTSdNgNGwXm4igO0wYkqzxsNS2DwzOZWXlH2p4KSKERyKgjXM6UmAw8zoHJpPBba3FvlS",
-	"c0SRfkLa/r5gq6E7i6G3GJpnJBmBppJzzDaZwgBnu60ybaggpq0NBtujlhkuxUoa26oTDgtaf7uwFfLx",
-	"vv84sReVtqsQtYmXHvPI4rif6lrttGafdROwtc+zdtW4LRovjjVOj9Z1x8q6i6+j5RS++/qP6jZtb8Nx",
-	"7zCeFbZo/TM+1qgpr9qkILZxeNZh9mGOFqv/cbNtuQzhLYp8wERmezt31NzIjS0gtBAv3v4ASq7aceet",
-	"0OFecriFK5q7tWkgvwNTot7exoVSYoahm9zpRzeMIwjc3J7qBemfMWD0l7ox9YhHbME7D3vjF6wzr+IR",
-	"WfBDPo2IRYfMD/vYz0gu9tNwz5oj/nrmhMz7ctV/YPU12vZ0CApfnt0Dh76s5UnkbxzMq9B7Qt2BiU0K",
-	"UodLSdLUtepR2AlGDR3mm+TlSuaoM7xJIBdebNuVVG9za9wSuwhfg3MrUkQvXBhPBMRibAzEmux8e+uu",
-	"qaSOwUfz9cZnuYva/c7l0W+jNjtmqwRjRL18R1ZpngeMLq1cCY9nQ/5e5nBJ19XR4xd1B76geYKy7umM",
-	"9MUJw1sslcjwSOEX2v3b/oLw3LRI69PLhVzhjtc8n/QdD7XPQWO48feVdlUjdGVVMkni1zrJxz8//m8A",
-	"AAD//w==",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

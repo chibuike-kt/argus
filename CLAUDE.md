@@ -27,6 +27,30 @@ orders (ADR-001).
    done. A passing suite is necessary, not sufficient (guide section 17).
 7. No secrets in code, config, logs, or telemetry (ADR-015, ADR-020, guide 12).
 
+## Before you say a change is done
+
+A passing suite is necessary, not sufficient. These bugs passed every test and still broke in real use,
+so each item below is a required check. State in your report which you ran and what you saw. If you
+could not run one, say so and why; do not report "all green" over a check you skipped.
+
+1. Time zones. Database code runs against a Postgres whose session time zone is `Etc/UTC` and again
+   against a non UTC zone. Never use `time.Time` as a map key; key by `UTC().UnixNano()`. Compare times
+   with `Equal`, not `==`.
+2. Long lived connections. Anything meant to stay open (WebSocket, stream, subscription) gets a test
+   that outlives every timeout in the real server: built with the production `httpapi.NewServer`,
+   behind the production router and middleware, not a bare test server. Check read and write deadlines,
+   router timeout middleware, idle timeouts, and proxies.
+3. Real failure, not fakes. A claim about recovery (Redis drops, provider disconnects, restarts) needs a
+   test that kills the real dependency and checks what a client sees. A fake that simulates the failure
+   proves only that the fake works.
+4. Production configuration. Run new code once under the real middleware, config defaults and limits
+   before calling it done. Read the middleware chain for anything that applies to a new route.
+5. Scale. If code loops over data, say its complexity and measure it at ten times the fixture size.
+   Nested scans over the same rows are the usual mistake.
+6. Your own tests. For each new test, confirm it fails on the old code or with the fix removed. A test
+   that has never failed has not shown it can.
+7. Say what you did not test. Name it in the report. That list is as important as the green results.
+
 ## Onboarding: read these before changing anything
 
 In this order:

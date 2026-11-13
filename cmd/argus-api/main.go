@@ -8,10 +8,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/config"
 	"github.com/chibuike-kt/argus/internal/httpapi"
+	"github.com/chibuike-kt/argus/internal/hub"
 	"github.com/chibuike-kt/argus/internal/identity"
 	"github.com/chibuike-kt/argus/internal/identity/mailer"
 	"github.com/chibuike-kt/argus/internal/identity/password"
@@ -21,6 +23,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/identity/signupcode"
 	"github.com/chibuike-kt/argus/internal/identity/tokens"
 	"github.com/chibuike-kt/argus/internal/instruments"
+	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/platform/logging"
 	"github.com/chibuike-kt/argus/internal/platform/postgres"
 	"github.com/chibuike-kt/argus/internal/platform/redis"
@@ -79,6 +82,9 @@ func main() {
 
 	authSvc := service.New(db, users, sessions, tokenStore, signupStore, watchlistStore, hasher, limiter, mail, clk, cfg.Auth, logger)
 
+	candlesStore := marketdata.NewStore(db, clk)
+	liveHub := hub.New(hub.NewRedisSubscriber(rdb), candlesStore, instrumentsStore, clk, cfg.Live, logger)
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:       logger,
 		DB:           db,
@@ -88,10 +94,12 @@ func main() {
 		Sessions:     sessions,
 		Users:        users,
 		AuthPolicy:   cfg.Auth,
+		Live:         cfg.Live,
+		Hub:          liveHub,
 		IsProduction: cfg.IsProduction(),
 		Clock:        clk,
 	})
-	srv := httpapi.NewServer(":"+cfg.HTTPPort, handler, cfg.HTTPReadTimeout)
+	srv := httpapi.NewServer(":"+cfg.HTTPPort, handler, cfg.HTTPReadTimeout, 30*time.Second)
 
 	go func() {
 		logger.Info("api listening", "addr", srv.Addr, "env", cfg.Env)
@@ -106,6 +114,9 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
+	// srv.Shutdown does not close hijacked WebSocket connections on its
+	// own -- CloseAll does that explicitly, within the same deadline.
+	liveHub.CloseAll(shutdownCtx, "server shutting down")
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 		os.Exit(1)

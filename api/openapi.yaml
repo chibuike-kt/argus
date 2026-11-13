@@ -90,15 +90,30 @@ paths:
     get:
       operationId: listInstrumentCandles
       summary: >
-        Closed 1-minute candles for one instrument in [from, to), oldest
-        first -- internal/marketdata.Store.ListClosedInRangeLimited, the
-        same read path cmd/argus-worker's own CandleSource uses. A forming
-        candle's own values can still change, so it is never included.
-        from/to are both optional at this schema level so order=desc can
-        mean "the latest N, no range known or needed" (web-wiring-polish
-        brief, item 1); the handler itself still requires both, with the
-        same message as before, when order is asc or omitted -- see its
-        own comment.
+        Closed candles for one instrument in [from, to), at the requested
+        interval (default 1m, so an existing caller that never sends this
+        parameter is unaffected). 1m is served directly
+        (internal/marketdata.Store.ListClosedInRangeLimited, the same read
+        path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are
+        computed on read from the canonical 1-minute series
+        (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) --
+        the browser never aggregates (live-chart-pipeline brief rule 4), so
+        history and the live stream's own derived candles cannot disagree.
+        A forming candle's own values can still change, so it is never
+        included at any interval; a window with any missing or still-
+        forming source minute is silently excluded, never guessed or
+        partially filled. from/to are both optional at this schema level
+        so order=desc can mean "the latest N, no range known or needed"
+        (web-wiring-polish brief, item 1) for 1m; above 1m both from and to
+        are required regardless of order (see the handler's own comment on
+        why the open-ended "latest N" shortcut is not built for aggregated
+        intervals). Which intervals this endpoint serves for a given
+        instrument is read entirely from that instrument's own
+        supported_intervals (owner approved 12 November 2026) -- an
+        interval not in that list is a 400, never an asset-class guess.
+        Calendar-aware (session-bounded) windows for forex are not built,
+        which is exactly why a forex instrument's own row does not list
+        anything above 1m today.
       parameters:
         - name: id
           in: path
@@ -106,6 +121,21 @@ paths:
           schema:
             type: integer
             format: int64
+        - name: interval
+          in: query
+          required: false
+          description: >
+            1m (default): the canonical series, served directly. 5m, 15m,
+            1h, 4h, 1d: computed on read by server-side aggregation: never
+            built client-side, so the live stream and REST history always
+            agree. Any other value is a 400. Whether a given interval is
+            served for this instrument is read from its own
+            supported_intervals, not guessed from asset class -- an
+            interval not in that list is a clear 400.
+          schema:
+            type: string
+            enum: [1m, 5m, 15m, 1h, 4h, 1d]
+            default: 1m
         - name: from
           in: query
           required: false
@@ -124,7 +154,7 @@ paths:
           description: >
             Maximum candles returned. Default 500, maximum 1000 -- a client
             cannot request the whole table in one call regardless of how
-            wide [from, to) is.
+            wide [from, to) is, at any interval.
           schema:
             type: integer
             format: int32
@@ -136,10 +166,16 @@ paths:
           required: false
           description: >
             asc (default): oldest first, unchanged from before this
-            parameter existed. desc: newest first -- "the most recent N"
-            without already knowing a [from, to) range narrow enough to
-            contain them (web-wiring-followup brief, Part 4). limit still
-            applies either way, enforced in SQL.
+            parameter existed, at every interval -- from and to are both
+            required. desc: newest first -- "the most recent N" without
+            already knowing a [from, to) range narrow enough to contain
+            them (web-wiring-followup brief, Part 4; extended to every
+            interval, not just 1m, by adr-004-ws-contract-review.md's own
+            addendum item C). limit still applies either way. desc with
+            from/to both omitted is allowed at any interval: at 1m,
+            enforced in SQL; above 1m, anchored at the per-interval join
+            point (last_closed_open_time) and walked backward in the
+            handler, over the aggregated windows.
           schema:
             type: string
             enum: [asc, desc]
@@ -150,9 +186,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Candle"
+                $ref: "#/components/schemas/CandleHistory"
         "400":
           description: Bad Request
           content:
@@ -758,9 +792,53 @@ components:
           type: string
         is_closed:
           type: boolean
+        # At interval 1m, the real stored row's own revision
+        # (ADR-011: a correction increments it via SupersedeCandle). At
+        # interval > 1m, the derived-candle revision rule
+        # (adr-004-ws-contract-review.md review item 4): 1 + the sum of
+        # (revision - 1) over every 1-minute candle in this bar's own
+        # window -- starts at 1, rises by exactly 1 for every
+        # supersession inside the window, never a fixed value, so a
+        # correction to one 1-minute candle can still invalidate a
+        # client's already-applied 5m/15m/1h/4h/1d bar via the client's
+        # own "ignore anything not newer" guard.
         revision:
           type: integer
           format: int32
+    CandleHistory:
+      type: object
+      required: [candles]
+      description: >
+        GET /instruments/{id}/candles' own response shape (live-chart-
+        pipeline brief, Phase 1, corrected by adr-004-ws-contract-review.md
+        review items 4 and 5): the candle array plus the join point with
+        the live WebSocket stream (adr-004-ws-contract-draft.md's own
+        `snapshot` message uses the same last_closed_open_time/
+        last_closed_revision field names) -- the latest COMPLETE window of
+        the requested interval (not always the latest closed 1-minute
+        candle: a 1h request's own join point is its latest complete hour),
+        independent of this response's own from/to range, so a client that
+        paged backward through history still gets the real current join
+        point, not whatever the requested range happened to end at.
+        last_closed_revision follows the same derived-revision rule as
+        every candle in this response at interval > 1m (see Candle's own
+        revision field doc below): 1 + the sum of (revision - 1) over
+        every source 1-minute candle in that window. Both last_closed_*
+        fields are null only when no complete window of the requested
+        interval exists yet.
+      properties:
+        candles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Candle"
+        last_closed_open_time:
+          type: string
+          format: date-time
+          nullable: true
+        last_closed_revision:
+          type: integer
+          format: int32
+          nullable: true
     # PlanSnapshot (internal/setups/types.go) is stored as JSONB but its
     # Go shape is stable (TargetSnapshot/POISnapshot/PlanSnapshot structs,
     # not a map), so it is typed here rather than left as a free-form

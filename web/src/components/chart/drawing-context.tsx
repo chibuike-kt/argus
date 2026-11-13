@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
+import type { CandleInterval } from "@/lib/live-socket";
 import { useDrawingsStore } from "./drawings/store";
 
 interface DrawingCtx {
@@ -19,8 +20,8 @@ interface DrawingCtx {
   hidden: boolean;
   setHidden: (v: boolean) => void;
 
-  timeframe: string;
-  setTimeframe: (tf: string) => void;
+  timeframe: CandleInterval;
+  setTimeframe: (tf: CandleInterval) => void;
 
   drawings: ReturnType<typeof useDrawingsStore>;
 }
@@ -33,11 +34,6 @@ export function DrawingProvider({ children }: { children: ReactNode }) {
   const [stayInDrawingMode, setStayInDrawingMode] = useState(false);
   const [locked, setLocked] = useState(false);
   const [hidden, setHidden] = useState(false);
-  // "1m" is the only timeframe the backend has (ChartToolbar's own
-  // symbol/interval controls lock the UI to it, web-wiring-followup
-  // brief Part 2) -- this default now matches that, not the fixture
-  // era's arbitrary "5m".
-  const [timeframe, setTimeframe] = useState("1m");
 
   // Scoped by instrument + timeframe (ADR-008): switching either swaps
   // the visible set. instrument.native_symbol is the real selected
@@ -46,7 +42,15 @@ export function DrawingProvider({ children }: { children: ReactNode }) {
   // import; a page with no instrument resolved yet scopes to a fixed
   // placeholder key rather than crashing or sharing drawings across
   // every instrument.
-  const { instrument } = useAnalysisWorkspace();
+  //
+  // timeframe itself is NOT owned here (it used to be, fixed at "1m")
+  // -- it now lives in AnalysisWorkspaceProvider (Part 4, item 1),
+  // which is this provider's own ancestor and already needs it to
+  // drive useLiveCandles' own subscription; a descendant provider has
+  // no way to feed a value back up to an ancestor, so the single
+  // source of truth has to live there, read back here through the same
+  // useAnalysisWorkspace() call this provider already makes.
+  const { instrument, timeframe, setTimeframe } = useAnalysisWorkspace();
   const scopeSymbol = instrument?.native_symbol ?? "unresolved";
   const drawings = useDrawingsStore(`${scopeSymbol}:${timeframe}`);
 
