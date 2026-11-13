@@ -44,6 +44,20 @@ type Config struct {
 	// brief's own rule 2.
 	Live LiveFeed
 
+	// Hyperliquid is the Hyperliquid adapter's own tunables
+	// (internal/config/hyperliquid.go, brief-hyperliquid-adapter.md).
+	Hyperliquid Hyperliquid
+
+	// IngestProvider selects which ingestion.Provider cmd/argus-worker
+	// runs its live/backfill loop against. "fixture" (the default) is
+	// the dev/test replay provider; "hyperliquid" switches to the real
+	// Hyperliquid adapter (private use, ADR-007 still open). Any other
+	// value is a startup error (Validate) -- never silently falls back
+	// to fixture for a typo'd value, the same reasoning IsProduction's
+	// own doc comment gives for not defaulting unknown values to the
+	// safe case.
+	IngestProvider string `env:"ARGUS_INGEST_PROVIDER" envDefault:"fixture"`
+
 	// DevFixtureIngest turns on cmd/argus-worker's fixture-provider
 	// ingestion path: it replays the checked-in dev/test dataset
 	// (internal/ingestion/fixture/testdata) into whatever instruments
@@ -110,6 +124,9 @@ func (c Config) Validate() error {
 	}
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("ARGUS_SHUTDOWN_TIMEOUT must be positive")
+	}
+	if c.IngestProvider != "fixture" && c.IngestProvider != "hyperliquid" {
+		return fmt.Errorf("ARGUS_INGEST_PROVIDER must be %q or %q, got %q", "fixture", "hyperliquid", c.IngestProvider)
 	}
 	// Defense in depth, not a real branch: AuthPolicy.SecureCookies
 	// already always returns true when IsProduction does (ADR-015:

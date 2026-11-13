@@ -1,6 +1,7 @@
 package backtest
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,5 +62,33 @@ func TestDatasetLabel_DerivedFromProvider(t *testing.T) {
 	dataset, _ = datasetLabel([]string{"test-provider", "fixture"})
 	if dataset != "fixture, test-provider dataset" {
 		t.Errorf("dataset = %q, want %q", dataset, "fixture, test-provider dataset")
+	}
+}
+
+func TestDatasetLabel_HyperliquidGetsTheOwnerApprovedWording(t *testing.T) {
+	const wantDataset = "Hyperliquid perpetuals last price candles, private research use, rights not yet confirmed (ADR-007)"
+	dataset, honesty := datasetLabel([]string{"hyperliquid"})
+	if dataset != wantDataset {
+		t.Errorf("dataset = %q, want the owner's own exact wording %q", dataset, wantDataset)
+	}
+	if !strings.Contains(honesty, "ADR-007") {
+		t.Errorf("honesty note = %q, want it to mention ADR-007", honesty)
+	}
+
+	// Multiple instrument rows all under the same provider still
+	// collapse to one hyperliquid entry (distinctProviders' own job) --
+	// confirms this is not accidentally gated on len(providers) == 1
+	// rather than len(distinct names) == 1.
+	dataset, _ = datasetLabel([]string{"hyperliquid", "hyperliquid"})
+	if dataset != wantDataset {
+		t.Errorf("dataset = %q, want %q even with duplicate entries", dataset, wantDataset)
+	}
+
+	// A mix of providers, even including hyperliquid, must NOT get the
+	// specific wording -- that would overstate what a mixed-provider
+	// report actually ran on.
+	dataset, _ = datasetLabel([]string{"hyperliquid", "fixture"})
+	if dataset == wantDataset {
+		t.Errorf("a mixed-provider run got the hyperliquid-only label %q", dataset)
 	}
 }

@@ -114,6 +114,10 @@ func main() {
 		}
 	}
 
+	if cfg.IngestProvider == "hyperliquid" {
+		startHyperliquidIngest(ctx, cfg, logger, instrumentStore, marketdataStore, candlePublisher, clk)
+	}
+
 	logger.Info("worker started", "env", cfg.Env)
 
 	ticker := time.NewTicker(tickInterval)

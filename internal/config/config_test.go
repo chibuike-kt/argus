@@ -26,12 +26,33 @@ func TestValidateRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestValidate_RejectsUnknownIngestProvider(t *testing.T) {
+	for _, bad := range []string{"", "binance", "Fixture", "hyperliquid "} {
+		c := validConfig("local")
+		c.IngestProvider = bad
+		if err := c.Validate(); err == nil {
+			t.Errorf("Validate() with ARGUS_INGEST_PROVIDER=%q = nil, want an error (never silently fall back to fixture for a typo)", bad)
+		}
+	}
+}
+
+func TestValidate_AcceptsBothKnownIngestProviders(t *testing.T) {
+	for _, good := range []string{"fixture", "hyperliquid"} {
+		c := validConfig("local")
+		c.IngestProvider = good
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate() with ARGUS_INGEST_PROVIDER=%q = %v, want nil", good, err)
+		}
+	}
+}
+
 func validConfig(env string) Config {
 	return Config{
 		Env: env, DatabaseURL: "postgres://x", RedisURL: "redis://x",
 		HTTPPort: "8080", ShutdownTimeout: 1,
-		PublicBaseURL: "https://app.example.com",
-		Auth:          AuthPolicy{AllowedOrigins: []string{"https://app.example.com"}},
+		PublicBaseURL:  "https://app.example.com",
+		Auth:           AuthPolicy{AllowedOrigins: []string{"https://app.example.com"}},
+		IngestProvider: "fixture",
 	}
 }
 
