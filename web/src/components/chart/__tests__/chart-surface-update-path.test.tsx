@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 import { ChartSurfaceInner, type ChartSurfaceInnerProps } from "../chart-surface";
+import { loadChartView, saveChartView } from "../chart-view-persistence";
 import { DrawingProvider, useDrawing } from "../drawing-context";
 import type { DrawingsStore } from "../drawings/store";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -35,14 +36,61 @@ vi.mock("@/components/workspace/analysis-workspace", () => ({
 // except createChart, which becomes a vi.fn wrapping the real
 // implementation -- still a real chart, just with a call count this
 // test can read.
+//
+// The chart-view-persistence tests below need two things jsdom's own
+// zero-layout canvas stub cannot provide for real (confirmed by
+// instrumenting a throwaway probe: across a full mount + switch + empty
+// + switch-back sequence, the real library's own
+// subscribeVisibleLogicalRangeChange handler fired zero times -- with
+// no real pixel width, the library's own old-range/new-range comparison
+// never sees a change worth firing):
+//  - capturedRangeHandler: the real handler chart-surface.tsx registers
+//    with subscribeVisibleLogicalRangeChange, captured so a test can
+//    invoke it directly with a synthetic range -- simulating what a
+//    genuine user gesture (wheel/drag/scroll) would make the library
+//    fire, without needing real layout.
+//  - series.setData wrapped to ALSO invoke that same captured handler
+//    synchronously, exactly as a real browser's layout engine would
+//    when setData changes the visible range -- reproducing, for real,
+//    the one call withProgrammaticRangeChange exists to bracket
+//    (confirmed from the library's own source: _setVisibleRange fires
+//    this event synchronously, inline, from within setData/
+//    setVisibleLogicalRange, never deferred -- see chart-surface.tsx's
+//    own doc comment on withProgrammaticRangeChange for the citation).
 const createChartSpy = vi.fn();
+let lastCreatedChart: ReturnType<typeof import("lightweight-charts")["createChart"]> | null = null;
+let capturedRangeHandler: ((range: { from: number; to: number } | null) => void) | null = null;
+// Mirrors the bug report's own corrupted value (from:-70, to:3) --
+// what the library picks when setData leaves little or no data to show.
+const SYNTHETIC_AUTO_RANGE = { from: -70, to: 3 };
 vi.mock("lightweight-charts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("lightweight-charts")>();
   return {
     ...actual,
     createChart: (...args: Parameters<typeof actual.createChart>) => {
       createChartSpy(...args);
-      return actual.createChart(...args);
+      const chart = actual.createChart(...args);
+      lastCreatedChart = chart;
+
+      const ts = chart.timeScale();
+      const realSubscribe = ts.subscribeVisibleLogicalRangeChange.bind(ts);
+      ts.subscribeVisibleLogicalRangeChange = ((handler: (range: { from: number; to: number } | null) => void) => {
+        capturedRangeHandler = handler;
+        return realSubscribe(handler);
+      }) as typeof ts.subscribeVisibleLogicalRangeChange;
+
+      const realAddSeries = chart.addSeries.bind(chart);
+      chart.addSeries = ((...seriesArgs: Parameters<typeof chart.addSeries>) => {
+        const series = realAddSeries(...seriesArgs);
+        const realSetData = series.setData.bind(series);
+        series.setData = ((data: Parameters<typeof series.setData>[0]) => {
+          realSetData(data);
+          capturedRangeHandler?.(SYNTHETIC_AUTO_RANGE);
+        }) as typeof series.setData;
+        return series;
+      }) as typeof chart.addSeries;
+
+      return chart;
     },
   };
 });
@@ -501,5 +549,183 @@ describe("Part 2F: the status badge never shows the word \"Live\" (no decided fr
     expect(container.textContent).toMatch(/Degraded/);
     expect(container.textContent).not.toMatch(/ago/);
     expect(container.textContent).not.toMatch(/\bLive\b/);
+  });
+});
+
+// Bug repro: an independent run of chart-survives-instrument-switch.spec.ts
+// ("switching instrument and back keeps the saved chart view") passed only
+// 1 run in 3. Root cause, confirmed by reading chart-surface.tsx: every
+// visible-range change was saved, including the ones caused by this
+// component's own setData (applyCandleData) and setVisibleLogicalRange
+// (the restore/default-fit calls) -- not just the ones a trader actually
+// makes. During a slow instrument switch, candles clears to [] before the
+// new instrument's own history has loaded; applyCandleData's own
+// setData([]) makes the library pick a near-empty logical range for
+// that moment, and the handler saved THAT, overwriting whatever the
+// trader had actually zoomed to. A second, compounding issue: the old
+// restore logic gated itself on a one-shot "symbolChanged" boolean,
+// consumed on whichever render first saw the new scope -- if that
+// render is the empty one (the common case under a slow fetch), the
+// restore never gets a second chance once real data later arrives on a
+// subsequent render. Both are fixed below: only a range change made
+// outside this component's own guarded calls is ever saved
+// (isProgrammaticRangeChangeRef/withProgrammaticRangeChange), and the
+// scope's own restore is now owed across renders
+// (pendingRestoreScopeRef) until one with real data actually runs it.
+describe("chart view persistence: only a user-made range change is saved", () => {
+  beforeEach(() => {
+    createChartSpy.mockClear();
+    lastCreatedChart = null;
+    capturedRangeHandler = null;
+    localStorage.clear();
+  });
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+  });
+
+  it("a programmatic setData during a slow instrument switch (candles briefly empty) does not overwrite the previously saved view", () => {
+    const goodView = { from: 1, to: 4 };
+    saveChartView("BTC-PERP:1m", goodView);
+
+    const { rerender } = render(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candleSet(5, 100)}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+    // The create effect's own restore read and re-applied goodView --
+    // confirm the fix did not also stop that from happening.
+    expect(loadChartView("BTC-PERP:1m")).toEqual(goodView);
+
+    // Switch away, with real data (an ordinary, clean switch).
+    rerender(
+      <Harness
+        className=""
+        symbol="ETH-PERP"
+        venue="test"
+        candles={candleSet(5, 300)}
+        poiZone={{ low: 295, high: 305 }}
+        plan={{ ...basePlan, fromTime: candleSet(5, 300)[0].openTime }}
+        formationOutsideWindow={false}
+      />,
+    );
+
+    // Switch back to BTC-PERP, but candles is still empty -- exactly
+    // the slow-fetch intermediate render the bug report describes.
+    // applyCandleData's own setData([]) runs under the scope ref
+    // already pointed at "BTC-PERP:1m" (it updates eagerly, before data
+    // arrives) -- this is the moment that used to corrupt the saved
+    // view.
+    rerender(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={[]}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+
+    expect(loadChartView("BTC-PERP:1m")).toEqual(goodView);
+  });
+
+  it("the saved view is still restored once real data arrives, even though the scope flipped earlier on an empty render", () => {
+    const goodView = { from: 1, to: 4 };
+    saveChartView("BTC-PERP:1m", goodView);
+
+    const { rerender } = render(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candleSet(5, 100)}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+    rerender(
+      <Harness
+        className=""
+        symbol="ETH-PERP"
+        venue="test"
+        candles={candleSet(5, 300)}
+        poiZone={{ low: 295, high: 305 }}
+        plan={{ ...basePlan, fromTime: candleSet(5, 300)[0].openTime }}
+        formationOutsideWindow={false}
+      />,
+    );
+    // The empty intermediate render -- this is the one that, under the
+    // old one-shot "symbolChanged" check, permanently consumed this
+    // switch's only chance to restore.
+    rerender(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={[]}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+    // jsdom's own zero-layout chart does not actually move when told to
+    // (see the mock's own doc comment) -- getVisibleLogicalRange() is
+    // not a reliable way to observe the restore here. Spying on the
+    // real setVisibleLogicalRange call itself is: it proves the restore
+    // code path actually ran, with the right value, independent of
+    // whether the library's own internal state visibly reflects it in
+    // this environment.
+    const setRangeSpy = vi.spyOn(lastCreatedChart!.timeScale(), "setVisibleLogicalRange");
+
+    // Real data for BTC-PERP finally arrives, on a LATER render.
+    rerender(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candleSet(5, 100)}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+
+    expect(setRangeSpy).toHaveBeenCalledWith(goodView);
+  });
+
+  it("a range change made outside this component's own calls (a real user gesture, at the library level) is saved", () => {
+    render(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candleSet(5, 100)}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+    expect(loadChartView("BTC-PERP:1m")).toBeNull(); // nothing saved yet
+
+    // The real subscribeVisibleLogicalRangeChange handler chart-
+    // surface.tsx registered, invoked directly with a synthetic range
+    // -- exactly what the library itself would pass it on a genuine
+    // wheel/drag/scroll gesture (jsdom's own zero-layout chart cannot
+    // produce that for real; see the mock's own doc comment). Called
+    // from here, completely outside any of this component's own
+    // withProgrammaticRangeChange-wrapped calls, so the guard must see
+    // this exactly as it would see a real user gesture.
+    capturedRangeHandler!({ from: 0, to: 3 });
+
+    expect(loadChartView("BTC-PERP:1m")).toEqual({ from: 0, to: 3 });
   });
 });

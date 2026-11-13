@@ -89,6 +89,20 @@ test("switching instrument does not rebuild the chart: same canvas element, no p
   await page.screenshot({ path: "e2e/screenshots/instrument-switch-same-chart.png", fullPage: true });
 });
 
+// Bug repro (reported after this test passed only 1 run in 3): the
+// saved view under argus:chart-view:v1:BTC-PERP:1m went from a real
+// zoomed range to something like {from: -70, to: 3} -- the same width,
+// shifted down by about the history length. Root cause, confirmed by
+// reading chart-surface.tsx: every visible-range change was persisted,
+// including the ones caused by the component's own setData (clearing
+// to [] while the new instrument's history is still loading) and by
+// the restore/default-fit calls themselves -- not just a change the
+// trader actually made. A slow fetch makes the empty intermediate
+// render far more likely to land (it can land on a fast one too, which
+// is why the old version of this test only failed intermittently); an
+// artificially delayed response makes it land every time, so this test
+// does not depend on the real network happening to be slow enough on
+// any given run.
 test("switching instrument and back keeps the saved chart view for each instrument's own scope", async ({ page }) => {
   await page.goto(`/analysis?setupId=${auth.btcSetupId}&instrumentId=${auth.btcInstrumentId}`);
   await expect(page.locator("canvas").first()).toBeVisible({ timeout: 15_000 });
@@ -101,43 +115,50 @@ test("switching instrument and back keeps the saved chart view for each instrume
   if (!box) throw new Error("chart host has no bounding box");
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.wheel(0, -400); // zoom in
-  await page.waitForTimeout(300); // let the debounced localStorage save land
+  await page.waitForTimeout(300); // let the localStorage save land
 
   const btcViewAfterZoom = await page.evaluate(() =>
     localStorage.getItem("argus:chart-view:v1:BTC-PERP:1m"),
   );
   expect(btcViewAfterZoom).not.toBeNull();
 
-  // Switch to ETH, then back to BTC via the real UI.
+  // Switch to ETH at ordinary speed -- nothing about this leg needs to
+  // be slow.
   await symbolPickerTrigger(page).click();
   await symbolMenuItem(page, "ETH-PERP", auth.ethProvider).click();
   await expect(symbolPickerTrigger(page)).toContainText("ETH-PERP", { timeout: 15_000 });
+
+  // Deliberately delay BTC's own candle history response for the
+  // switch back, so the empty-candles render this bug depends on
+  // really happens -- every run, not only when the real network
+  // happens to be slow enough on its own. Registered only now, so it
+  // does not also delay the initial BTC load or the ETH switch above.
+  await page.route(`**/api/v1/instruments/${auth.btcInstrumentId}/candles**`, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await route.continue();
+  });
 
   await symbolPickerTrigger(page).click();
   await symbolMenuItem(page, "BTC-PERP", auth.btcProvider).click();
   await expect(symbolPickerTrigger(page)).toContainText("BTC-PERP", { timeout: 15_000 });
 
+  // The delayed response (and the render it triggers) needs a moment
+  // past the UI's own optimistic symbol-label update, above, to land.
+  await page.waitForTimeout(800);
+
   // BTC's own saved view is untouched by the trip through ETH -- it
   // is restored (chart-surface.tsx's own loadChartView call in the
-  // update effect), not reset to a generic fitContent default.
+  // update effect), not reset to a generic fitContent default, and not
+  // overwritten by the empty render's own spurious range.
   const btcViewAfterReturn = await page.evaluate(() =>
     localStorage.getItem("argus:chart-view:v1:BTC-PERP:1m"),
   );
   expect(btcViewAfterReturn).not.toBeNull();
 
-  // Not exact equality: Part 2G's own live replay keeps appending real
-  // new candles the whole time this test runs (make e2e-stack's own
-  // ARGUS_DEV_FIXTURE_LIVE_REPLAY=true), so the logical index a given
-  // on-screen window corresponds to can drift by a few bars between
-  // the zoom and the switch-back, even though visually it is still
-  // "the same place" -- a few seconds pass for real while this test
-  // drives the UI, and the chart is never static the way it was
-  // before the live feed existed. A tight tolerance on both bounds is
-  // the restore actually working, not a coincidence.
   const parseView = (raw: string) => JSON.parse(raw) as { from: number; to: number };
   const zoomed = parseView(btcViewAfterZoom!);
   const returned = parseView(btcViewAfterReturn!);
-  const tolerance = 10; // bars
+  const tolerance = 1; // bar
   expect(Math.abs(returned.from - zoomed.from)).toBeLessThanOrEqual(tolerance);
   expect(Math.abs(returned.to - zoomed.to)).toBeLessThanOrEqual(tolerance);
 });

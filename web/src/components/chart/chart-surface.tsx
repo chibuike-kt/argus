@@ -396,6 +396,30 @@ export function ChartSurfaceInner({
   // candle set regardless), so this just needs to match whatever scope
   // the drawings store itself was given at that same moment.
   const chartViewScopeRef = useRef(`${symbol}:${timeframe}`);
+  // pendingRestoreScopeRef: the scope a restore-or-default is still owed
+  // for, set the moment chartViewScopeRef changes and cleared only once
+  // that restore actually runs against real data. A plain one-shot
+  // boolean (checked once, on the same render the scope changed) is not
+  // enough: a slow instrument switch clears candles to empty before the
+  // new history has loaded, so the render where the scope first changes
+  // can easily be the one render where hasCandles is false -- without
+  // tracking this across renders, that one-shot moment is spent on an
+  // empty chart and the restore never gets a real turn once data
+  // actually arrives.
+  const pendingRestoreScopeRef = useRef<string | null>(null);
+  // isProgrammaticRangeChangeRef brackets a call that moves the chart's
+  // own visible range but is not a user gesture (applyCandleData's own
+  // setData, the saved-view restore, the no-saved-view default fit).
+  // subscribeVisibleLogicalRangeChange's own handler (below) reads this
+  // to skip saving exactly those changes -- only a range change the
+  // trader actually made (wheel, drag, scroll, a toolbar zoom control)
+  // may overwrite what is persisted. Before this, EVERY range change
+  // was saved, including the ones setData triggers while switching
+  // instruments with little or no data yet -- a real, reproduced bug:
+  // the saved view for an instrument could be silently overwritten by
+  // whatever near-empty range the library picked for a different
+  // instrument's data, while that one was still loading.
+  const isProgrammaticRangeChangeRef = useRef(false);
   const {
     drawings: list,
     selectedId,
@@ -426,6 +450,23 @@ export function ChartSurfaceInner({
   // "last applied" for live-tick purposes stale.
   const lastAppliedOpenTimeRef = useRef<string | null>(hasCandles ? candles[candles.length - 1].openTime : null);
   const appliedLiveKeyRef = useRef<CandleKey | null>(null);
+
+  // withProgrammaticRangeChange brackets fn so any visible-range change
+  // it causes is not mistaken for a user gesture by
+  // subscribeVisibleLogicalRangeChange's own handler, below. Safe to
+  // call synchronously like this: lightweight-charts fires that event
+  // synchronously, inline, from within the very call that changes the
+  // range (TimeScale's own _setVisibleRange, read directly from the
+  // library's source) -- never deferred to a microtask or animation
+  // frame, so a plain try/finally around fn correctly brackets it.
+  function withProgrammaticRangeChange(fn: () => void): void {
+    isProgrammaticRangeChangeRef.current = true;
+    try {
+      fn();
+    } finally {
+      isProgrammaticRangeChangeRef.current = false;
+    }
+  }
 
   // applyCandleData is this component's own "data path" (Part 2A):
   // setData plus repositioning the two system primitives (the POI zone
@@ -564,14 +605,17 @@ export function ChartSurfaceInner({
     // Restore wherever the trader last left the view (per instrument +
     // timeframe); only fall back to the default fit (and the explicit
     // thinner spacing fitContent's own wide auto-fit would otherwise
-    // leave in place) if nothing was saved yet.
-    const savedView = loadChartView(chartViewScopeRef.current);
-    if (savedView) {
-      chart.timeScale().setVisibleLogicalRange(savedView);
-    } else {
-      chart.timeScale().fitContent();
-      chart.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
-    }
+    // leave in place) if nothing was saved yet. Programmatic: must not
+    // be mistaken for a user gesture by the save handler just below.
+    withProgrammaticRangeChange(() => {
+      const savedView = loadChartView(chartViewScopeRef.current);
+      if (savedView) {
+        chart.timeScale().setVisibleLogicalRange(savedView);
+      } else {
+        chart.timeScale().fitContent();
+        chart.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
+      }
+    });
 
     chart.subscribeCrosshairMove((param) => {
       const d = param.seriesData.get(series) as CandlestickData<Time> | undefined;
@@ -580,7 +624,10 @@ export function ChartSurfaceInner({
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
       setToolbarTick((t) => t + 1);
-      if (range) saveChartView(chartViewScopeRef.current, range);
+      // Persist only a range change the trader actually made -- never
+      // one caused by this component's own setData/restore/default-fit
+      // calls (see withProgrammaticRangeChange's own doc comment).
+      if (range && !isProgrammaticRangeChangeRef.current) saveChartView(chartViewScopeRef.current, range);
     });
 
     const controller = new DrawingController(chart, series, hostRef.current, store, {
@@ -590,7 +637,7 @@ export function ChartSurfaceInner({
     });
     controller.attach();
     controllerRef.current = controller;
-    applyCandleData();
+    withProgrammaticRangeChange(() => applyCandleData());
     setChartGeneration((g) => g + 1);
 
     return () => {
@@ -620,6 +667,7 @@ export function ChartSurfaceInner({
       return;
     }
     if (!chartRef.current || !seriesRef.current) return;
+    const chart = chartRef.current;
 
     // A genuine instrument switch resets the view (fitContent, or the
     // new scope's own saved one): the old zoom/scroll was over a
@@ -629,19 +677,27 @@ export function ChartSurfaceInner({
     // which was correct while symbol/timeframe genuinely never changed
     // after that; now they can.
     const newScope = `${symbol}:${timeframe}`;
-    const symbolChanged = chartViewScopeRef.current !== newScope;
-    chartViewScopeRef.current = newScope;
+    if (chartViewScopeRef.current !== newScope) {
+      chartViewScopeRef.current = newScope;
+      // Owe this scope a restore-or-default -- not necessarily on THIS
+      // render. See pendingRestoreScopeRef's own doc comment, above: a
+      // slow switch can mean candles is still empty right here, below.
+      pendingRestoreScopeRef.current = newScope;
+    }
 
-    applyCandleData();
+    withProgrammaticRangeChange(() => applyCandleData());
 
-    if (symbolChanged && hasCandles) {
-      const savedView = loadChartView(newScope);
-      if (savedView) {
-        chartRef.current.timeScale().setVisibleLogicalRange(savedView);
-      } else {
-        chartRef.current.timeScale().fitContent();
-        chartRef.current.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
-      }
+    if (pendingRestoreScopeRef.current === newScope && hasCandles) {
+      pendingRestoreScopeRef.current = null;
+      withProgrammaticRangeChange(() => {
+        const savedView = loadChartView(newScope);
+        if (savedView) {
+          chart.timeScale().setVisibleLogicalRange(savedView);
+        } else {
+          chart.timeScale().fitContent();
+          chart.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
+        }
+      });
     }
     // applyCandleData/symbol/timeframe/hasCandles are read fresh each
     // run via closure, same convention the create effect above already
