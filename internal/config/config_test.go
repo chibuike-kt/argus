@@ -26,12 +26,33 @@ func TestValidateRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestValidate_RejectsUnknownIngestProvider(t *testing.T) {
+	for _, bad := range []string{"", "binance", "Fixture", "hyperliquid "} {
+		c := validConfig("local")
+		c.IngestProvider = bad
+		if err := c.Validate(); err == nil {
+			t.Errorf("Validate() with ARGUS_INGEST_PROVIDER=%q = nil, want an error (never silently fall back to fixture for a typo)", bad)
+		}
+	}
+}
+
+func TestValidate_AcceptsBothKnownIngestProviders(t *testing.T) {
+	for _, good := range []string{"fixture", "hyperliquid"} {
+		c := validConfig("local")
+		c.IngestProvider = good
+		if err := c.Validate(); err != nil {
+			t.Errorf("Validate() with ARGUS_INGEST_PROVIDER=%q = %v, want nil", good, err)
+		}
+	}
+}
+
 func validConfig(env string) Config {
 	return Config{
 		Env: env, DatabaseURL: "postgres://x", RedisURL: "redis://x",
 		HTTPPort: "8080", ShutdownTimeout: 1,
-		PublicBaseURL: "https://app.example.com",
-		Auth:          AuthPolicy{AllowedOrigins: []string{"https://app.example.com"}},
+		PublicBaseURL:  "https://app.example.com",
+		Auth:           AuthPolicy{AllowedOrigins: []string{"https://app.example.com"}},
+		IngestProvider: "fixture",
 	}
 }
 
@@ -86,6 +107,48 @@ func TestValidate_ProductionRejectsNonHTTPSPublicBaseURL(t *testing.T) {
 	c.PublicBaseURL = "http://app.example.com"
 	if err := c.Validate(); err == nil {
 		t.Fatal("Validate() with a non-https PublicBaseURL in production = nil, want an error")
+	}
+}
+
+// TestValidate_ProductionRejectsHyperliquidURLOverrides is the real-
+// run brief's own production guard: ARGUS_HYPERLIQUID_BASE_URL_OVERRIDE/
+// WS_URL_OVERRIDE exist only to point the adapter at a non-exchange
+// host for local/test verification, and must refuse startup outright
+// if either is still set outside local/test.
+func TestValidate_ProductionRejectsHyperliquidURLOverrides(t *testing.T) {
+	validProd := func() Config {
+		c := validConfig("staging")
+		c.Auth.SignupCodeHMACKey = "a-real-production-secret-not-the-placeholder"
+		return c
+	}
+
+	c := validProd()
+	c.Hyperliquid.BaseURLOverride = "https://10.255.255.1"
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() with BaseURLOverride set in production = nil, want an error")
+	}
+
+	c = validProd()
+	c.Hyperliquid.WSURLOverride = "wss://10.255.255.1/ws"
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() with WSURLOverride set in production = nil, want an error")
+	}
+
+	c = validProd()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() in production with both overrides empty = %v, want nil", err)
+	}
+}
+
+// TestValidate_NonProductionAllowsHyperliquidURLOverrides confirms
+// the guard above is production-only: local/test is exactly where
+// a real-disconnect verification run needs to set these.
+func TestValidate_NonProductionAllowsHyperliquidURLOverrides(t *testing.T) {
+	c := validConfig("local")
+	c.Hyperliquid.BaseURLOverride = "https://10.255.255.1"
+	c.Hyperliquid.WSURLOverride = "wss://10.255.255.1/ws"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() with both overrides set outside production = %v, want nil", err)
 	}
 }
 

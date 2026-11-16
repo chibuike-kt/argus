@@ -34,16 +34,17 @@ func main() {
 		endFlag          = flag.String("end", "", "RFC3339 end of the candle open_time range to replay, exclusive (required)")
 		outputDir        = flag.String("output-dir", ".", "directory to write report.json and report.md into")
 		algorithmVersion = flag.String("algorithm-version", defaultAlgorithmVersion, "analysis.Config.AlgorithmVersion to evaluate with")
+		allowProvider    = flag.String("allow-provider", "", "in addition to the fixture provider, also allow replaying a database holding setups for this provider (e.g. hyperliquid) -- never set silently, the owner must pass this explicitly")
 	)
 	flag.Parse()
 
-	if err := run(*databaseURL, *instrumentsFlag, *startFlag, *endFlag, *outputDir, *algorithmVersion); err != nil {
+	if err := run(*databaseURL, *instrumentsFlag, *startFlag, *endFlag, *outputDir, *algorithmVersion, *allowProvider); err != nil {
 		fmt.Fprintln(os.Stderr, "argus-backtest:", err)
 		os.Exit(1)
 	}
 }
 
-func run(databaseURL, instrumentsFlag, startFlag, endFlag, outputDir, algorithmVersion string) error {
+func run(databaseURL, instrumentsFlag, startFlag, endFlag, outputDir, algorithmVersion, allowProvider string) error {
 	if databaseURL == "" {
 		return fmt.Errorf("--database-url is required")
 	}
@@ -76,7 +77,17 @@ func run(databaseURL, instrumentsFlag, startFlag, endFlag, outputDir, algorithmV
 	}
 	fmt.Printf("argus-backtest: connected to database %q\n", dbName)
 
-	if err := backtest.CheckFixtureOnly(ctx, db); err != nil {
+	// --allow-provider only ever ADDS to the fixture-only default; it
+	// never replaces it, so an owner who passes it for a database that
+	// also happens to hold fixture setups is not punished for that.
+	// Never set except by this explicit flag (CLAUDE.md rule: no
+	// silent relaxation of a safety guard).
+	allowed := []string{backtest.FixtureProviderName}
+	if allowProvider != "" {
+		allowed = append(allowed, allowProvider)
+		fmt.Printf("argus-backtest: --allow-provider=%q -- running against real, non-fixture data. Results are still not forecasts.\n", allowProvider)
+	}
+	if err := backtest.CheckAllowedProviders(ctx, db, allowed); err != nil {
 		return fmt.Errorf("refusing to run against database %q: %w", dbName, err)
 	}
 

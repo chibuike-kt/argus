@@ -168,14 +168,32 @@ func distinctProviders(providers []string) []string {
 	return out
 }
 
+// hyperliquidProviderName must match hyperliquid.ProviderName exactly
+// (internal/ingestion/hyperliquid, brief-hyperliquid-adapter.md) --
+// not imported from there, the same reasoning FixtureProviderName's
+// own doc comment in guard.go already gives for not reaching across
+// packages just for a provider-name string.
+const hyperliquidProviderName = "hyperliquid"
+
 // datasetLabel derives the report's own dataset label and honesty
 // sentence from the run's own instruments' provider(s), rather than
 // hardcoding "dev fixture dataset": ADR-007 is still open, so nothing
 // about today's provider set is guaranteed to still be "fixture" once it
 // resolves, and this report must say what it actually ran on, not what
 // was true the last time someone wrote this string by hand.
+//
+// A run against Hyperliquid instruments ONLY gets the owner's own
+// exact wording (brief-hyperliquid-adapter.md) rather than the generic
+// "<provider> dataset" form every other provider (including a mix
+// that happens to include hyperliquid) still gets -- ADR-007's "rights
+// not yet confirmed" status is specific enough that a generic label
+// would understate it.
 func datasetLabel(providers []string) (dataset, honestyNote string) {
 	names := distinctProviders(providers)
+	if len(names) == 1 && names[0] == hyperliquidProviderName {
+		return "Hyperliquid perpetuals last price candles, private research use, rights not yet confirmed (ADR-007)",
+			"Hyperliquid data is not market evidence: this report proves the plumbing works, it is not evidence about the model. Rights to display or redistribute this data have not been confirmed (ADR-007)."
+	}
 	label := strings.Join(names, ", ")
 	if label == "" {
 		label = "no instruments"
