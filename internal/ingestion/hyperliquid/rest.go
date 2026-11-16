@@ -155,9 +155,7 @@ func (p *Provider) postInfo(ctx context.Context, weight int, body any, out any) 
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		debugStart := time.Now()
 		resp, err := p.httpClient.Do(req)
-		p.logger.Warn("DEBUG httpClient.Do", "elapsed", time.Since(debugStart), "err", err)
 		if err != nil {
 			return fmt.Errorf("hyperliquid: POST /info: %w", err)
 		}

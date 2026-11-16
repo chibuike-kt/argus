@@ -128,6 +128,15 @@ func (c Config) Validate() error {
 	if c.IngestProvider != "fixture" && c.IngestProvider != "hyperliquid" {
 		return fmt.Errorf("ARGUS_INGEST_PROVIDER must be %q or %q, got %q", "fixture", "hyperliquid", c.IngestProvider)
 	}
+	// ARGUS_HYPERLIQUID_BASE_URL_OVERRIDE/WS_URL_OVERRIDE exist only to
+	// point the adapter at a non-exchange host for local/test
+	// real-disconnect verification (see hyperliquid.go's own doc
+	// comment) -- refuse to start outright if either is set outside
+	// local/test, rather than silently ingesting from, or trying to
+	// stream from, whatever host an operator forgot to unset.
+	if c.IsProduction() && (c.Hyperliquid.BaseURLOverride != "" || c.Hyperliquid.WSURLOverride != "") {
+		return fmt.Errorf("ARGUS_ENV=%s must not set ARGUS_HYPERLIQUID_BASE_URL_OVERRIDE or ARGUS_HYPERLIQUID_WS_URL_OVERRIDE -- these exist only for local/test verification against a non-exchange host", c.Env)
+	}
 	// Defense in depth, not a real branch: AuthPolicy.SecureCookies
 	// already always returns true when IsProduction does (ADR-015:
 	// "production must set them"). This assertion exists so a future

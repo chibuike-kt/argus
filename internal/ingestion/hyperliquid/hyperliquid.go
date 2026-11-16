@@ -57,6 +57,7 @@ package hyperliquid
 import (
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
@@ -83,17 +84,28 @@ const (
 // structured rejection/backoff logging the hostile-condition tests
 // check for.
 type Provider struct {
-	baseURL    string
-	wsURL      string
-	httpClient *http.Client
-	wsDial     dialFunc
-	clk        clock.Clock
-	sleep      sleepFunc
-	logger     *slog.Logger
-	limiter    *restLimiter
+	baseURL          string
+	wsURL            string
+	httpClient       *http.Client
+	wsDial           dialFunc
+	clk              clock.Clock
+	sleep            sleepFunc
+	logger           *slog.Logger
+	limiter          *restLimiter
+	maxConnectionAge time.Duration
 
 	restBudget int
 	restWindow time.Duration
+
+	// szDecimalsKnown is StreamCandles' own price-format check input
+	// (WithSzDecimals), strictly opt-in and never populated by a REST
+	// call StreamCandles makes on its own -- nil (the default) means
+	// no symbol gets validated, with no behavior change and no extra
+	// network call from this feature at all.
+	szDecimalsKnown map[string]int32
+
+	staleMessages         atomic.Int64
+	priceFormatViolations atomic.Int64
 }
 
 // Option configures a Provider beyond NewProvider's required
@@ -147,6 +159,37 @@ func WithSleepFunc(s sleepFunc) Option {
 	return func(p *Provider) { p.sleep = s }
 }
 
+// WithMaxConnectionAge overrides StreamCandles' own planned-reconnect
+// age (12 hours by default, see NewProvider). Tests pass a short
+// value to prove a planned reconnect loses no candle without waiting
+// hours for one to happen for real.
+func WithMaxConnectionAge(d time.Duration) Option {
+	return func(p *Provider) { p.maxConnectionAge = d }
+}
+
+// WithSzDecimals opts StreamCandles into checking every streamed
+// price for the symbols named in m against Hyperliquid's own
+// price-precision rule (validatePriceFormat), counted via
+// PriceFormatViolationCount and logged, never gating or correcting
+// anything. m is typically built once, from a single Instruments call
+// made by the caller (e.g. cmd/argus-worker's own startHyperliquidIngest)
+// -- StreamCandles itself never fetches this on its own, so a symbol
+// with no entry in m simply skips the check, with no behavior or
+// network-call change from omitting this option entirely.
+func WithSzDecimals(m map[string]int32) Option {
+	return func(p *Provider) { p.szDecimalsKnown = m }
+}
+
+// SetSzDecimals is WithSzDecimals' own late-bound form, for a caller
+// that only learns the map after constructing the Provider (e.g. by
+// calling this same Provider's own Instruments first). Call it before
+// starting any StreamCandles goroutine for the affected symbols --
+// not safe to call concurrently with an in-progress StreamCandles
+// call for the same Provider.
+func (p *Provider) SetSzDecimals(m map[string]int32) {
+	p.szDecimalsKnown = m
+}
+
 // NewProvider wires a Provider against the real Hyperliquid endpoints.
 // clk must not be nil (every time-dependent decision in this package --
 // REST pacing, the rate-limit backoff clock -- reads it, never
@@ -171,6 +214,12 @@ func NewProvider(clk clock.Clock, logger *slog.Logger, opts ...Option) *Provider
 		// WithRESTBudget exists only for tests.
 		restBudget: 1200,
 		restWindow: time.Minute,
+		// [U]: Hyperliquid documents no connection-lifetime limit at
+		// all (confirmed in verify-first, unlike Binance's own
+		// documented 24h) -- this is pure precaution, a standard-
+		// practice default, not a measured or exchange-asserted value.
+		// 12 hours.
+		maxConnectionAge: 12 * time.Hour,
 	}
 	for _, opt := range opts {
 		opt(p)

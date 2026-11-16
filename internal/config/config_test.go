@@ -110,6 +110,48 @@ func TestValidate_ProductionRejectsNonHTTPSPublicBaseURL(t *testing.T) {
 	}
 }
 
+// TestValidate_ProductionRejectsHyperliquidURLOverrides is the real-
+// run brief's own production guard: ARGUS_HYPERLIQUID_BASE_URL_OVERRIDE/
+// WS_URL_OVERRIDE exist only to point the adapter at a non-exchange
+// host for local/test verification, and must refuse startup outright
+// if either is still set outside local/test.
+func TestValidate_ProductionRejectsHyperliquidURLOverrides(t *testing.T) {
+	validProd := func() Config {
+		c := validConfig("staging")
+		c.Auth.SignupCodeHMACKey = "a-real-production-secret-not-the-placeholder"
+		return c
+	}
+
+	c := validProd()
+	c.Hyperliquid.BaseURLOverride = "https://10.255.255.1"
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() with BaseURLOverride set in production = nil, want an error")
+	}
+
+	c = validProd()
+	c.Hyperliquid.WSURLOverride = "wss://10.255.255.1/ws"
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() with WSURLOverride set in production = nil, want an error")
+	}
+
+	c = validProd()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() in production with both overrides empty = %v, want nil", err)
+	}
+}
+
+// TestValidate_NonProductionAllowsHyperliquidURLOverrides confirms
+// the guard above is production-only: local/test is exactly where
+// a real-disconnect verification run needs to set these.
+func TestValidate_NonProductionAllowsHyperliquidURLOverrides(t *testing.T) {
+	c := validConfig("local")
+	c.Hyperliquid.BaseURLOverride = "https://10.255.255.1"
+	c.Hyperliquid.WSURLOverride = "wss://10.255.255.1/ws"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() with both overrides set outside production = %v, want nil", err)
+	}
+}
+
 // TestValidate_ProductionRejectsDefaultOrEmptySignupCodeHMACKey is
 // ADR-015 "Signup and onboarding"'s own test: the local-dev
 // placeholder (or an empty value) must never reach production, since

@@ -38,7 +38,35 @@ func startHyperliquidIngest(
 	publisher hub.Publisher,
 	clk clock.Clock,
 ) {
-	provider := hyperliquid.NewProvider(clk, logger)
+	// Loud-warning duty for these two overrides lives in main.go,
+	// unconditionally (not gated on IngestProvider=="hyperliquid") --
+	// see its own comment on why.
+	opts := []hyperliquid.Option{hyperliquid.WithMaxConnectionAge(cfg.Hyperliquid.MaxConnectionAge)}
+	if cfg.Hyperliquid.BaseURLOverride != "" {
+		opts = append(opts, hyperliquid.WithBaseURL(cfg.Hyperliquid.BaseURLOverride))
+	}
+	if cfg.Hyperliquid.WSURLOverride != "" {
+		opts = append(opts, hyperliquid.WithWSURL(cfg.Hyperliquid.WSURLOverride))
+	}
+	provider := hyperliquid.NewProvider(clk, logger, opts...)
+
+	// Price-format checking (brief-hyperliquid-adapter.md's own real-
+	// run requirement: every streamed price checked against the 5-
+	// significant-figure/decimal rule) is opt-in and needs szDecimals
+	// per symbol -- fetched once here, from this same Provider's own
+	// Instruments, rather than StreamCandles ever fetching it itself.
+	// A failure here is logged and skipped, never fatal to startup:
+	// this check is observational, not load-bearing.
+	if all, err := provider.Instruments(ctx); err != nil {
+		logger.Warn("hyperliquid: could not fetch instruments for price-format checking; streamed prices will not be checked against Hyperliquid's own precision rule this run", "error", err)
+	} else {
+		szDecimals := make(map[string]int32, len(all))
+		for _, pi := range all {
+			szDecimals[pi.Symbol] = pi.QtyDecimalPlaces // QtyDecimalPlaces is szDecimals itself, unmodified -- see Instruments' own doc comment
+		}
+		provider.SetSzDecimals(szDecimals)
+	}
+
 	cache := ingestion.NewInstrumentCache(instrumentStore)
 	normalizer := ingestion.NewNormalizer(cache, clk)
 	svc := ingestion.NewService(hyperliquid.ProviderName, provider, normalizer, cache, marketdataStore, marketdata.ContinuousCalendar{}, logger)
@@ -79,7 +107,26 @@ func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Ser
 		}
 
 		since := clk.Now()
+
+		// Covers the real-run gap this brief's own verification
+		// found: the stream's in-memory tracked-minute starts empty
+		// on every fresh connection, so a minute the backfill above
+		// (this one, or the gap backfill below from a PRIOR
+		// iteration) left dangling is never closed by the stream
+		// itself if the connection's first live message already
+		// belongs to a later minute. Runs only while WatchCandles is
+		// actually in flight -- canceled the instant it returns, so
+		// it is never what delays a prompt reconnect.
+		periodicCtx, cancelPeriodic := context.WithCancel(ctx)
+		periodicDone := make(chan struct{})
+		go func() {
+			defer close(periodicDone)
+			runPeriodicGapBackfill(periodicCtx, symbol, svc, cfg.Hyperliquid.PeriodicBackfillInterval, cfg.Hyperliquid.PeriodicBackfillWindow, logger, clk)
+		}()
+
 		err := svc.WatchCandles(ctx, symbol)
+		cancelPeriodic()
+		<-periodicDone
 		if ctx.Err() != nil {
 			return
 		}
@@ -106,6 +153,47 @@ func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Ser
 		case <-ctx.Done():
 			return
 		case <-time.After(delay):
+		}
+	}
+}
+
+// runPeriodicGapBackfill calls IngestHistorical on a fixed interval,
+// over a short trailing window, for as long as ctx stays alive --
+// the caller cancels ctx the instant its own StreamCandles call
+// returns, so this never outlives (or delays) a reconnect. Every
+// call it makes goes through the SAME IngestHistorical/applyCandle
+// path the startup and gap backfills already use, so its own
+// "every candle except the last fetched one is final" proof and
+// idempotent-correction behavior (unchanged value -> no new
+// revision, changed value -> the normal correction path) are not
+// reimplemented here, only invoked again on a timer.
+//
+// A failed call (the exchange unreachable mid an otherwise-healthy
+// stream) is logged and left for the next tick -- the interval
+// itself is this method's only backoff; it never retries sooner.
+//
+// interval <= 0 disables this entirely (returns immediately) --
+// never a time.NewTicker panic. config.Load's own envDefault always
+// supplies a positive value in a real deployment; a test building a
+// bare config.Config{} literal without setting
+// Hyperliquid.PeriodicBackfillInterval gets the feature turned off,
+// not a crash.
+func runPeriodicGapBackfill(ctx context.Context, symbol string, svc *ingestion.Service, interval, window time.Duration, logger *slog.Logger, clk clock.Clock) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := clk.Now()
+			since := now.Add(-window)
+			if err := svc.IngestHistorical(ctx, symbol, since, now); err != nil && ctx.Err() == nil {
+				logger.Warn("hyperliquid: periodic gap backfill failed, will retry next interval", "symbol", symbol, "error", err)
+			}
 		}
 	}
 }

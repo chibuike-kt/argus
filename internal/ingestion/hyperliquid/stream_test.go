@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -350,4 +351,210 @@ func TestStreamCandles_StreamDiesRightAfterAMinuteEnds_BackfillStillClosesItCorr
 	if backfilled[0].Close != "100.5" {
 		t.Errorf("backfilled minute-0 close = %q, want %q", backfilled[0].Close, "100.5")
 	}
+}
+
+// TestStreamCandles_StaleMessageNeverMovesTrackedMinuteBackwards is
+// the owner's own hostile-condition addition: a message arriving with
+// an OLDER open_time than the minute already tracked (reordered in
+// transit) must be dropped, counted, and -- this is the actual bug
+// being fixed, not just "handled somehow" -- must never move the
+// tracked minute itself backwards. Before the fix, trackedOpenTime
+// was overwritten unconditionally by every message regardless of
+// order, so a stale message arriving right before the REAL next
+// minute would make that later, correctly-ordered message look like
+// it was closing a minute further in the future than it actually is.
+func TestStreamCandles_StaleMessageNeverMovesTrackedMinuteBackwards(t *testing.T) {
+	fake := newFakeHyperliquidWS(t)
+	base := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+
+	var closedOpenTimes []time.Time
+	restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req candleSnapshotRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		closedOpenTimes = append(closedOpenTimes, time.UnixMilli(req.Req.StartTime).UTC())
+		_ = json.NewEncoder(w).Encode([]wireCandle{
+			candleJSON(req.Req.StartTime, "100", "101", "99", "100.5", "1"),
+		})
+	}))
+	t.Cleanup(restServer.Close)
+
+	p := NewProvider(clock.NewFixed(base), nil, WithBaseURL(restServer.URL), WithWSURL(fake.wsURL()), WithDialFunc(dialTest))
+	startingStale := p.StaleMessageCount()
+
+	var received []ingestion.ProviderCandle
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- p.StreamCandles(ctx, "BTC", func(_ context.Context, c ingestion.ProviderCandle) error {
+			received = append(received, c)
+			if len(received) == 3 {
+				cancel()
+			}
+			return nil
+		})
+	}()
+
+	// minute 1, then a STALE minute 0 (older than what is now
+	// tracked), then minute 2 -- the real, correctly-ordered next
+	// minute. If the stale message wrongly moved trackedOpenTime back
+	// to minute 0, minute 2 arriving would look like it closes minute
+	// 0, not minute 1 -- the wrong minute entirely.
+	fake.send <- candleJSON(base.Add(time.Minute).UnixMilli(), "100", "101", "99", "100.5", "10")
+	fake.send <- candleJSON(base.UnixMilli(), "99", "100", "98", "99.5", "5") // stale: minute 0, after minute 1 already arrived
+	fake.send <- candleJSON(base.Add(2*time.Minute).UnixMilli(), "100.5", "102", "100", "101.5", "5")
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StreamCandles: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	if got := p.StaleMessageCount() - startingStale; got != 1 {
+		t.Errorf("StaleMessageCount increased by %d, want 1", got)
+	}
+	// Exactly minute 1 (forming), minute 1 (closed), minute 2
+	// (forming) -- the stale minute-0 message must never have been
+	// delivered to handle at all, and the close REST call must have
+	// been for minute 1, never minute 0.
+	if len(received) != 3 {
+		t.Fatalf("got %d candles delivered, want 3 (the stale message must never reach handle)", len(received))
+	}
+	if received[0].OpenTime != base.Add(time.Minute) || received[1].OpenTime != base.Add(time.Minute) || received[2].OpenTime != base.Add(2*time.Minute) {
+		t.Fatalf("delivered open times = %v, %v, %v -- want minute 1, minute 1 (closed), minute 2",
+			received[0].OpenTime, received[1].OpenTime, received[2].OpenTime)
+	}
+	if !received[1].IsFinal {
+		t.Errorf("the second delivered candle must be minute 1's own close: %+v", received[1])
+	}
+	if len(closedOpenTimes) != 1 || !closedOpenTimes[0].Equal(base.Add(time.Minute)) {
+		t.Errorf("REST was asked to close %v, want exactly [minute 1] -- the stale message must not have shifted what gets closed", closedOpenTimes)
+	}
+}
+
+// TestStreamCandles_PlannedReconnectAfterMaxConnectionAgeLosesNoCandle
+// proves the owner's own precautionary planned-reconnect: once
+// WithMaxConnectionAge's own duration elapses, StreamCandles returns
+// cleanly (nil, not an error) rather than waiting for a real failure
+// -- and, combined with the caller's own unconditional post-
+// disconnect gap backfill (cmd/argus-worker's runHyperliquidSymbol),
+// no candle is lost across the swap.
+func TestStreamCandles_PlannedReconnectAfterMaxConnectionAgeLosesNoCandle(t *testing.T) {
+	fake := newFakeHyperliquidWS(t)
+	base := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+
+	p := NewProvider(clock.NewFixed(base), nil, WithWSURL(fake.wsURL()), WithDialFunc(dialTest),
+		WithMaxConnectionAge(200*time.Millisecond))
+
+	var received []ingestion.ProviderCandle
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- p.StreamCandles(ctx, "BTC", func(_ context.Context, c ingestion.ProviderCandle) error {
+			received = append(received, c)
+			return nil
+		})
+	}()
+
+	fake.send <- candleJSON(base.UnixMilli(), "100", "101", "99", "100.5", "10")
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StreamCandles: %v, want nil (a planned reconnect is not a failure)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("StreamCandles did not return once its own max connection age elapsed")
+	}
+
+	if ctx.Err() != nil {
+		t.Fatal("StreamCandles returned because ctx was canceled, not because the age limit fired -- this test never canceled ctx itself")
+	}
+	if len(received) != 1 {
+		t.Fatalf("got %d candles before the planned reconnect, want 1 (the one streamed before the age limit fired must not be lost)", len(received))
+	}
+}
+
+// TestStreamCandles_PriceFormatChecking_OptInAndObservationalOnly
+// covers both halves of WithSzDecimals' own contract: omitted
+// entirely, StreamCandles makes no REST call for it and never
+// touches PriceFormatViolationCount; provided, a streamed price that
+// violates Hyperliquid's own precision rule is counted and logged,
+// but still delivered to handle completely unchanged (observational,
+// never a gate or a correction).
+func TestStreamCandles_PriceFormatChecking_OptInAndObservationalOnly(t *testing.T) {
+	base := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	violating := candleJSON(base.UnixMilli(), "100", "101.23456", "99", "100.5", "10") // high: 7 significant figures
+
+	t.Run("omitted: no REST call, no counting", func(t *testing.T) {
+		fake := newFakeHyperliquidWS(t)
+		var restCalls int32
+		restServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(&restCalls, 1)
+			_ = json.NewEncoder(w).Encode(metaResponse{})
+		}))
+		t.Cleanup(restServer.Close)
+
+		p := NewProvider(clock.NewFixed(base), nil, WithBaseURL(restServer.URL), WithWSURL(fake.wsURL()), WithDialFunc(dialTest))
+		startingViolations := p.PriceFormatViolationCount()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- p.StreamCandles(ctx, "BTC", func(_ context.Context, _ ingestion.ProviderCandle) error {
+				cancel()
+				return nil
+			})
+		}()
+		fake.send <- violating
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out")
+		}
+
+		if restCalls != 0 {
+			t.Errorf("made %d REST calls with WithSzDecimals omitted, want 0", restCalls)
+		}
+		if got := p.PriceFormatViolationCount() - startingViolations; got != 0 {
+			t.Errorf("PriceFormatViolationCount increased by %d, want 0 (validation was never opted into)", got)
+		}
+	})
+
+	t.Run("provided: counts a violation but still delivers the value unchanged", func(t *testing.T) {
+		fake := newFakeHyperliquidWS(t)
+		p := NewProvider(clock.NewFixed(base), nil, WithWSURL(fake.wsURL()), WithDialFunc(dialTest),
+			WithSzDecimals(map[string]int32{"BTC": 0}))
+		startingViolations := p.PriceFormatViolationCount()
+
+		var received []ingestion.ProviderCandle
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- p.StreamCandles(ctx, "BTC", func(_ context.Context, c ingestion.ProviderCandle) error {
+				received = append(received, c)
+				cancel()
+				return nil
+			})
+		}()
+		fake.send <- violating
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out")
+		}
+
+		if got := p.PriceFormatViolationCount() - startingViolations; got != 1 {
+			t.Errorf("PriceFormatViolationCount increased by %d, want 1 (the \"high\" field has 7 significant figures)", got)
+		}
+		if len(received) != 1 || received[0].High != "101.23456" {
+			t.Fatalf("delivered candle = %+v, want the violating value delivered unchanged -- this check observes, it never corrects or drops", received)
+		}
+	})
 }

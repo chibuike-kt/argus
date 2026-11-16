@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 // Hyperliquid holds the Hyperliquid adapter's own tunables (private
 // use only, ADR-007 still open -- see
 // docs/briefs/brief-hyperliquid-adapter.md). Unlike LiveFeed's own
@@ -25,4 +27,46 @@ type Hyperliquid struct {
 	// never claims more than that ceiling actually holds regardless
 	// of what this value requests.
 	BackfillDays int `env:"ARGUS_HYPERLIQUID_BACKFILL_DAYS" envDefault:"3"`
+
+	// MaxConnectionAge bounds how long one StreamCandles connection is
+	// kept open before this package voluntarily reconnects (a planned
+	// reconnect, never losing a candle across the swap -- the gap
+	// backfill after every disconnect, planned or not, is
+	// unconditional). [U]: Hyperliquid documents no connection-
+	// lifetime limit at all, unlike Binance's own documented 24h --
+	// this is pure precaution, a standard-practice default, not a
+	// measured or exchange-asserted value. 12 hours.
+	MaxConnectionAge time.Duration `env:"ARGUS_HYPERLIQUID_MAX_CONNECTION_AGE" envDefault:"12h"` // [U]
+
+	// BaseURLOverride/WSURLOverride point the adapter at a different
+	// REST/WebSocket host than Hyperliquid's own real one -- empty
+	// (the default) means use the real hosts. Exists for the exact
+	// same reason hyperliquid.WithBaseURL/WithWSURL already exist for
+	// tests: to point this adapter at something other than the real
+	// exchange, here specifically so a real-disconnect verification
+	// run can point it at a genuinely unreachable address (a real
+	// network-level failure, not a mocked one) without modifying this
+	// machine's own system/network configuration -- never used for
+	// anything else, and empty in every normal deployment.
+	BaseURLOverride string `env:"ARGUS_HYPERLIQUID_BASE_URL_OVERRIDE" envDefault:""`
+	WSURLOverride   string `env:"ARGUS_HYPERLIQUID_WS_URL_OVERRIDE" envDefault:""`
+
+	// PeriodicBackfillInterval/Window close the real-run gap this
+	// brief's own verification found: StreamCandles' in-memory
+	// tracked-minute starts empty on every fresh connection, so if
+	// the first live message already belongs to a minute later than
+	// the one the connection's own startup/reconnect backfill left
+	// dangling (last item in that batch, open by design), that
+	// minute is never closed by the stream itself -- only the NEXT
+	// disconnect's own gap backfill would catch it, which on an
+	// otherwise-healthy connection could be MaxConnectionAge away.
+	// runHyperliquidSymbol now also runs IngestHistorical on this
+	// fixed interval WHILE streaming, over a short trailing window,
+	// so a dangling minute like that is closed within one interval
+	// instead of waiting for the next real disconnect. [U]: both are
+	// a precaution, not a measured or exchange-asserted value -- 60s
+	// period, 5-minute window (comfortably covers a single missed
+	// minute plus the fetch's own latency).
+	PeriodicBackfillInterval time.Duration `env:"ARGUS_HYPERLIQUID_PERIODIC_BACKFILL_INTERVAL" envDefault:"60s"` // [U]
+	PeriodicBackfillWindow   time.Duration `env:"ARGUS_HYPERLIQUID_PERIODIC_BACKFILL_WINDOW" envDefault:"5m"`    // [U]
 }

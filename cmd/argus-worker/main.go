@@ -43,6 +43,17 @@ func main() {
 	}
 	logger := logging.New(cfg.LogLevel)
 
+	// Loud and unconditional (not gated on ARGUS_INGEST_PROVIDER): an
+	// override left set after a verification run, with the provider
+	// later switched back to hyperliquid, must never ingest from or
+	// stream against the wrong host silently. config.Validate already
+	// refuses to start outright in production for this; local/test
+	// still get this warning on every start where one is set.
+	if cfg.Hyperliquid.BaseURLOverride != "" || cfg.Hyperliquid.WSURLOverride != "" {
+		logger.Warn("worker: a Hyperliquid URL override is set -- REST/WebSocket traffic is NOT going to the real exchange",
+			"base_url_override", cfg.Hyperliquid.BaseURLOverride, "ws_url_override", cfg.Hyperliquid.WSURLOverride)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
