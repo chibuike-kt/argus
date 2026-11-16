@@ -14,9 +14,44 @@ import (
 	"github.com/chibuike-kt/argus/internal/analysis"
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/instruments"
+	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/quant"
 	"github.com/chibuike-kt/argus/internal/setups"
 )
+
+// oneCandle inserts one real, closed candle for instrumentID and
+// returns its own real id -- setups.poi_source_candle_id has a real
+// foreign key to candles.id (setups_poi_source_candle_id_fkey), so a
+// hardcoded placeholder like OrderBlockCandleID: 1 only happens to
+// work when some OTHER test or package has already inserted a candle
+// with that exact id first. On a fresh, empty database run alone (no
+// such row exists yet), that insert fails outright. This mirrors
+// internal/setups's own oneCandle/feedCloseCandles helpers (same
+// shape, package-local here rather than imported -- a _test.go
+// helper is never importable across packages, and importing one
+// deliberately for this would be exactly the cross-package ordering
+// dependence this fix must not add) and this package's own existing
+// feedOHLCCandles (runner_integration_test.go), reusing the same
+// marketdata.Store calls rather than inventing a third way to insert
+// a candle in this one package.
+func oneCandle(t *testing.T, db *sql.DB, instrumentID int64, minute int, price int64) int64 {
+	t.Helper()
+	store := marketdata.NewStore(db, clock.Real{})
+	openTime := clock.NewEventTime(et(minute))
+	tick := marketdata.Tick{
+		InstrumentID: instrumentID, OpenTime: openTime,
+		Open: quant.Price(price), High: quant.Price(price), Low: quant.Price(price), Close: quant.Price(price),
+		Volume: 1, Provider: "test", IngestedAt: clock.NewIngestionTime(time.Now()),
+	}
+	if _, err := store.UpsertForming(context.Background(), tick); err != nil {
+		t.Fatalf("oneCandle: UpsertForming: %v", err)
+	}
+	closed, err := store.Close(context.Background(), instrumentID, openTime)
+	if err != nil {
+		t.Fatalf("oneCandle: Close: %v", err)
+	}
+	return closed.ID
+}
 
 // TestIntegration_CheckFixtureOnly_RefusesNonFixtureInstrument seeds a
 // setup for an instrument whose own provider is deliberately not
@@ -54,11 +89,13 @@ func TestIntegration_CheckFixtureOnly_RefusesNonFixtureInstrument(t *testing.T) 
 		t.Fatalf("create non-fixture instrument: %v", err)
 	}
 
+	candleID := oneCandle(t, db, inst.ID, 0, 100)
+
 	setupsStore := setups.NewStore(db)
 	plan := analysis.TradePlan{
 		Status: analysis.PlanActionable, Direction: analysis.DirectionBullish,
 		Entry: 110, Stop: 70,
-		POI: analysis.POI{Type: analysis.POIOrderBlock, Direction: analysis.DirectionBullish, OrderBlockCandleID: 1},
+		POI: analysis.POI{Type: analysis.POIOrderBlock, Direction: analysis.DirectionBullish, OrderBlockCandleID: candleID},
 	}
 	if _, _, err := setups.Reconcile(context.Background(), setupsStore, inst.ID, "1m", plan, "v1", et(0), clock.Real{}.Now()); err != nil {
 		t.Fatalf("seed a setup for the non-fixture instrument: %v", err)
@@ -115,11 +152,13 @@ func TestIntegration_CheckAllowedProviders_AdditivelyAllowsAnExtraProvider(t *te
 		t.Fatalf("create instrument for new provider: %v", err)
 	}
 
+	candleID := oneCandle(t, db, inst.ID, 0, 100)
+
 	setupsStore := setups.NewStore(db)
 	plan := analysis.TradePlan{
 		Status: analysis.PlanActionable, Direction: analysis.DirectionBullish,
 		Entry: 110, Stop: 70,
-		POI: analysis.POI{Type: analysis.POIOrderBlock, Direction: analysis.DirectionBullish, OrderBlockCandleID: 1},
+		POI: analysis.POI{Type: analysis.POIOrderBlock, Direction: analysis.DirectionBullish, OrderBlockCandleID: candleID},
 	}
 	if _, _, err := setups.Reconcile(ctx, setupsStore, inst.ID, "1m", plan, "v1", et(0), clock.Real{}.Now()); err != nil {
 		t.Fatalf("seed a setup for the new provider's instrument: %v", err)
