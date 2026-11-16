@@ -13,7 +13,7 @@ import {
 } from "lightweight-charts";
 import { GearSix, CircleNotch } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
-import { SampleDataBadge } from "@/components/ui/sample-data-badge";
+import { formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { useFlash } from "@/lib/use-flash";
@@ -107,6 +107,22 @@ export interface ChartPlanOverlay {
 // shows. After that, ChartSurfaceInner stays mounted and renders its
 // own small loading/error overlay (below) over whatever chart is
 // already there, however many instruments or setups come and go.
+// LegendChange is the chart legend's 24h change for the selected
+// instrument (real-panel-data brief rule 9): last close against the
+// closed 1-minute candle exactly 24h before the latest one, computed on
+// the server (GET /instruments/stats). An em dash when that candle does
+// not exist -- never a sample badge, never a computed-in-the-browser
+// number.
+function LegendChange() {
+  const { stats } = useAnalysisWorkspace();
+  const tone = toneClass(stats?.change_24h);
+  return (
+    <span className={cn("tnum", tone)} data-testid="legend-change-24h" title="Change vs the closed 1m candle exactly 24h earlier">
+      {formatDecimal(stats?.change_24h, { signed: true })} ({formatPercent(stats?.change_24h_pct)})
+    </span>
+  );
+}
+
 export function ChartSurface({ className }: { className?: string }) {
   const {
     setup,
@@ -867,10 +883,8 @@ export function ChartSurfaceInner({
   const contextMenuDrawing = contextMenu ? store.get(contextMenu.id) : null;
 
   // "up" colours the live dot/O-H-L-C legend by the latest candle's own
-  // colour (close vs open) -- real, from the data on screen. There is no
-  // endpoint for a day-level $ / % change (see the wiring brief's own
-  // report), so that cluster is a SampleDataBadge below, not a computed
-  // number dressed up to look real.
+  // colour (close vs open) -- real, from the data on screen. The 24h
+  // change next to it is LegendChange below (GET /instruments/stats).
   const lastCandle = hasCandles ? candles[candles.length - 1] : EMPTY_BAR;
   const up = lastCandle.close >= lastCandle.open;
   const last = lastCandle.close;
@@ -953,7 +967,7 @@ export function ChartSurfaceInner({
             <span className="text-fg-subtle">· {venue}</span>
             <span className={cn("ml-1 size-1.5 rounded-full", up ? "bg-up" : "bg-down")} />
           </div>
-          <SampleDataBadge label="Sample % change" />
+          <LegendChange />
           <LiveStatusBadge connectionState={connectionState} status={status} fatalReason={fatalReason} />
           {formationOutsideWindow && (
             <span className="rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">

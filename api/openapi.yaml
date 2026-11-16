@@ -86,6 +86,50 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /instruments/stats:
+    get:
+      operationId: listInstrumentStats
+      summary: >
+        Side-panel figures for up to 50 instruments (real-panel-data
+        brief), every one computed on the server with exact scaled-
+        integer arithmetic from stored current (non-superseded), closed
+        1-minute candles (internal/marketdata.Store.Stats). Enabled
+        instruments only: an unknown or disabled id is simply omitted
+        from the response, never an error, so the response does not
+        reveal which ids exist. A figure whose input candles do not all
+        exist is null, never zero and never approximated from a nearby
+        candle. Duplicate ids are returned once, in first-seen order.
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          style: form
+          explode: false
+          description: >
+            Comma-separated instrument ids, at most 50 (e.g. ids=1,2,3).
+            More than 50, none, or a non-integer is a 400.
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 50
+            items:
+              type: integer
+              format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InstrumentStats"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /instruments/{id}/candles:
     get:
       operationId: listInstrumentCandles
@@ -839,6 +883,94 @@ components:
           type: integer
           format: int32
           nullable: true
+    InstrumentStats:
+      type: object
+      description: >
+        One instrument's side-panel figures. Prices (last_close,
+        change_24h) are decimal strings at the instrument's own
+        price_scale; volume_24h is a decimal string at its qty_scale;
+        percentages (change_24h_pct, performance.*) are decimal strings
+        in percent units (no "%" sign), exactly 2 decimal places, rounded
+        half-even, e.g. "-1.24". Every figure is null when the candles it
+        needs do not all exist -- never zero, never interpolated.
+      # Every nullable field is always sent (x-omitempty: false), as
+      # an explicit null when absent -- a client never has to tell
+      # "missing key" apart from "absent value".
+      required: [instrument_id, performance]
+      properties:
+        instrument_id:
+          type: integer
+          format: int64
+        last_close:
+          type: string
+          nullable: true
+          x-omitempty: false
+          description: Close of the latest current, closed 1-minute candle. Null when there is none yet.
+        last_closed_open_time:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: >
+            Open time of that candle (UTC). Its own end -- data finalized
+            through -- is this plus one minute.
+        change_24h:
+          type: string
+          nullable: true
+          x-omitempty: false
+          description: >
+            last_close minus the close of the current, closed 1-minute
+            candle whose open time is exactly 24 hours before
+            last_closed_open_time. Null when that exact candle does not
+            exist (history shorter than 24h, or that minute missing).
+        change_24h_pct:
+          type: string
+          nullable: true
+          x-omitempty: false
+          description: change_24h divided by the reference close, in percent. Null when change_24h is null or the reference close is zero.
+        volume_24h:
+          type: string
+          nullable: true
+          x-omitempty: false
+          description: >
+            Sum of base asset volume over the 1440 current, closed
+            1-minute candles ending at (and including) the latest one.
+            Null unless all 1440 exist.
+        performance:
+          $ref: "#/components/schemas/InstrumentPerformance"
+    InstrumentPerformance:
+      type: object
+      description: >
+        Percent change of last_close against the current, closed
+        1-minute candle exactly this far before last_closed_open_time
+        (1D = 24h, 1W = 7 days, 1M = 30 days, 3M = 90 days, 6M = 180
+        days, 1Y = 365 days -- fixed durations, not calendar months).
+        Null when that exact candle does not exist.
+      properties:
+        "1D":
+          type: string
+          nullable: true
+          x-omitempty: false
+        "1W":
+          type: string
+          nullable: true
+          x-omitempty: false
+        "1M":
+          type: string
+          nullable: true
+          x-omitempty: false
+        "3M":
+          type: string
+          nullable: true
+          x-omitempty: false
+        "6M":
+          type: string
+          nullable: true
+          x-omitempty: false
+        "1Y":
+          type: string
+          nullable: true
+          x-omitempty: false
     # PlanSnapshot (internal/setups/types.go) is stored as JSONB but its
     # Go shape is stable (TargetSnapshot/POISnapshot/PlanSnapshot structs,
     # not a map), so it is typed here rather than left as a free-form

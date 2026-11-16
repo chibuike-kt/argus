@@ -178,8 +178,11 @@ export function ArgusActivityProvider({ children }: { children: ReactNode }) {
     timers.current.push(removeAt);
   }, []);
 
+  // replay itself runs whenever it is asked to; WHO may ask is gated
+  // elsewhere: the toolbar shows its Replay button only for an
+  // instrument whose provider is "fixture" (real-panel-data brief rule
+  // 8), and the automatic play on mount below stays fixture-mode only.
   const replay = useCallback(() => {
-    if (!fixturesEnabled()) return;
     clearTimers();
     setToasts([]);
     const script = buildScript();
@@ -200,9 +203,12 @@ export function ArgusActivityProvider({ children }: { children: ReactNode }) {
   // mount again); the cleanup clears the pending timer so only the
   // surviving mount's sequence actually plays.
   useEffect(() => {
-    const startAt = setTimeout(replay, 500); // deferred so it reads as "connecting", not instant
+    // Auto-play only in fixture mode; the cleanup is registered either
+    // way, since a replay the user started from the toolbar must not
+    // outlive this provider either.
+    const startAt = fixturesEnabled() ? setTimeout(replay, 500) : undefined; // deferred so it reads as "connecting", not instant
     return () => {
-      clearTimeout(startAt);
+      if (startAt !== undefined) clearTimeout(startAt);
       // Also clears every step/dismiss timer still pending, so navigating
       // away mid-sequence never fires a state update after unmount.
       clearTimers();

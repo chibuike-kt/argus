@@ -48,6 +48,11 @@ export interface UseLiveCandlesResult {
   // -- see this file's own doc comment above on why candle_corrected is
   // never surfaced here.
   forming: LiveTick | null;
+  // The seq of the latest candle_closed message only (not forming
+  // candle ticks) -- a signal for anything that should re-read figures
+  // derived from closed candles (the side panel's stats) when a candle
+  // closes. null until one arrives for the current subscription.
+  lastClosedSeq: number | null;
   lastError: WireErrorPayload | null;
   // Part 2F: the server's own freshness verdict for this subscription
   // (live/stale/degraded) and provider name -- read directly off the
@@ -66,6 +71,7 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
   const [historyError, setHistoryError] = useState<Error | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("closed");
   const [forming, setForming] = useState<LiveTick | null>(null);
+  const [lastClosedSeq, setLastClosedSeq] = useState<number | null>(null);
   const [lastError, setLastError] = useState<WireErrorPayload | null>(null);
   const [status, setStatus] = useState<WireStatusPayload | null>(null);
   const [fatalReason, setFatalReason] = useState<string | null>(null);
@@ -89,6 +95,7 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
       setHistoryLoading(false);
       setHistoryError(null);
       setForming(null);
+      setLastClosedSeq(null);
       setStatus(null);
       setFatalReason(null);
       return;
@@ -108,6 +115,7 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
     // effect must never apply that stale tick to the freshly-loaded
     // chart in the meantime.
     setForming(null);
+    setLastClosedSeq(null);
     setStatus(null);
     setFatalReason(null);
 
@@ -138,7 +146,10 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
         applySnapshot(instrumentId, interval, payload, seq);
       },
       onCandle: (payload, seq) => setForming({ candle: payload, seq }),
-      onCandleClosed: (payload, seq) => setForming({ candle: payload, seq }),
+      onCandleClosed: (payload, seq) => {
+        setForming({ candle: payload, seq });
+        setLastClosedSeq(seq);
+      },
       // Never surfaced via `forming` -- see this file's own doc comment
       // at the top on why a correction must go through a refetch
       // instead of series.update().
@@ -205,5 +216,15 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
     };
   }, [instrumentId, interval]);
 
-  return { history, historyLoading, historyError, connectionState, forming, lastError, status, fatalReason };
+  return {
+    history,
+    historyLoading,
+    historyError,
+    connectionState,
+    forming,
+    lastClosedSeq,
+    lastError,
+    status,
+    fatalReason,
+  };
 }

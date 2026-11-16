@@ -1,26 +1,12 @@
 import { useState, type ReactNode } from "react";
 import { Plus, Columns, DotsThree, CaretDown, CircleNotch } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
-import { SampleDataBadge } from "@/components/ui/sample-data-badge";
-import { useInstruments, useLatestCloses, useWatchlist } from "@/api/hooks";
+import { useInstruments, useWatchlist } from "@/api/hooks";
+import { useInstrumentStats } from "@/api/use-instrument-stats";
+import { formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
 import { cn } from "@/lib/cn";
 
-// No forex instrument exists in the dev-fixture dataset this is verified
-// against, and the API has no forex-specific endpoint beyond the same
-// GET /instruments every asset class shares -- this group stays fixture
-// data entirely, marked.
-const forex = [
-  { symbol: "GBPUSD", last: 1.34132, changePct: 0.29 },
-  { symbol: "AUDUSD", last: 0.70236, changePct: -0.07 },
-  { symbol: "EURGBP", last: 0.8461, changePct: -0.08 },
-];
-
 const COLS = "grid grid-cols-[1.3fr_1fr_0.9fr_0.8fr] items-center gap-2";
-
-function fmtNum(v: number) {
-  const d = Math.abs(v) < 10 ? 4 : Math.abs(v) < 1000 ? 2 : 1;
-  return v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
-}
 
 function IconBtn({ children }: { children: ReactNode }) {
   return (
@@ -30,18 +16,24 @@ function IconBtn({ children }: { children: ReactNode }) {
   );
 }
 
-// last/changePct are optional: GET /instruments carries no price, and
-// deriving "last" per watchlist row would mean one extra candles
-// request per instrument, which is not "trivial" for a list of any real
-// size (the wiring brief's own bar for when to derive it instead of
-// marking it sample). undefined renders as an em dash, never a
-// fabricated 0.
-function Row({ symbol, last, changePct }: { symbol: string; last?: number; changePct?: number }) {
-  const up = (changePct ?? 0) >= 0;
-  const chg = last !== undefined && changePct !== undefined ? (last * changePct) / 100 : undefined;
-  const tone = changePct === undefined ? "text-fg-subtle" : up ? "text-up" : "text-down";
+// Row renders the decimal strings GET /instruments/stats sent, as sent
+// (thousands separators only -- no number conversion, real-panel-data
+// brief rule 10). null/undefined is an em dash, never a fabricated 0.
+function Row({
+  symbol,
+  last,
+  change,
+  changePct,
+}: {
+  symbol: string;
+  last?: string | null;
+  change?: string | null;
+  changePct?: string | null;
+}) {
+  const tone = toneClass(change);
   return (
     <button
+      data-testid={`watchlist-row-${symbol}`}
       className={cn(
         "focus-ring w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/5",
         COLS,
@@ -51,18 +43,14 @@ function Row({ symbol, last, changePct }: { symbol: string; last?: number; chang
         <CoinIcon symbol={symbol} size={20} />
         <span className="truncate text-[13px] font-medium">{symbol.replace(".P", "")}</span>
       </span>
-      <span className="tnum text-right text-[13px]">{last !== undefined ? fmtNum(last) : "—"}</span>
-      <span className={cn("tnum text-right text-[12px]", tone)}>
-        {chg !== undefined ? `${chg >= 0 ? "+" : ""}${fmtNum(chg)}` : "—"}
-      </span>
-      <span className={cn("tnum text-right text-[12px]", tone)}>
-        {changePct !== undefined ? `${up ? "+" : ""}${changePct.toFixed(2)}%` : "—"}
-      </span>
+      <span className="tnum truncate text-right text-[13px]">{formatDecimal(last)}</span>
+      <span className={cn("tnum truncate text-right text-[12px]", tone)}>{formatDecimal(change, { signed: true })}</span>
+      <span className={cn("tnum truncate text-right text-[12px]", tone)}>{formatPercent(changePct)}</span>
     </button>
   );
 }
 
-function Group({ title, sample, children }: { title: string; sample?: boolean; children: ReactNode }) {
+function Group({ title, children }: { title: string; children: ReactNode }) {
   const [open, setOpen] = useState(true);
   return (
     <div>
@@ -74,7 +62,6 @@ function Group({ title, sample, children }: { title: string; sample?: boolean; c
           <CaretDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
           {title}
         </button>
-        {sample && <SampleDataBadge />}
       </div>
       {open && <div className="space-y-0.5">{children}</div>}
     </div>
@@ -97,12 +84,12 @@ export function Watchlist() {
     .map((id) => byId.get(id))
     .filter((inst): inst is NonNullable<typeof inst> => inst !== undefined);
 
-  // Last = the latest closed candle's close, per real instrument
-  // (order=desc&limit=1, web-wiring-followup brief Part 5) -- capped and
-  // parallel (useLatestCloses's own doc comment); Chg/Chg% stay an em
-  // dash (Row's own default), since no 24h reference exists yet and this
-  // brief does not invent one.
-  const { data: latestCloses } = useLatestCloses(watched.map((i) => i.id));
+  // Last, Chg and Chg% for every watched instrument from ONE
+  // GET /instruments/stats request (real-panel-data brief), so all three
+  // come from the same server snapshot. Chg is against the closed
+  // 1-minute candle exactly 24h before the latest one; an em dash when
+  // that candle does not exist. Refreshed on the hook's own timer.
+  const stats = useInstrumentStats(watched.map((i) => i.id)).data;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -149,24 +136,30 @@ export function Watchlist() {
           {error && <div className="px-2 py-2 text-[12px] text-down">{error.message}</div>}
           {!loading &&
             !error &&
-            watched.map((inst) => (
-              // Symbol and Last are both real now (GET /instruments,
-              // GET .../candles?order=desc&limit=1); Chg/Chg% stay an em
-              // dash -- no 24h reference endpoint exists to compute them
-              // from, so Row's own default renders rather than a
-              // fabricated number.
-              <Row key={inst.id} symbol={inst.native_symbol} last={latestCloses?.get(inst.id)} />
-            ))}
+            watched.map((inst) => {
+              const row = stats?.get(inst.id);
+              return (
+                <Row
+                  key={inst.id}
+                  symbol={inst.native_symbol}
+                  last={row?.last_close}
+                  change={row?.change_24h}
+                  changePct={row?.change_24h_pct}
+                />
+              );
+            })}
           {!loading && !error && watched.length === 0 && (
             <div className="px-2 py-2 text-[12px] text-fg-subtle">
               Your watchlist is empty. Add a pair from onboarding or account settings.
             </div>
           )}
         </Group>
-        <Group title="Forex" sample>
-          {forex.map((f) => (
-            <Row key={f.symbol} symbol={f.symbol} last={f.last} changePct={f.changePct} />
-          ))}
+        {/* Forex is not connected (rule 6): one plain line, no numbers,
+            no badge -- the fixture rows that used to sit here are gone. */}
+        <Group title="Forex">
+          <div className="px-2 py-2 text-[12px] text-fg-subtle" data-testid="forex-not-connected">
+            Forex is not connected yet
+          </div>
         </Group>
       </div>
     </div>

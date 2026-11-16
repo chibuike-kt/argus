@@ -2,17 +2,11 @@ import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNod
 import { Columns, PencilSimple, DotsThree, ArrowSquareOut } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { TabsRoot, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { SampleDataBadge } from "@/components/ui/sample-data-badge";
+import { cn } from "@/lib/cn";
+import { formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
 import { useAnalysisWorkspace } from "./analysis-workspace";
 import { Watchlist } from "./watchlist";
 import { AnalysisPanel } from "./analysis-panel";
-
-// Volume has no endpoint today (ADR-006's own market-data contracts
-// cover candles/quotes, not a traded-volume rollup) -- kept as a mock,
-// marked, matching TradingView's own symbol-detail layout this panel is
-// based on.
-const volume = 43.94;
-const avgVolume = 50.08;
 
 const WIDTH_STORAGE_KEY = "argus:right-panel-width";
 const MIN_WIDTH = 280;
@@ -52,23 +46,22 @@ function IconBtn({ children }: { children: ReactNode }) {
   );
 }
 
-const n = (v: number) => v.toLocaleString("en-US", { maximumFractionDigits: 1 });
-
-// Symbol detail: the selected instrument's own real id/symbol/provider
-// (GET /instruments, via the workspace), "Last" derived from the most
-// recent candle already fetched for the chart (trivial -- no extra
-// request). changePct, "market open" and News have no endpoint at all
-// (ADR-006 covers candles/quotes, not a day-change rollup or a market-
-// status/news feed), so those are now fixed, marked samples instead of
-// numbers computed to look real.
+// Symbol detail: the selected instrument's own id/symbol/provider (GET
+// /instruments, via the workspace) and every figure from GET
+// /instruments/stats (real-panel-data brief rules 1, 2, 10) -- computed
+// on the server from stored candles, rendered here from the decimal
+// strings as sent. A figure whose candles do not all exist shows an em
+// dash. The fixture-era "Avg. volume (30D)" figure and News block are
+// gone (rules 3 and 5): there is no 30-day average defined and no news
+// source.
 function SymbolDetail() {
-  const { instrument, candles } = useAnalysisWorkspace();
+  const { instrument, stats } = useAnalysisWorkspace();
   if (!instrument) return null;
-  const lastCandle = candles[candles.length - 1];
-  const last = lastCandle ? Number(lastCandle.close) : undefined;
+  const changeTone = toneClass(stats?.change_24h);
+  const volumeUnit = instrument.base_asset ?? "";
 
   return (
-    <div className="max-h-[50%] shrink-0 overflow-y-auto border-t-2 border-line-strong">
+    <div className="max-h-[50%] shrink-0 overflow-y-auto border-t-2 border-line-strong" data-testid="symbol-detail">
       <div className="p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -95,44 +88,24 @@ function SymbolDetail() {
         </div>
 
         <div className="mt-3 flex items-end gap-2">
-          <span className="tnum text-3xl font-semibold leading-none">
-            {last !== undefined ? n(last) : "—"}
+          <span className="tnum text-3xl font-semibold leading-none" data-testid="detail-last">
+            {formatDecimal(stats?.last_close)}
           </span>
           {instrument.quote_asset && <span className="text-xs text-fg-subtle">{instrument.quote_asset}</span>}
-          <span className="ml-auto">
-            <SampleDataBadge label="Sample % change" />
-          </span>
+        </div>
+        <div className={cn("tnum mt-1.5 flex items-center gap-1.5 text-[13px] font-medium", changeTone)}>
+          <span data-testid="detail-change-24h">{formatDecimal(stats?.change_24h, { signed: true })}</span>
+          <span data-testid="detail-change-24h-pct">({formatPercent(stats?.change_24h_pct)})</span>
+          <span className="text-[11px] font-normal text-fg-subtle">24h</span>
         </div>
 
         <div className="mt-4">
-          <div className="mb-1 flex items-center justify-between">
-            <span className="text-[11px] text-fg-subtle">Volume · Avg. volume (30D)</span>
-            <SampleDataBadge />
-          </div>
-          <div className="tnum flex items-center justify-between text-[13px] font-medium">
-            <span>{volume} K</span>
-            <span>{avgVolume} K</span>
-          </div>
-          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10">
-            <div
-              className="h-full rounded-full bg-up"
-              style={{ width: `${Math.min(100, (volume / avgVolume) * 100)}%` }}
-            />
+          <div className="mb-1 text-[11px] text-fg-subtle">Volume 24h (base asset volume)</div>
+          <div className="tnum text-[13px] font-medium" data-testid="detail-volume-24h">
+            {formatDecimal(stats?.volume_24h)}
+            {stats?.volume_24h != null && volumeUnit && <span className="ml-1 text-fg-subtle">{volumeUnit}</span>}
           </div>
         </div>
-      </div>
-
-      <div className="border-t border-line p-4">
-        <div className="flex items-center justify-between">
-          <div className="text-[11px] font-medium uppercase tracking-wide text-fg-subtle">News</div>
-          <SampleDataBadge />
-        </div>
-        <button className="focus-ring mt-1.5 block text-left text-[13px] font-medium leading-snug transition-colors hover:underline">
-          Crypto Selloff Has Further to Go After Binance Hack — Market Talk
-        </button>
-        <button className="focus-ring mt-2 text-[12px] text-fg-muted transition-colors hover:text-fg">
-          More events ›
-        </button>
       </div>
     </div>
   );

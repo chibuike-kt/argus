@@ -2,7 +2,8 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { useSearchParams } from "react-router-dom";
 import { getSetup, listSetups } from "@/api/setups";
 import { listInstruments } from "@/api/instruments";
-import type { ApiCandle, ApiInstrument, ApiSetup, ApiSetupEvent } from "@/api/types";
+import type { ApiCandle, ApiInstrument, ApiInstrumentStats, ApiSetup, ApiSetupEvent } from "@/api/types";
+import { useInstrumentStats } from "@/api/use-instrument-stats";
 import { listSetupEvents } from "@/api/setups";
 import { ApiClientError } from "@/api/client";
 import { useLiveCandles, type LiveTick } from "@/lib/use-live-candles";
@@ -80,6 +81,13 @@ interface AnalysisWorkspace {
   // will not retry (the session itself is invalid) -- chart-surface.tsx
   // shows this instead of a spinner.
   fatalReason: string | null;
+  // GET /instruments/stats for the selected instrument (real-panel-data
+  // brief): the side panel's 24h change, 24h volume, performance tiles
+  // and data-quality row, and the chart legend's change, all from one
+  // request. undefined while loading or when it failed -- every consumer
+  // shows an em dash then, never a sample number. Never the previous
+  // instrument's row (useInstrumentStats' own request token).
+  stats: ApiInstrumentStats | undefined;
 }
 
 const Ctx = createContext<AnalysisWorkspace | null>(null);
@@ -306,6 +314,13 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     [live.historyError],
   );
 
+  // 6. Side-panel stats for the selected instrument: refreshed on its
+  // own timer and whenever the live socket delivers a closed candle
+  // (live.lastClosedSeq), never carried over from a previous instrument.
+  const statsIds = useMemo(() => (instrument ? [instrument.id] : []), [instrument]);
+  const statsState = useInstrumentStats(statsIds, live.lastClosedSeq);
+  const stats = instrument ? statsState.data?.get(instrument.id) : undefined;
+
   const value: AnalysisWorkspace = {
     instruments,
     instrumentsLoading,
@@ -328,6 +343,7 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     forming: live.forming,
     status: live.status,
     fatalReason: live.fatalReason,
+    stats,
   };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

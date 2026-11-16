@@ -143,10 +143,12 @@ func NewRouter(d Deps) http.Handler {
 			// is served through the one strict handler below -- including
 			// /ping, which this replaces (it was hand-rolled before any
 			// feature module had a generated route to mount alongside it).
+			candleStore := marketdata.NewStore(d.DB, clock.Real{})
 			api := &apiHandler{
 				store:        setups.NewStore(d.DB),
 				instruments:  instruments.NewStore(d.DB),
-				candles:      marketdata.NewStore(d.DB, clock.Real{}),
+				candles:      candleStore,
+				stats:        candleStore,
 				auth:         d.Auth,
 				watchlist:    d.Watchlist,
 				authPolicy:   d.AuthPolicy,
