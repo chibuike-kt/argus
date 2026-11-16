@@ -118,6 +118,7 @@ services:
     environment:
       ARGUS_DATABASE_URL: postgres://argus:argus@postgres:5432/argus?sslmode=disable
       ARGUS_REDIS_URL: redis://redis:6379/0
+      ARGUS_INGEST_PROVIDER: ${ARGUS_INGEST_PROVIDER:-fixture}
 
 volumes:
   pgdata:
