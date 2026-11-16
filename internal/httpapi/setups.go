@@ -77,6 +77,7 @@ type apiHandler struct {
 	store        setupsStore
 	instruments  instrumentsStore
 	candles      candlesStore
+	stats        instrumentStatsStore
 	auth         authService
 	watchlist    watchlistStore
 	authPolicy   config.AuthPolicy

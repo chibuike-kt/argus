@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Eye,
   EyeSlash,
@@ -9,43 +9,42 @@ import {
 } from "@phosphor-icons/react";
 import { ProvenanceChip } from "@/components/ui/provenance-chip";
 import { Button } from "@/components/ui/button";
-import { SampleDataBadge } from "@/components/ui/sample-data-badge";
-import { instrument as fixtureInstrument, dataQuality } from "@/mocks/fixtures";
 import { formatUTC } from "@/lib/format";
+import { EM_DASH, addOneMinuteISO, direction, formatAge, formatPercent, toneClass } from "@/lib/decimal-display";
+import { PERFORMANCE_PERIODS } from "@/api/types";
 import { parseRatString } from "@/api/money";
 import { cn } from "@/lib/cn";
 import { useAnalysisWorkspace } from "./analysis-workspace";
 import { SetupPanel } from "./setup-panel";
 import { BiasGauge } from "./bias-gauge";
 
-// %-over-timeframe tiles, tinted by direction. No endpoint carries this
-// (no per-instrument performance series exists in the API today), so
-// this stays the fixture's own numbers with a visible marker -- a
-// self-contained tile cluster, not drawn over real chart data, so a
-// badge is enough to keep it honest (contrast the chart's own stricter
-// choice: dropping fixture structure labels entirely rather than
-// overlaying them on real candles, see chart-surface.tsx).
+// %-over-timeframe tiles (real-panel-data brief rule 4), every value
+// from GET /instruments/stats: last close against the closed 1-minute
+// candle exactly that far back (1D = 24h, 1W = 7d, 1M = 30d, 3M = 90d,
+// 6M = 180d, 1Y = 365d). A period whose exact reference candle does not
+// exist shows an em dash on a neutral tile -- with a few days of
+// history only 1D can show, which is correct, not a bug.
 function PerformanceTiles() {
-  const perf = fixtureInstrument.performance;
-  if (!perf) return null;
+  const { instrument, stats } = useAnalysisWorkspace();
+  if (!instrument) return null;
   return (
-    <div>
-      <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
-          Performance
-        </span>
-        <SampleDataBadge />
-      </div>
+    <div data-testid="performance-tiles">
+      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-fg-subtle">Performance</div>
       <div className="grid grid-cols-3 gap-2">
-        {Object.entries(perf).map(([tf, pct]) => {
-          const up = pct >= 0;
+        {PERFORMANCE_PERIODS.map((tf) => {
+          const pct = stats?.performance[tf] ?? null;
+          const d = direction(pct);
           return (
-            <div key={tf} className={cn("rounded-lg px-2.5 py-2", up ? "bg-up/10" : "bg-down/10")}>
+            <div
+              key={tf}
+              data-testid={`perf-${tf}`}
+              className={cn(
+                "rounded-lg px-2.5 py-2",
+                d === "up" ? "bg-up/10" : d === "down" ? "bg-down/10" : "bg-white/[0.03]",
+              )}
+            >
               <div className="text-[10px] font-medium uppercase tracking-wide text-fg-subtle">{tf}</div>
-              <div className={cn("tnum mt-0.5 text-[13px] font-semibold", up ? "text-up" : "text-down")}>
-                {up ? "+" : ""}
-                {pct.toFixed(2)}%
-              </div>
+              <div className={cn("tnum mt-0.5 text-[13px] font-semibold", toneClass(pct))}>{formatPercent(pct)}</div>
             </div>
           );
         })}
@@ -83,18 +82,56 @@ function BiasLine() {
   );
 }
 
-// Data quality (ADR-006: freshness/finality) has no live signal yet --
-// no endpoint reports feed staleness today -- so this now always reads
-// as a marked sample rather than silently claiming "Live".
+// useNow re-renders once a second so an age readout keeps counting.
+function useNow(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return now;
+}
+
+// Data quality (real-panel-data brief rule 7): "finalized through" is
+// the end of the latest closed 1-minute candle (its open time from GET
+// /instruments/stats plus one minute) in UTC, with that candle's age as
+// a plain number; provider name and connection state come from the live
+// socket. Deliberately no freshness verdict (live/stale): those
+// thresholds are open in ADR-006 and appendix C, so nothing here judges
+// the age.
+//
+// The open time comes from the stats endpoint, not the candles
+// endpoint's own last_closed_open_time: that field is the chart's
+// per-interval join point (a 1h chart's is the start of its latest
+// complete hour), so "+ one minute" would be wrong at any interval
+// above 1m. The stats value is always the latest closed 1-minute
+// candle's.
 function DataQualityRow() {
+  const { stats, status, connectionState } = useAnalysisWorkspace();
+  const now = useNow();
+  const openTime = stats?.last_closed_open_time ?? null;
+  const through = openTime ? addOneMinuteISO(openTime) : null;
   return (
-    <div className="flex items-center gap-2 rounded-lg bg-white/[0.03] px-3 py-2">
-      <Broadcast className="size-4 shrink-0 text-fg-subtle" />
-      <p className="flex-1 text-[12px] leading-snug text-fg-muted">
-        Finalized through{" "}
-        <span className="tnum text-fg">{formatUTC(dataQuality.finalizedThrough)}</span>
-      </p>
-      <SampleDataBadge />
+    <div className="flex items-start gap-2 rounded-lg bg-white/[0.03] px-3 py-2" data-testid="data-quality">
+      <Broadcast className="mt-0.5 size-4 shrink-0 text-fg-subtle" />
+      <div className="flex-1 text-[12px] leading-snug text-fg-muted">
+        <p>
+          Finalized through{" "}
+          <span className="tnum text-fg" data-testid="finalized-through">
+            {through ? formatUTC(through) : EM_DASH}
+          </span>
+          {through && (
+            <span className="tnum text-fg-subtle" data-testid="finalized-age">
+              {" "}
+              · {formatAge(now - new Date(through).getTime())}
+            </span>
+          )}
+        </p>
+        <p className="text-fg-subtle">
+          <span data-testid="feed-provider">{status?.provider ?? EM_DASH}</span> · socket{" "}
+          <span data-testid="feed-connection">{connectionState}</span>
+        </p>
+      </div>
     </div>
   );
 }

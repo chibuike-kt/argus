@@ -236,6 +236,38 @@ type Instrument struct {
 	TickSize           string   `json:"tick_size"`
 }
 
+// InstrumentPerformance Percent change of last_close against the current, closed 1-minute candle exactly this far before last_closed_open_time (1D = 24h, 1W = 7 days, 1M = 30 days, 3M = 90 days, 6M = 180 days, 1Y = 365 days -- fixed durations, not calendar months). Null when that exact candle does not exist.
+type InstrumentPerformance struct {
+	N1D *string `json:"1D"`
+	N1M *string `json:"1M"`
+	N1W *string `json:"1W"`
+	N1Y *string `json:"1Y"`
+	N3M *string `json:"3M"`
+	N6M *string `json:"6M"`
+}
+
+// InstrumentStats One instrument's side-panel figures. Prices (last_close, change_24h) are decimal strings at the instrument's own price_scale; volume_24h is a decimal string at its qty_scale; percentages (change_24h_pct, performance.*) are decimal strings in percent units (no "%" sign), exactly 2 decimal places, rounded half-even, e.g. "-1.24". Every figure is null when the candles it needs do not all exist -- never zero, never interpolated.
+type InstrumentStats struct {
+	// Change24h last_close minus the close of the current, closed 1-minute candle whose open time is exactly 24 hours before last_closed_open_time. Null when that exact candle does not exist (history shorter than 24h, or that minute missing).
+	Change24h *string `json:"change_24h"`
+
+	// Change24hPct change_24h divided by the reference close, in percent. Null when change_24h is null or the reference close is zero.
+	Change24hPct *string `json:"change_24h_pct"`
+	InstrumentId int64   `json:"instrument_id"`
+
+	// LastClose Close of the latest current, closed 1-minute candle. Null when there is none yet.
+	LastClose *string `json:"last_close"`
+
+	// LastClosedOpenTime Open time of that candle (UTC). Its own end -- data finalized through -- is this plus one minute.
+	LastClosedOpenTime *time.Time `json:"last_closed_open_time"`
+
+	// Performance Percent change of last_close against the current, closed 1-minute candle exactly this far before last_closed_open_time (1D = 24h, 1W = 7 days, 1M = 30 days, 3M = 90 days, 6M = 180 days, 1Y = 365 days -- fixed durations, not calendar months). Null when that exact candle does not exist.
+	Performance InstrumentPerformance `json:"performance"`
+
+	// Volume24h Sum of base asset volume over the 1440 current, closed 1-minute candles ending at (and including) the latest one. Null unless all 1440 exist.
+	Volume24h *string `json:"volume_24h"`
+}
+
 // LoginRequest defines model for LoginRequest.
 type LoginRequest struct {
 	Email    openapi_types.Email `json:"email"`
@@ -367,6 +399,12 @@ type ListInstrumentsParams struct {
 // ListInstrumentsParamsEnabled defines parameters for ListInstruments.
 type ListInstrumentsParamsEnabled string
 
+// ListInstrumentStatsParams defines parameters for ListInstrumentStats.
+type ListInstrumentStatsParams struct {
+	// Ids Comma-separated instrument ids, at most 50 (e.g. ids=1,2,3). More than 50, none, or a non-integer is a 400.
+	Ids []int64 `form:"ids" json:"ids"`
+}
+
 // ListInstrumentCandlesParams defines parameters for ListInstrumentCandles.
 type ListInstrumentCandlesParams struct {
 	// Interval 1m (default): the canonical series, served directly. 5m, 15m, 1h, 4h, 1d: computed on read by server-side aggregation: never built client-side, so the live stream and REST history always agree. Any other value is a 400. Whether a given interval is served for this instrument is read from its own supported_intervals, not guessed from asset class -- an interval not in that list is a clear 400.
@@ -454,6 +492,9 @@ type ServerInterface interface {
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams)
+	// ListInstrumentStats Side-panel figures for up to 50 instruments (real-panel-data brief), every one computed on the server with exact scaled- integer arithmetic from stored current (non-superseded), closed 1-minute candles (internal/marketdata.Store.Stats). Enabled instruments only: an unknown or disabled id is simply omitted from the response, never an error, so the response does not reveal which ids exist. A figure whose input candles do not all exist is null, never zero and never approximated from a nearby candle. Duplicate ids are returned once, in first-seen order.
+	// (GET /instruments/stats)
+	ListInstrumentStats(w http.ResponseWriter, r *http.Request, params ListInstrumentStatsParams)
 	// ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams)
@@ -544,6 +585,12 @@ func (_ Unimplemented) AuthSignupVerify(w http.ResponseWriter, r *http.Request) 
 // ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 // (GET /instruments)
 func (_ Unimplemented) ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ListInstrumentStats Side-panel figures for up to 50 instruments (real-panel-data brief), every one computed on the server with exact scaled- integer arithmetic from stored current (non-superseded), closed 1-minute candles (internal/marketdata.Store.Stats). Enabled instruments only: an unknown or disabled id is simply omitted from the response, never an error, so the response does not reveal which ids exist. A figure whose input candles do not all exist is null, never zero and never approximated from a nearby candle. Duplicate ids are returned once, in first-seen order.
+// (GET /instruments/stats)
+func (_ Unimplemented) ListInstrumentStats(w http.ResponseWriter, r *http.Request, params ListInstrumentStatsParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -798,6 +845,39 @@ func (siw *ServerInterfaceWrapper) ListInstruments(w http.ResponseWriter, r *htt
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListInstruments(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListInstrumentStats operation middleware
+func (siw *ServerInterfaceWrapper) ListInstrumentStats(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListInstrumentStatsParams
+
+	// ------------- Required query parameter "ids" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", false, true, "ids", r.URL.Query(), &params.Ids, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "ids"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "ids", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListInstrumentStats(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1215,6 +1295,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/instruments", wrapper.ListInstruments)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/instruments/stats", wrapper.ListInstrumentStats)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/instruments/{id}/candles", wrapper.ListInstrumentCandles)
 	})
 	r.Group(func(r chi.Router) {
@@ -1579,6 +1662,42 @@ func (response ListInstruments400JSONResponse) VisitListInstrumentsResponse(w ht
 	return err
 }
 
+type ListInstrumentStatsRequestObject struct {
+	Params ListInstrumentStatsParams
+}
+
+type ListInstrumentStatsResponseObject interface {
+	VisitListInstrumentStatsResponse(w http.ResponseWriter) error
+}
+
+type ListInstrumentStats200JSONResponse []InstrumentStats
+
+func (response ListInstrumentStats200JSONResponse) VisitListInstrumentStatsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListInstrumentStats400JSONResponse Error
+
+func (response ListInstrumentStats400JSONResponse) VisitListInstrumentStatsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListInstrumentCandlesRequestObject struct {
 	Id     int64 `json:"id"`
 	Params ListInstrumentCandlesParams
@@ -1921,6 +2040,9 @@ type StrictServerInterface interface {
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(ctx context.Context, request ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error)
+	// ListInstrumentStats Side-panel figures for up to 50 instruments (real-panel-data brief), every one computed on the server with exact scaled- integer arithmetic from stored current (non-superseded), closed 1-minute candles (internal/marketdata.Store.Stats). Enabled instruments only: an unknown or disabled id is simply omitted from the response, never an error, so the response does not reveal which ids exist. A figure whose input candles do not all exist is null, never zero and never approximated from a nearby candle. Duplicate ids are returned once, in first-seen order.
+	// (GET /instruments/stats)
+	ListInstrumentStats(ctx context.Context, request ListInstrumentStatsRequestObject) (ListInstrumentStatsResponseObject, error)
 	// ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(ctx context.Context, request ListInstrumentCandlesRequestObject) (ListInstrumentCandlesResponseObject, error)
@@ -2261,6 +2383,32 @@ func (sh *strictHandler) ListInstruments(w http.ResponseWriter, r *http.Request,
 	}
 }
 
+// ListInstrumentStats operation middleware
+func (sh *strictHandler) ListInstrumentStats(w http.ResponseWriter, r *http.Request, params ListInstrumentStatsParams) {
+	var request ListInstrumentStatsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListInstrumentStats(ctx, request.(ListInstrumentStatsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListInstrumentStats")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListInstrumentStatsResponseObject); ok {
+		if err := validResponse.VisitListInstrumentStatsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // ListInstrumentCandles operation middleware
 func (sh *strictHandler) ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams) {
 	var request ListInstrumentCandlesRequestObject
@@ -2505,97 +2653,114 @@ func (sh *strictHandler) UpdateWatchlist(w http.ResponseWriter, r *http.Request)
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"165IrpLYmJ98+OXD/w8AAP//",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

@@ -25,7 +25,6 @@ import { useDrawing } from "@/components/chart/drawing-context";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import { useCommandPalette } from "@/components/workspace/command-palette";
 import { useArgusActivity } from "@/components/workspace/argus-activity-feed";
-import { fixturesEnabled } from "@/mocks/fixtures-as-api";
 import type { ApiInstrument } from "@/api/types";
 import type { CandleInterval } from "@/lib/live-socket";
 
@@ -215,7 +214,12 @@ export function ChartToolbar() {
             Ctrl K
           </kbd>
         </button>
-        {fixturesEnabled() && (
+        {/* Replay plays back sample (fixture) analysis steps; it means
+            nothing for real data, so it exists only while the selected
+            instrument's own provider is "fixture" (real-panel-data brief
+            rule 8) -- never for a real provider's instrument, whatever
+            build mode the app is in. */}
+        {instrument?.provider === "fixture" && (
           <>
             <Divider />
             <Button

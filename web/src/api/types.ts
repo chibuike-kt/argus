@@ -84,6 +84,26 @@ export interface ApiCandleHistory {
   last_closed_revision: number | null;
 }
 
+// GET /instruments/stats' own row (real-panel-data brief). Every value
+// is computed on the server with exact scaled-integer arithmetic and
+// sent as a decimal string; null means absent (the candles it needs do
+// not all exist) -- never zero. Prices are at the instrument's
+// price_scale, volume_24h at its qty_scale (base asset), percentages in
+// percent units with exactly 2 decimals and no "%" sign.
+export type ApiPerformancePeriod = "1D" | "1W" | "1M" | "3M" | "6M" | "1Y";
+
+export const PERFORMANCE_PERIODS: readonly ApiPerformancePeriod[] = ["1D", "1W", "1M", "3M", "6M", "1Y"];
+
+export interface ApiInstrumentStats {
+  instrument_id: number;
+  last_close: string | null;
+  last_closed_open_time: string | null;
+  change_24h: string | null;
+  change_24h_pct: string | null;
+  volume_24h: string | null;
+  performance: Record<ApiPerformancePeriod, string | null>;
+}
+
 // TargetSnapshot/POISnapshot/PlanSnapshot mirror internal/setups/types.go
 // field for field (read directly from source, not guessed), and now
 // api/openapi.yaml's own typed TargetSnapshot/POISnapshot/PlanSnapshot

@@ -116,3 +116,72 @@ RETURNING *;
 UPDATE candles
 SET superseded_by = $2
 WHERE id = $1 AND superseded_at IS NOT NULL AND superseded_by IS NULL;
+
+-- GetCandleStatsInputs is GET /instruments/stats' own read path (real-
+-- panel-data brief): everything the side panel's 24h change, 24h volume
+-- and performance tiles need for one instrument, in one statement.
+--
+--   * latest: the latest current, closed 1-minute candle (the same row
+--     GetLatestClosedCandle returns).
+--   * vol: count and sum of base volume over the current, closed
+--     candles with open_time in (latest - volume_window_seconds,
+--     latest] -- the caller treats the sum as present only when count
+--     equals the full window (no gap, nothing guessed).
+--   * reference_found/reference_closes: for each offset in
+--     offsets_seconds (in order), whether a current, closed candle
+--     exists at EXACTLY latest.open_time - offset, and its close (0
+--     when not found -- reference_found is the only signal; a nearby
+--     candle is never used, nothing is interpolated).
+--
+-- Offsets are whole seconds multiplied by interval '1 second', never
+-- '1 day' / '1 month' intervals: timestamptz minus a day or month
+-- interval depends on the session TimeZone (a DST change makes a
+-- "day" 23 or 25 hours), and this result must not.
+--
+-- Cost: every lookup rides idx_candles_current (instrument_id,
+-- open_time) WHERE superseded_at IS NULL -- one backward index probe for
+-- latest, one probe per offset, and one index range scan of at most
+-- volume_window_seconds/60 rows for vol: O(log n + window), independent
+-- of how much history the instrument has. No row means the instrument
+-- has no closed candle at all.
+-- name: GetCandleStatsInputs :one
+WITH latest AS (
+    SELECT c.open_time, c.close
+    FROM candles c
+    WHERE c.instrument_id = sqlc.arg(instrument_id)
+      AND c.superseded_at IS NULL AND c.is_closed = true
+    ORDER BY c.open_time DESC
+    LIMIT 1
+)
+SELECT
+    latest.open_time AS latest_open_time,
+    latest.close AS latest_close,
+    vol.n AS volume_window_count,
+    vol.total AS volume_window_sum,
+    ARRAY(
+        SELECT r.id IS NOT NULL
+        FROM unnest(sqlc.arg(offsets_seconds)::bigint[]) WITH ORDINALITY AS o(secs, ord)
+        LEFT JOIN candles r
+          ON r.instrument_id = sqlc.arg(instrument_id)
+         AND r.superseded_at IS NULL AND r.is_closed = true
+         AND r.open_time = latest.open_time - o.secs * interval '1 second'
+        ORDER BY o.ord
+    )::boolean[] AS reference_found,
+    ARRAY(
+        SELECT coalesce(r.close, 0)
+        FROM unnest(sqlc.arg(offsets_seconds)::bigint[]) WITH ORDINALITY AS o(secs, ord)
+        LEFT JOIN candles r
+          ON r.instrument_id = sqlc.arg(instrument_id)
+         AND r.superseded_at IS NULL AND r.is_closed = true
+         AND r.open_time = latest.open_time - o.secs * interval '1 second'
+        ORDER BY o.ord
+    )::bigint[] AS reference_closes
+FROM latest
+CROSS JOIN LATERAL (
+    SELECT count(*)::bigint AS n, coalesce(sum(v.volume), 0)::bigint AS total
+    FROM candles v
+    WHERE v.instrument_id = sqlc.arg(instrument_id)
+      AND v.superseded_at IS NULL AND v.is_closed = true
+      AND v.open_time > latest.open_time - sqlc.arg(volume_window_seconds)::bigint * interval '1 second'
+      AND v.open_time <= latest.open_time
+) vol;

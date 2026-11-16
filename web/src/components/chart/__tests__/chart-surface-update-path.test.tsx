@@ -8,7 +8,7 @@
 // the chart and every attached primitive) because the loading/error/
 // chart states were three different element trees.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { ChartSurfaceInner, type ChartSurfaceInnerProps } from "../chart-surface";
 import { loadChartView, saveChartView } from "../chart-view-persistence";
 import { DrawingProvider, useDrawing } from "../drawing-context";
@@ -17,8 +17,13 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ApiInstrument } from "@/api/types";
 import type { LiveTick } from "@/lib/use-live-candles";
 
+// legendState.stats is what the mocked workspace reports as the selected
+// instrument's GET /instruments/stats row (the legend's 24h change).
+const legendState = vi.hoisted(() => ({ stats: undefined as import("@/api/types").ApiInstrumentStats | undefined }));
+
 vi.mock("@/components/workspace/analysis-workspace", () => ({
   useAnalysisWorkspace: () => ({
+    stats: legendState.stats,
     instrument: { id: 1, native_symbol: "BTC-PERP", provider: "test" } as ApiInstrument,
     // DrawingProvider now reads timeframe/setTimeframe from this hook
     // (Part 4, item 1) instead of owning its own state -- this test
@@ -787,5 +792,45 @@ describe("chart view persistence: only a user-made range change is saved", () =>
     capturedRangeHandler!({ from: 0, to: 3 });
 
     expect(loadChartView("BTC-PERP:1m")).toEqual({ from: 0, to: 3 });
+  });
+});
+
+// Rule 9: the legend's change is the server's 24h change for the
+// selected instrument, an em dash when absent, and never a sample badge.
+describe("chart legend 24h change", () => {
+  afterEach(() => {
+    cleanup();
+    legendState.stats = undefined;
+  });
+
+  const legendProps = {
+    className: "",
+    symbol: "BTC",
+    venue: "hyperliquid",
+    candles: candleSet(5, 100),
+    poiZone: undefined,
+    plan: undefined,
+    formationOutsideWindow: false,
+  } as unknown as HarnessProps;
+
+  it("shows the server's change and percent, with no Sample marker", () => {
+    legendState.stats = {
+      instrument_id: 1,
+      last_close: "95123.4",
+      last_closed_open_time: "2026-11-16T18:16:00Z",
+      change_24h: "1440.0",
+      change_24h_pct: "1.54",
+      volume_24h: null,
+      performance: { "1D": "1.54", "1W": null, "1M": null, "3M": null, "6M": null, "1Y": null },
+    };
+    const { container } = render(<Harness {...legendProps} />);
+    expect(screen.getByTestId("legend-change-24h")).toHaveTextContent("+1,440.0 (+1.54%)");
+    expect(container.textContent).not.toMatch(/Sample/i);
+  });
+
+  it("absent change is an em dash", () => {
+    const { container } = render(<Harness {...legendProps} />);
+    expect(screen.getByTestId("legend-change-24h")).toHaveTextContent("— (—)");
+    expect(container.textContent).not.toMatch(/Sample/i);
   });
 });
