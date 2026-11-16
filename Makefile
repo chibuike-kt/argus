@@ -75,6 +75,10 @@ migrate-create: ## Create a migration: make migrate-create name=add_x
 seed-dev: ## DEV/TEST ONLY: seed fixture-backed instruments against DB_URL -- never run against production
 	docker run --rm --network host -v $(PWD)/db/seed:/seed postgres:16-alpine psql "$(DB_URL)" -f /seed/dev_fixture_instruments.sql
 
+.PHONY: seed-e2e-only
+seed-e2e-only: ## E2E ONLY: seed the e2e-only fixture instrument(s) (db/seed/e2e_only_instruments.sql) against DB_URL -- called by e2e-stack alone, never by seed-dev/live-demo, so this never reaches a developer's own local dev database
+	docker run --rm --network host -v $(PWD)/db/seed:/seed postgres:16-alpine psql "$(DB_URL)" -f /seed/e2e_only_instruments.sql
+
 .PHONY: generate
 generate: ## Run sqlc and oapi-codegen
 	sqlc generate
@@ -146,6 +150,7 @@ e2e-resetdb: ## Drops and recreates the dedicated e2e database (argus_e2e) -- "f
 e2e-stack: e2e-resetdb ## THE ONE COMMAND for web/e2e's own backend: resets argus_e2e to a clean database, migrates + seeds + ingests the dev fixture into it, then runs a dedicated api+worker pair on E2E_HTTP_PORT (default 8090), with CORS/CSRF allowing Vite preview's own origin (4173). The worker also runs Part 2G's own live replay, so a forming candle visibly moves and a new one appears at the boundary -- exactly what the Playwright scenario in web/e2e needs. Needs: make infra running first (postgres+redis). Blocks in the foreground (Ctrl-C stops both); api's own stdout/stderr -- including the dev mailer's logged signup codes -- goes to $(E2E_API_LOG), which web/e2e's own global setup reads.
 	$(MAKE) migrate-up DB_URL="$(E2E_DB_URL)"
 	$(MAKE) seed-dev DB_URL="$(E2E_DB_URL)"
+	$(MAKE) seed-e2e-only DB_URL="$(E2E_DB_URL)"
 	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_DEV_FIXTURE_INGEST=true ARGUS_DEV_FIXTURE_LIVE_REPLAY=true ARGUS_DEV_FIXTURE_LIVE_REPLAY_SPEED="$(LIVE_DEMO_SPEED)" go run ./cmd/argus-worker &
 	sleep 2
 	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_AUTH_ALLOWED_ORIGINS="http://localhost:4173,http://127.0.0.1:4173" go run ./cmd/argus-api 2>&1 | tee "$(E2E_API_LOG)"

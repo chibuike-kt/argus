@@ -108,17 +108,42 @@ export interface ChartPlanOverlay {
 // own small loading/error overlay (below) over whatever chart is
 // already there, however many instruments or setups come and go.
 export function ChartSurface({ className }: { className?: string }) {
-  const { setup, instrument, candles, candlesLoading, candlesError, setupLoading, forming, connectionState, status, fatalReason } =
-    useAnalysisWorkspace();
+  const {
+    setup,
+    instrument,
+    instrumentNotFound,
+    candles,
+    candlesLoading,
+    candlesError,
+    instrumentsLoading,
+    forming,
+    connectionState,
+    status,
+    fatalReason,
+  } = useAnalysisWorkspace();
   const hasLoadedOnceRef = useRef(false);
   if (candles.length > 0) hasLoadedOnceRef.current = true;
 
   if (!hasLoadedOnceRef.current) {
-    if (setupLoading || candlesLoading) {
+    // instrumentsLoading, not setupLoading: an instrument with zero
+    // setups must still reach the chart below. setupLoading no longer
+    // gates anything here -- SetupPanel/BiasLine/etc. show their own
+    // "no setups yet" state independently once setup settles, but the
+    // chart itself is never blocked on that (see the brief's own real
+    // bug report: the chart used to never even mount for such an
+    // instrument).
+    if (instrumentsLoading || candlesLoading) {
       return (
         <div className={cn("flex h-full w-full items-center justify-center gap-2 text-fg-subtle", className)}>
           <CircleNotch className="size-5 animate-spin" />
           Loading chart…
+        </div>
+      );
+    }
+    if (instrumentNotFound) {
+      return (
+        <div className={cn("flex h-full w-full items-center justify-center text-[13px] text-down", className)}>
+          Instrument not found or not available.
         </div>
       );
     }
@@ -129,7 +154,7 @@ export function ChartSurface({ className }: { className?: string }) {
         </div>
       );
     }
-    if (!setup || !instrument || candles.length === 0) {
+    if (!instrument || candles.length === 0) {
       return (
         <div className={cn("flex h-full w-full items-center justify-center text-[13px] text-fg-subtle", className)}>
           No candles in range for this instrument.
@@ -137,14 +162,16 @@ export function ChartSurface({ className }: { className?: string }) {
       );
     }
   }
-  // Past the first successful load: setup/instrument are only ever
-  // cleared together with candles (AnalysisWorkspaceProvider's own
-  // candle-fetch effect), so if candles is non-empty here, setup and
-  // instrument already are too -- but TypeScript cannot see that
-  // across a hook boundary, so this still needs the same guard, now
-  // reached only on the (rare, transient) in-between render where
-  // candles has not cleared yet but setup/instrument briefly have.
-  if (!setup || !instrument) {
+  // Past the first successful load: instrument is only ever cleared
+  // together with candles (AnalysisWorkspaceProvider's own candle-
+  // fetch effect), so if candles is non-empty here, instrument already
+  // is too -- but TypeScript cannot see that across a hook boundary,
+  // so this still needs the same guard, now reached only on the
+  // (rare, transient) in-between render where candles has not cleared
+  // yet but instrument briefly has. setup is deliberately NOT part of
+  // this guard any more: an instrument with no setups must still
+  // render past this point.
+  if (!instrument) {
     return hasLoadedOnceRef.current ? null : (
       <div className={cn("flex h-full w-full items-center justify-center text-[13px] text-fg-subtle", className)}>
         No candles in range for this instrument.
@@ -152,16 +179,12 @@ export function ChartSurface({ className }: { className?: string }) {
     );
   }
 
-  // chartCandles/overlay/formationOutsideWindow read setup together
-  // with candles; during a setup switch, AnalysisWorkspaceProvider's
-  // own candle-fetch effect sets candlesLoading before clearing
-  // candles, so for one render these are a real, previous instrument's
-  // own candles paired with the new setup. ChartSurfaceInner's own
-  // update effect (see below) only re-applies data when candles
-  // actually changes, so this stale pairing is never drawn -- but
-  // formationOutsideWindow computed from it here, this render, would
-  // be meaningless. Skip it (false) whenever a fetch for the current
-  // setup has not resolved even once.
+  // chartCandles always builds from candles alone now -- never
+  // conditioned on setup. overlay/formationOutsideWindow are undefined
+  // whenever there is no setup (an instrument with none, or one still
+  // loading): ChartSurfaceInner below skips drawing the POI zone and
+  // plan box entirely in that case, rather than this component
+  // blocking the whole chart on setup the way it used to.
   const chartCandles: ChartCandle[] =
     candles.length === 0
       ? []
@@ -172,7 +195,7 @@ export function ChartSurface({ className }: { className?: string }) {
           low: formatMoney(c.low),
           close: formatMoney(c.close),
         }));
-  const overlay = toPlanOverlay(setup);
+  const overlay = setup ? toPlanOverlay(setup) : undefined;
   // The chart window is now "the most recent MAX_CANDLES," not anchored
   // at this setup's own evaluation_time (web-wiring-followup brief, Part
   // 5) -- an older setup's formation candle can fall before that window
@@ -180,7 +203,7 @@ export function ChartSurface({ className }: { className?: string }) {
   // whatever candle happens to be first on screen, this is surfaced as a
   // small, honest label instead of hidden.
   const formationOutsideWindow =
-    chartCandles.length > 0 && new Date(overlay.fromTime) < new Date(chartCandles[0].openTime);
+    !!overlay && chartCandles.length > 0 && new Date(overlay.fromTime) < new Date(chartCandles[0].openTime);
 
   return (
     <ChartSurfaceInner
@@ -190,8 +213,12 @@ export function ChartSurface({ className }: { className?: string }) {
       candles={chartCandles}
       loading={candlesLoading}
       loadError={candlesError?.message}
-      poiZone={{ low: overlay.poiLow, high: overlay.poiHigh }}
-      plan={{ entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime }}
+      poiZone={overlay ? { low: overlay.poiLow, high: overlay.poiHigh } : undefined}
+      plan={
+        overlay
+          ? { entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime }
+          : undefined
+      }
       formationOutsideWindow={formationOutsideWindow}
       forming={forming}
       connectionState={connectionState}
@@ -216,8 +243,13 @@ export interface ChartSurfaceInnerProps {
   candles: ChartCandle[];
   loading: boolean;
   loadError: string | undefined;
-  poiZone: ChartPoiZone;
-  plan: ChartPlanOverlay;
+  // Both undefined when there is no setup (an instrument with none, or
+  // one still loading) -- the chart still renders candles/live
+  // updates/the badge in that case, just with no system annotations
+  // drawn (applyCandleData below detaches whatever was attached and
+  // draws nothing new).
+  poiZone?: ChartPoiZone;
+  plan?: ChartPlanOverlay;
   formationOutsideWindow: boolean;
   // Part 2D: the latest candle/candle_closed tick, applied via
   // series.update() by its own effect below -- never through the
@@ -508,32 +540,41 @@ export function ChartSurfaceInner({
     const prev = systemPrimitivesRef.current;
     if (prev.poi) series.detachPrimitive(prev.poi);
     if (prev.plan) series.detachPrimitive(prev.plan);
+    systemPrimitivesRef.current = { poi: null, plan: null };
 
     // SMC annotations: ARGUS's own read-only output, in its own layer.
-    // Anchored at the POI's own real formation candle (plan.fromTime),
-    // not a fixture array index. If that candle fell outside the fetched
-    // window (the chart's own candle request is bounded, the setup's
-    // formation candle might predate it), fall back to the first visible
-    // candle rather than throwing.
-    const fromIndex = Math.max(0, candles.findIndex((c) => c.openTime === plan.fromTime));
-    const poi = new RectanglePrimitive({
-      p1: { time: unix(candles[fromIndex].openTime), price: poiZone.high },
-      p2: { time: lastTime, price: poiZone.low },
-      style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
-      label: "Order block",
-    });
-    const planPrimitive = new PositionPrimitive({
-      kind: "position-long",
-      time: unix(candles[fromIndex].openTime),
-      rightTime: lastTime,
-      entry: plan.entry,
-      stop: plan.stop,
-      targets: plan.targets,
-      style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
-    });
-    series.attachPrimitive(poi);
-    series.attachPrimitive(planPrimitive);
-    systemPrimitivesRef.current = { poi, plan: planPrimitive };
+    // No setup (an instrument with none, or one still loading): draw
+    // nothing here -- the detach above already cleared whatever a
+    // PREVIOUS setup/instrument had attached, and candles/live
+    // updates/the badge above are entirely unaffected by this being
+    // absent (the bug this whole file's own brief fixes: a setup used
+    // to be required just to render the chart at all).
+    if (plan && poiZone) {
+      // Anchored at the POI's own real formation candle (plan.fromTime),
+      // not a fixture array index. If that candle fell outside the fetched
+      // window (the chart's own candle request is bounded, the setup's
+      // formation candle might predate it), fall back to the first visible
+      // candle rather than throwing.
+      const fromIndex = Math.max(0, candles.findIndex((c) => c.openTime === plan.fromTime));
+      const poi = new RectanglePrimitive({
+        p1: { time: unix(candles[fromIndex].openTime), price: poiZone.high },
+        p2: { time: lastTime, price: poiZone.low },
+        style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
+        label: "Order block",
+      });
+      const planPrimitive = new PositionPrimitive({
+        kind: "position-long",
+        time: unix(candles[fromIndex].openTime),
+        rightTime: lastTime,
+        entry: plan.entry,
+        stop: plan.stop,
+        targets: plan.targets,
+        style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
+      });
+      series.attachPrimitive(poi);
+      series.attachPrimitive(planPrimitive);
+      systemPrimitivesRef.current = { poi, plan: planPrimitive };
+    }
 
     // Structure labels (confirmed swings, BOS/CHOCH, the equilibrium
     // line) are deliberately NOT drawn here: they come from
@@ -703,8 +744,10 @@ export function ChartSurfaceInner({
     // run via closure, same convention the create effect above already
     // uses (this project's own lint config does not enforce
     // react-hooks/exhaustive-deps); candles/poiZone/plan are the only
-    // real triggers this effect needs.
-  }, [candles, poiZone.low, poiZone.high, plan.entry, plan.stop, plan.fromTime, plan.targets]);
+    // real triggers this effect needs. poiZone/plan are now optional
+    // (no setup): the `?.` reads below produce undefined deps in that
+    // case, still a valid, stable dependency value React can compare.
+  }, [candles, poiZone?.low, poiZone?.high, plan?.entry, plan?.stop, plan?.fromTime, plan?.targets]);
 
   // live-tick path (Part 2D): a candle/candle_closed message, applied
   // with series.update() -- its own path, never through the candles

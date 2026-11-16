@@ -26,7 +26,7 @@ export function SetupPanel() {
     return <div className="py-8 text-center text-[13px] text-down">Could not load setup: {setupError.message}</div>;
   }
   if (!setup || !instrument) {
-    return <div className="py-8 text-center text-[13px] text-fg-subtle">No setups yet.</div>;
+    return <div className="py-8 text-center text-[13px] text-fg-subtle">No setups for this instrument yet.</div>;
   }
 
   const overlay = toPlanOverlay(setup);

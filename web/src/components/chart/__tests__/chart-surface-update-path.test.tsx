@@ -256,6 +256,66 @@ describe("switching instrument or interval does not rebuild the chart", () => {
     expect(canvasAfter).toBe(canvasBefore);
   });
 
+  // Real bug report: switching to an instrument with no setups used to
+  // mean the chart (ChartSurface, one level up) never even mounted
+  // ChartSurfaceInner at all -- plan/poiZone being undefined is what
+  // that now looks like at THIS level (ChartSurface passes undefined
+  // for both rather than refusing to render). This proves
+  // ChartSurfaceInner itself tolerates that cleanly: same chart
+  // instance, same canvas, candles still render, no crash -- and that
+  // switching BACK to an instrument with a setup re-attaches the
+  // system primitives rather than leaving them permanently gone.
+  it("switching to an instrument with no setup (undefined plan/poiZone) and back does not rebuild the chart", () => {
+    const candlesA = candleSet(5, 100);
+    const candlesB = candleSet(6, 300);
+    const { container, rerender } = render(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candlesA}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+    expect(createChartSpy).toHaveBeenCalledTimes(1);
+    const canvasBefore = container.querySelector("canvas");
+    expect(canvasBefore).not.toBeNull();
+
+    // Switched to an instrument with no setup: ChartSurface passes
+    // candles alone, poiZone/plan undefined.
+    rerender(
+      <Harness
+        className=""
+        symbol="ETH-PERP"
+        venue="test"
+        candles={candlesB}
+        poiZone={undefined}
+        plan={undefined}
+        formationOutsideWindow={false}
+      />,
+    );
+    expect(createChartSpy).toHaveBeenCalledTimes(1); // still the same chart
+    expect(container.querySelector("canvas")).toBe(canvasBefore); // still the same canvas
+    expect(container.textContent).toContain("ETH-PERP"); // candles/symbol still rendered
+
+    // Switched back to an instrument with a setup.
+    rerender(
+      <Harness
+        className=""
+        symbol="BTC-PERP"
+        venue="test"
+        candles={candlesA}
+        poiZone={{ low: 95, high: 105 }}
+        plan={basePlan}
+        formationOutsideWindow={false}
+      />,
+    );
+    expect(createChartSpy).toHaveBeenCalledTimes(1); // still never rebuilt
+    expect(container.querySelector("canvas")).toBe(canvasBefore);
+  });
+
   it("a drawing added before the switch is still in the store after it (the reconciliation effect never clears it on a mere data update)", () => {
     const captured: { store: DrawingsStore | null } = { store: null };
     const { rerender } = render(
