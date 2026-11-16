@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -124,22 +124,45 @@ const realStats: ApiInstrumentStats = {
   performance: { "1D": "-1.28", "1W": null, "1M": null, "3M": null, "6M": null, "1Y": null },
 };
 
-const absentStats: ApiInstrumentStats = {
+// STATS_WAIT is how long a test waits for the stats response to reach the
+// screen -- generous, so a slow or loaded runner still passes.
+const STATS_WAIT = { timeout: 5_000 };
+
+// shortHistoryStats: candles exist (so last close and finalized-through
+// are real), but no exact 24h-back reference and no full volume window
+// -- every other figure is absent. last_closed_open_time being present
+// is what lets a test prove the response has arrived before it checks
+// the em dashes (an em dash is also what every tile shows before load).
+const shortHistoryStats: ApiInstrumentStats = {
   instrument_id: 1,
-  last_close: null,
-  last_closed_open_time: null,
+  last_close: "95123.40",
+  last_closed_open_time: "2026-11-16T18:16:00Z",
   change_24h: null,
   change_24h_pct: null,
   volume_24h: null,
   performance: { "1D": null, "1W": null, "1M": null, "3M": null, "6M": null, "1Y": null },
 };
 
+// Default stats delay for every test: 0 normally; set ANALYSIS_PANEL_STATS_DELAY_MS
+// to reproduce a slow runner across the whole file.
+const STATS_DELAY_MS: number | ((callIndex: number) => number) = process.env.ANALYSIS_PANEL_FIRST_STATS_DELAY_MS
+  ? (i) => (i === 0 ? Number(process.env.ANALYSIS_PANEL_FIRST_STATS_DELAY_MS) : 0)
+  : Number(process.env.ANALYSIS_PANEL_STATS_DELAY_MS ?? 0);
+
 function installFetchMock(opts: {
   setupsById: Record<number, ApiSetup>;
   eventsBySetupId?: Record<number, ApiSetupEvent[]>;
   setupError?: boolean;
   stats?: ApiInstrumentStats;
+  // statsDelayMs holds back every GET /instruments/stats response, the
+  // way a slow CI runner does, so a test cannot pass only because the
+  // response happened to win the race against its assertions.
+  // A function gets the 0-based index of this stats request (the
+  // workspace's own request for the selected instrument is normally the
+  // first; the Watchlist tab's request for the whole list comes later).
+  statsDelayMs?: number | ((callIndex: number) => number);
 }) {
+  let statsCalls = 0;
   global.fetch = vi.fn((input: string | URL | Request) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/api/v1/instruments") {
@@ -168,7 +191,11 @@ function installFetchMock(opts: {
       return Promise.resolve(jsonResponse([{ instrument_id: 1, position: 0 }]));
     }
     if (url.pathname === "/api/v1/instruments/stats") {
-      return Promise.resolve(jsonResponse([opts.stats ?? realStats]));
+      const body = jsonResponse([opts.stats ?? realStats]);
+      const callIndex = statsCalls++;
+      const d = opts.statsDelayMs ?? STATS_DELAY_MS;
+      const delay = typeof d === "function" ? d(callIndex) : d;
+      return new Promise<Response>((resolve) => setTimeout(() => resolve(body), delay));
     }
     if (/^\/api\/v1\/instruments\/\d+\/candles$/.test(url.pathname)) {
       return Promise.resolve(jsonResponse(candles()));
@@ -274,13 +301,18 @@ describe("/analysis right panel", () => {
     installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
     renderAnalysisRightPanel("/analysis?setupId=1");
     await screen.findByText("The active plan");
-    expect(await screen.findByTestId("perf-1D")).toHaveTextContent("-1.28%");
+    // Wait for values that exist only once the stats response has
+    // arrived. Both read the same stats row through the workspace
+    // context, but each is waited for explicitly.
+    await waitFor(() => expect(screen.getByTestId("perf-1D")).toHaveTextContent("-1.28%"), STATS_WAIT);
+    // last_closed_open_time 18:16 + one minute = finalized through 18:17 UTC.
+    await waitFor(() => expect(screen.getByTestId("finalized-through")).toHaveTextContent("16 Nov, 18:17 UTC"), STATS_WAIT);
+    expect(screen.getByTestId("finalized-age")).toHaveTextContent(/\d+(s|m|h|d) ago/);
+    // Only now, with the response proven on screen, are em dashes a
+    // real "absent" rather than the before-load state.
     for (const tf of ["1W", "1M", "3M", "6M", "1Y"]) {
       expect(screen.getByTestId(`perf-${tf}`)).toHaveTextContent("—");
     }
-    // last_closed_open_time 18:16 + one minute = finalized through 18:17 UTC.
-    expect(screen.getByTestId("finalized-through")).toHaveTextContent("16 Nov, 18:17 UTC");
-    expect(screen.getByTestId("finalized-age")).toHaveTextContent(/\d+(s|m|h|d) ago/);
     expect(screen.queryByText(/Sample/i)).toBeNull();
     // Rule 7: no freshness verdict in the data-quality row.
     expect(screen.getByTestId("data-quality").textContent).not.toMatch(/\b(live|stale|degraded)\b/i);
@@ -293,14 +325,20 @@ describe("/analysis right panel", () => {
     await userEvent.setup().click(await screen.findByRole("tab", { name: "Watchlist" }));
 
     const row = await screen.findByTestId("watchlist-row-BTC-PERP");
-    await within(row).findByText("95,123.40");
+    // findByText retries until the watchlist's own stats arrive.
+    await within(row).findByText("95,123.40", undefined, STATS_WAIT);
     expect(row).toHaveTextContent("-1,234.50");
     expect(row).toHaveTextContent("-1.28%");
 
-    expect(await screen.findByTestId("detail-last")).toHaveTextContent("95,123.40");
-    expect(screen.getByTestId("detail-change-24h")).toHaveTextContent("-1,234.50");
-    expect(screen.getByTestId("detail-change-24h-pct")).toHaveTextContent("(-1.28%)");
-    expect(screen.getByTestId("detail-volume-24h")).toHaveTextContent(/^12,345\.6789\s*BTC$/);
+    // The symbol detail reads the WORKSPACE's own stats request, separate
+    // from the watchlist's -- the row above arriving proves nothing about
+    // it, so wait for its own values.
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-last")).toHaveTextContent("95,123.40");
+      expect(screen.getByTestId("detail-change-24h")).toHaveTextContent("-1,234.50");
+      expect(screen.getByTestId("detail-change-24h-pct")).toHaveTextContent("(-1.28%)");
+      expect(screen.getByTestId("detail-volume-24h")).toHaveTextContent(/^12,345\.6789\s*BTC$/);
+    }, STATS_WAIT);
     expect(screen.getByTestId("symbol-detail")).toHaveTextContent("base asset volume");
 
     // Rules 3, 5, 6: no average volume, no news, no forex numbers or badge.
@@ -313,17 +351,28 @@ describe("/analysis right panel", () => {
 
   it("absent stats render as em dashes, never zero", async () => {
     const setup = makeApiSetup({ id: 1 });
-    installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) }, stats: absentStats });
+    installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) }, stats: shortHistoryStats });
     renderAnalysisRightPanel("/analysis?setupId=1");
     await screen.findByText("The active plan");
-    // Wait for the stats request to settle, then check every tile.
-    await new Promise((r) => setTimeout(r, 50));
+    // Proof the response has arrived: finalized-through shows a real
+    // time (it is an em dash before load). Only then are the tiles'
+    // em dashes the server's "absent", not the loading state.
+    await waitFor(() => expect(screen.getByTestId("finalized-through")).toHaveTextContent("16 Nov, 18:17 UTC"), STATS_WAIT);
     for (const tf of ["1D", "1W", "1M", "3M", "6M", "1Y"]) {
       expect(screen.getByTestId(`perf-${tf}`)).toHaveTextContent("—");
     }
-    expect(screen.getByTestId("finalized-through")).toHaveTextContent("—");
-    expect(screen.queryByTestId("finalized-age")).toBeNull();
     expect(screen.queryByText(/0\.00%/)).toBeNull();
+
+    // Same proof-then-check on the Watchlist tab: Last arrives, Chg and
+    // Chg% stay em dashes, the 24h change and volume stay absent.
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Watchlist" }));
+    const row = await screen.findByTestId("watchlist-row-BTC-PERP");
+    await within(row).findByText("95,123.40", undefined, STATS_WAIT);
+    expect(within(row).getAllByText("—")).toHaveLength(2);
+    await waitFor(() => expect(screen.getByTestId("detail-last")).toHaveTextContent("95,123.40"), STATS_WAIT);
+    expect(screen.getByTestId("detail-change-24h")).toHaveTextContent("—");
+    expect(screen.getByTestId("detail-change-24h-pct")).toHaveTextContent("(—)");
+    expect(screen.getByTestId("detail-volume-24h")).toHaveTextContent(/^—$/);
   });
 
   it("shows no Sample markers tied to real plan/evidence data when real data is active", async () => {
