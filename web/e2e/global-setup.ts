@@ -28,9 +28,17 @@ export interface E2EAuthState {
   email: string;
   btcInstrumentId: number;
   ethInstrumentId: number;
+  // A real, enabled instrument with real candles (db/seed/e2e_only_instruments.sql's
+  // own flat-price SOL-PERP -- never produces a structural swing, so
+  // the worker's analysis engine deterministically never gives it a
+  // setup) -- analysis-workspace.spec.ts's own fixture for the real
+  // bug this brief fixes: an instrument with no setups used to never
+  // resolve as the selected instrument at all.
+  solInstrumentId: number;
   btcSetupId: number;
   btcProvider: string;
   ethProvider: string;
+  solProvider: string;
 }
 
 async function api(method: string, pathName: string, cookie: string | undefined, body?: unknown) {
@@ -123,8 +131,9 @@ export default async function globalSetup(): Promise<void> {
   type Instrument = { id: number; native_symbol: string; provider: string };
   let btc: Instrument | undefined;
   let eth: Instrument | undefined;
+  let sol: Instrument | undefined;
   let afterId: number | undefined;
-  for (let page = 0; page < 20 && (!btc || !eth); page++) {
+  for (let page = 0; page < 20 && (!btc || !eth || !sol); page++) {
     const qs = afterId ? `&after_id=${afterId}` : "";
     const batch = (await (
       await api("GET", `/instruments?enabled=all&limit=500${qs}`, sessionCookie)
@@ -132,6 +141,12 @@ export default async function globalSetup(): Promise<void> {
     if (batch.length === 0) break;
     btc ??= batch.find((i) => i.native_symbol === "BTC-PERP");
     eth ??= batch.find((i) => i.native_symbol === "ETH-PERP");
+    // SOL-PERP: db/seed/e2e_only_instruments.sql's own flat-price,
+    // zero-setup fixture (Makefile's e2e-stack target applies it after
+    // seed-dev, against argus_e2e only -- see that file's own doc
+    // comment on why it is a separate seed, not folded into
+    // dev_fixture_instruments.sql).
+    sol ??= batch.find((i) => i.native_symbol === "SOL-PERP");
     afterId = batch[batch.length - 1].id;
   }
   if (!btc || !eth) {
@@ -139,8 +154,13 @@ export default async function globalSetup(): Promise<void> {
       "BTC-PERP/ETH-PERP not found after paginating every instrument -- did Makefile's e2e-stack target's own seed-dev step run against argus_e2e?",
     );
   }
+  if (!sol) {
+    throw new Error(
+      "SOL-PERP not found after paginating every instrument -- did Makefile's e2e-stack target's own seed-e2e-only step run against argus_e2e?",
+    );
+  }
 
-  await api("PUT", "/watchlist", sessionCookie, { instrument_ids: [btc.id, eth.id] });
+  await api("PUT", "/watchlist", sessionCookie, { instrument_ids: [btc.id, eth.id, sol.id] });
   await api("POST", "/me/onboarding/complete", sessionCookie);
 
   // "Fresh database per e2e run" (Makefile's own e2e-resetdb) means
@@ -163,15 +183,32 @@ export default async function globalSetup(): Promise<void> {
     );
   }
 
+  // Sanity check on SOL-PERP's own "never produces a setup" guarantee
+  // -- by this point the engine has ticked at least once (BTC-PERP's
+  // own setup above proves it), so if a flat-price series ever DID
+  // produce a structural swing (a change to LeftBars/RightBars, or to
+  // the dataset itself), this fails loudly here instead of the e2e
+  // spec silently testing a different scenario than it claims to.
+  const solSetups = (await (
+    await api("GET", `/setups?instrument_id=${sol.id}`, sessionCookie)
+  ).json()) as Array<{ id: number }>;
+  if (solSetups.length > 0) {
+    throw new Error(
+      `SOL-PERP (instrument ${sol.id}) has ${solSetups.length} setup(s) -- expected exactly 0 (its own flat-price series is supposed to never produce a structural swing); analysis-workspace.spec.ts's own no-setups fixture no longer holds`,
+    );
+  }
+
   const state: E2EAuthState = {
     sessionCookie,
     userId: user.id,
     email,
     btcInstrumentId: btc.id,
     ethInstrumentId: eth.id,
+    solInstrumentId: sol.id,
     btcSetupId: setups[0].id,
     btcProvider: btc.provider,
     ethProvider: eth.provider,
+    solProvider: sol.provider,
   };
 
   await mkdir(AUTH_DIR, { recursive: true });

@@ -182,7 +182,7 @@ describe("/analysis right panel", () => {
     // path below, a different case.
     installFetchMock({ setupsById: {} });
     renderAnalysisRightPanel("/analysis");
-    expect(await screen.findByText(/No setups yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/No setups for this instrument yet/)).toBeInTheDocument();
   });
 
   it("shows an error state when the setup fetch fails", async () => {

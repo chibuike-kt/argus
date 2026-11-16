@@ -28,7 +28,17 @@ interface AnalysisWorkspace {
   instrumentsLoading: boolean;
   instrumentsError: ApiClientError | undefined;
 
+  // Resolved independently of setup (see resolvedInstrumentId's own
+  // doc comment below) -- an instrument with zero setups still
+  // resolves here, unlike before.
   instrument: ApiInstrument | undefined;
+  // True once instruments have loaded and a specific instrument id was
+  // requested (by the URL's own instrumentId, or by a resolved
+  // setup's instrument_id) but matches no enabled instrument --
+  // distinct from "nothing requested yet" or "still loading", so a
+  // consumer can show a real error instead of just treating this the
+  // same as the ordinary "no instrument resolved yet" case.
+  instrumentNotFound: boolean;
   setup: ApiSetup | undefined;
   setupLoading: boolean;
   setupError: ApiClientError | undefined;
@@ -154,10 +164,56 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     return () => controller.abort();
   }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId]);
 
+  // 2b. The resolved instrument id -- independent of whether the
+  // resolved setup (if any) exists, deliberately NOT just
+  // `setup?.instrument_id` the way this used to be derived. That
+  // derivation meant an instrument with zero setups could never be
+  // selected at all: resolve() above sets `setup` to undefined for
+  // such an instrument (list[0] of an empty array), so `instrument`
+  // came out undefined too, the symbol picker stayed on "Select
+  // instrument" forever, and useLiveCandles below never subscribed to
+  // anything (real bug this fixes).
+  //
+  // Order, matching the brief's own instruction: the instrument that
+  // owns the URL's setupId if one is given (setup wins over a
+  // disagreeing URL instrumentId -- see the second effect below),
+  // else the URL's instrumentId directly (never waiting on any setup
+  // lookup), else the first instrument.
+  const [resolvedInstrumentId, setResolvedInstrumentId] = useState<number | undefined>();
+
+  useEffect(() => {
+    if (instrumentsLoading) return;
+    if (urlSetupId) {
+      // Deferred to the effect below, once the setup itself resolves
+      // -- the URL's own instrumentId (if present and disagreeing) is
+      // never consulted in this case.
+      return;
+    }
+    setResolvedInstrumentId(urlInstrumentId ? Number(urlInstrumentId) : instruments[0]?.id);
+  }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId]);
+
+  // setup wins: once a URL-specified setup resolves, the instrument it
+  // belongs to is authoritative, even if the URL also carried a
+  // different instrumentId. That disagreeing instrumentId is simply
+  // never read in this branch.
+  useEffect(() => {
+    if (urlSetupId && setup) setResolvedInstrumentId(setup.instrument_id);
+  }, [urlSetupId, setup]);
+
   const instrument = useMemo(
-    () => instruments.find((i) => i.id === setup?.instrument_id),
-    [instruments, setup],
+    () => instruments.find((i) => i.id === resolvedInstrumentId),
+    [instruments, resolvedInstrumentId],
   );
+
+  // A specific instrument id was asked for (by the URL directly, or
+  // by a resolved setup's own instrument_id) but matches nothing in
+  // the enabled-instrument list GET /instruments returns -- either it
+  // does not exist, or it is disabled. Distinct from "nothing resolved
+  // yet" (resolvedInstrumentId still undefined, e.g. instruments still
+  // loading, or no instruments exist at all and none was explicitly
+  // requested) -- only the former is a real error ChartSurface shows.
+  const instrumentNotFound =
+    !instrumentsLoading && resolvedInstrumentId !== undefined && !instrument;
 
   // A genuine instrument switch can land on a timeframe the NEW
   // instrument's own supported_intervals does not have (e.g. 1h was
@@ -236,7 +292,13 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
   // own unsubscribe) before the new one subscribes with the new
   // interval; the old subscription is always released first, nothing
   // extra is needed here for that.
-  const live = useLiveCandles(setup?.instrument_id, timeframe);
+  //
+  // instrument.id, not setup?.instrument_id: an instrument with zero
+  // setups must still get its candles/live subscription (the bug this
+  // fixes) -- instrument is already undefined for a not-found/disabled
+  // id (instrumentNotFound above), so this correctly never subscribes
+  // to an invalid instrument either.
+  const live = useLiveCandles(instrument?.id, timeframe);
   const candles = useMemo(() => live.history?.candles ?? [], [live.history]);
   const candlesLoading = live.historyLoading;
   const candlesError = useMemo(
@@ -249,6 +311,7 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     instrumentsLoading,
     instrumentsError,
     instrument,
+    instrumentNotFound,
     setup,
     setupLoading,
     setupError,
