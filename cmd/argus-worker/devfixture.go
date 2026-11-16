@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
@@ -53,13 +55,37 @@ func runDevFixtureIngest(ctx context.Context, logger *slog.Logger, data fixture.
 	svc := ingestion.NewService(devFixtureProviderName, provider, normalizer, cache, marketdataStore, marketdata.ContinuousCalendar{}, logger)
 	svc.SetPublisher(publisher)
 
-	for symbol, candles := range data.Candles {
+	// Sorted, not map iteration order: data.Candles is a Go map, whose
+	// iteration order is randomized per run -- without this, which
+	// symbol logs (and ingests) first/last would vary between
+	// otherwise-identical runs, and a diff between two runs' own log
+	// output could show spurious reordering.
+	symbols := make([]string, 0, len(data.Candles))
+	for symbol := range data.Candles {
+		symbols = append(symbols, symbol)
+	}
+	sort.Strings(symbols)
+
+	for _, symbol := range symbols {
+		candles := data.Candles[symbol]
 		if len(candles) == 0 {
 			continue
 		}
 		start := candles[0].OpenTime
 		end := candles[len(candles)-1].OpenTime.Add(time.Minute)
 		if err := svc.IngestHistorical(ctx, symbol, start, end); err != nil {
+			// The dataset is allowed to carry a symbol no instrument
+			// row exists for yet (e.g. db/seed/e2e_only_instruments.sql's
+			// own SOL-PERP, seeded only in the e2e database -- a plain
+			// dev database seeded by dev_fixture_instruments.sql alone
+			// never has that row). Skipping only this one, narrowly-
+			// identified case and continuing is correct; anything else
+			// (a real ingest failure) must still fail startup the way
+			// it always has.
+			if errors.Is(err, instruments.ErrNotFound) {
+				logger.Warn("dev fixture: skipping dataset symbol with no instrument row", "symbol", symbol, "error", err)
+				continue
+			}
 			return fmt.Errorf("ingest historical %s: %w", symbol, err)
 		}
 		logger.Info("dev fixture: ingested historical candles", "symbol", symbol, "count", len(candles))
