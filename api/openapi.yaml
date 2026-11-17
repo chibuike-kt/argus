@@ -591,6 +591,140 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /me/preferences:
+    get:
+      operationId: getPreferences
+      summary: >
+        The signed-in user's own preferences document (owner decision D1,
+        brief-argus-product-overhaul.md Phase 1): every setting the user
+        has made, stored server-side so it survives a cleared browser and
+        a login on another device. A user with nothing stored yet gets an
+        empty object at version 0. Ownership is the session user only.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Preferences"
+    put:
+      operationId: updatePreferences
+      summary: >
+        Replaces the whole preferences document. version must be the
+        version the change was based on (0 for the first write); a stale
+        version is a 409 so two tabs or devices never silently overwrite
+        each other -- the client re-reads, re-applies its own changed keys
+        and retries. The document is schema-validated: an unknown key at
+        any level, a wrong type or an out-of-range value is a 400; a body
+        above 64 KB is a 413.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreferencesUpdate"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Preferences"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Conflict (stale version)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: Payload Too Large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /me/drawings:
+    get:
+      operationId: getDrawings
+      summary: >
+        The signed-in user's own drawings on one chart (instrument and
+        timeframe). Nothing stored yet: an empty array at version 0. An
+        unknown or disabled instrument is a 404.
+      parameters:
+        - $ref: "#/components/parameters/DrawingsInstrumentId"
+        - $ref: "#/components/parameters/DrawingsTimeframe"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Drawings"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    put:
+      operationId: updateDrawings
+      summary: >
+        Replaces the drawings on one chart, with the same version rule as
+        PUT /me/preferences (409 on a stale version). data is an array of
+        drawing objects, each with a string id and kind (the rest is the
+        web app's own drawing shape); at most 1000 drawings, and a body
+        above 256 KB is a 413.
+      parameters:
+        - $ref: "#/components/parameters/DrawingsInstrumentId"
+        - $ref: "#/components/parameters/DrawingsTimeframe"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DrawingsUpdate"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Drawings"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Conflict (stale version)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: Payload Too Large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /watchlist:
     get:
       operationId: getWatchlist
@@ -631,6 +765,21 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 components:
+  parameters:
+    DrawingsInstrumentId:
+      name: instrument_id
+      in: query
+      required: true
+      schema:
+        type: integer
+        format: int64
+    DrawingsTimeframe:
+      name: timeframe
+      in: query
+      required: true
+      description: One of 1m, 5m, 15m, 1h, 4h, 1d (validated by the handler; anything else is a 400).
+      schema:
+        type: string
   schemas:
     Error:
       type: object
@@ -684,6 +833,67 @@ components:
       properties:
         display_name:
           type: string
+    Preferences:
+      type: object
+      required: [data, version]
+      properties:
+        data:
+          description: >
+            The preferences document (see internal/preferences for the
+            exact, validated shape). Sent and stored as the raw JSON object.
+          type: object
+          x-go-type: json.RawMessage
+        version:
+          type: integer
+          format: int32
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+    PreferencesUpdate:
+      type: object
+      required: [data, version]
+      properties:
+        data:
+          type: object
+          x-go-type: json.RawMessage
+        version:
+          type: integer
+          format: int32
+          description: The version this change is based on; 0 for the first write.
+    Drawings:
+      type: object
+      required: [instrument_id, timeframe, data, version]
+      properties:
+        instrument_id:
+          type: integer
+          format: int64
+        timeframe:
+          type: string
+        data:
+          type: array
+          items:
+            type: object
+          x-go-type: json.RawMessage
+        version:
+          type: integer
+          format: int32
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+    DrawingsUpdate:
+      type: object
+      required: [data, version]
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+          x-go-type: json.RawMessage
+        version:
+          type: integer
+          format: int32
     WatchlistItem:
       type: object
       required: [instrument_id, position]

@@ -17,6 +17,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/hub"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/marketdata"
+	"github.com/chibuike-kt/argus/internal/preferences"
 	"github.com/chibuike-kt/argus/internal/setups"
 )
 
@@ -29,6 +30,13 @@ import (
 // not only the auth ones, since no route needs more than this.
 const maxRequestBodyBytes = 64 * 1024
 
+// maxDrawingsBodyBytes is the one exception: PUT /me/drawings carries a
+// whole chart's drawings, capped at 256 KB (preferences.MaxDrawingsBytes;
+// brief-argus-product-overhaul.md Phase 1) -- still bounded, and only on
+// an authenticated route (requireSession runs before the handler reads
+// the body).
+const maxDrawingsBodyBytes = preferences.MaxDrawingsBytes
+
 // limitRequestBody wraps the request body in http.MaxBytesReader so a
 // read past maxRequestBodyBytes fails instead of buffering an
 // arbitrarily large body into memory. The read failure itself is
@@ -36,7 +44,11 @@ const maxRequestBodyBytes = 64 * 1024
 // below, once oapi-codegen's own JSON decode actually hits it.
 func limitRequestBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		limit := int64(maxRequestBodyBytes)
+		if r.Method == http.MethodPut && r.URL.Path == "/api/v1/me/drawings" {
+			limit = maxDrawingsBodyBytes
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -149,6 +161,7 @@ func NewRouter(d Deps) http.Handler {
 				instruments:  instruments.NewStore(d.DB),
 				candles:      candleStore,
 				stats:        candleStore,
+				prefs:        preferences.NewStore(d.DB, clk),
 				auth:         d.Auth,
 				watchlist:    d.Watchlist,
 				authPolicy:   d.AuthPolicy,
