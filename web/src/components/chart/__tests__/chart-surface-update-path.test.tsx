@@ -787,8 +787,10 @@ describe("chart view persistence: only a user-made range change is saved", () =>
     // wheel/drag/scroll gesture (jsdom's own zero-layout chart cannot
     // produce that for real; see the mock's own doc comment). Called
     // from here, completely outside any of this component's own
-    // withProgrammaticRangeChange-wrapped calls, so the guard must see
-    // this exactly as it would see a real user gesture.
+    // withProgrammaticRangeChange-wrapped calls. A real gesture also
+    // fires a DOM event on the chart host first (a wheel here) -- the save
+    // is gated on that, so the library's own re-fits are never saved.
+    document.querySelector("canvas")!.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -100 }));
     capturedRangeHandler!({ from: 0, to: 3 });
 
     expect(loadChartView("BTC-PERP:1m")).toEqual({ from: 0, to: 3 });
@@ -832,5 +834,105 @@ describe("chart legend 24h change", () => {
     const { container } = render(<Harness {...legendProps} />);
     expect(screen.getByTestId("legend-change-24h")).toHaveTextContent("— (—)");
     expect(container.textContent).not.toMatch(/Sample/i);
+  });
+});
+
+// Item 2 (chart timeframe default view): what the chart shows when there is
+// no saved view, or the saved one no longer fits, and how a hole in the
+// data reaches the series.
+describe("default view and gap whitespace", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+  });
+
+  const props = (symbol: string, candles: ReturnType<typeof candleSet>) =>
+    ({
+      className: "",
+      symbol,
+      venue: "test",
+      candles,
+      poiZone: undefined,
+      plan: undefined,
+      formationOutsideWindow: false,
+    }) as unknown as HarnessProps;
+
+  it("switching to a short series with no saved view shows a normal-width window from the left, not fitContent", () => {
+    const { rerender } = render(<Harness {...props("BTC-PERP", candleSet(200, 100))} />);
+    const ts = lastCreatedChart!.timeScale();
+    const setRange = vi.spyOn(ts, "setVisibleLogicalRange");
+    const fit = vi.spyOn(ts, "fitContent");
+
+    rerender(<Harness {...props("ETH-PERP", candleSet(3, 300))} />);
+
+    expect(setRange).toHaveBeenCalledWith({ from: -2, to: 122 });
+    expect(fit).not.toHaveBeenCalled();
+  });
+
+  it("a long series with no saved view ends at the newest bar with about 120 in view", () => {
+    const { rerender } = render(<Harness {...props("BTC-PERP", candleSet(5, 100))} />);
+    const setRange = vi.spyOn(lastCreatedChart!.timeScale(), "setVisibleLogicalRange");
+    rerender(<Harness {...props("ETH-PERP", candleSet(1000, 300))} />);
+    expect(setRange).toHaveBeenCalledWith({ from: 880, to: 1004 });
+  });
+
+  it("a saved view that no longer fits the data falls back to the default", () => {
+    saveChartView("ETH-PERP:1m", { from: 800, to: 950 }); // saved on a longer series
+    const { rerender } = render(<Harness {...props("BTC-PERP", candleSet(5, 100))} />);
+    const setRange = vi.spyOn(lastCreatedChart!.timeScale(), "setVisibleLogicalRange");
+    rerender(<Harness {...props("ETH-PERP", candleSet(40, 300))} />);
+    expect(setRange).not.toHaveBeenCalledWith({ from: 800, to: 950 });
+    expect(setRange).toHaveBeenCalledWith({ from: -2, to: 122 });
+  });
+
+  it("a switch whose first render still carries the OLD candles waits for the new data before positioning (real 4h-switch bug)", () => {
+    const old = candleSet(200, 100);
+    const { rerender } = render(<Harness {...props("BTC-PERP", old)} />);
+    const setRange = vi.spyOn(lastCreatedChart!.timeScale(), "setVisibleLogicalRange");
+    // Scope flips while the previous candles are still the ones on hand
+    // (a fresh array with the same content, as ChartSurface builds one on
+    // every render)...
+    rerender(<Harness {...props("ETH-PERP", old.map((c) => ({ ...c })))} />);
+    // ...then the live-candles hook clears them...
+    rerender(<Harness {...props("ETH-PERP", [])} />);
+    // ...then the new scope's own 3 candles arrive.
+    rerender(<Harness {...props("ETH-PERP", candleSet(3, 300))} />);
+
+    // Never positioned against the stale 200 bars (that default would be
+    // {80, 204}); positioned once the new data is on hand.
+    expect(setRange).not.toHaveBeenCalledWith({ from: 80, to: 204 });
+    expect(setRange).toHaveBeenCalledWith({ from: -2, to: 122 });
+  });
+
+  it("range changes the library makes on its own (late report of the default, re-fit after resize) are not saved; one after a real gesture is", () => {
+    const { rerender } = render(<Harness {...props("BTC-PERP", candleSet(5, 100))} />);
+    rerender(<Harness {...props("ETH-PERP", candleSet(1000, 300))} />);
+    // A real browser fires the range-change event a frame later, with the
+    // range the component itself just applied.
+    capturedRangeHandler?.({ from: 880, to: 1004 });
+    // ...and a re-fit to a slightly different range after a resize.
+    capturedRangeHandler?.({ from: 862.33, to: 1006 });
+    expect(loadChartView("ETH-PERP:1m")).toBeNull();
+    // A range change that follows a real gesture (wheel on the chart) saves.
+    document.querySelector("canvas")!.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -100 }));
+    capturedRangeHandler?.({ from: 900, to: 1004 });
+    expect(loadChartView("ETH-PERP:1m")).toEqual({ from: 900, to: 1004 });
+  });
+
+  it("a hole in the candles reaches the series as whitespace (time only), never as a jump", () => {
+    const withHole = [...candleSet(3, 100)];
+    // Next candle 5 minutes after the last: 4 missing minutes.
+    withHole.push({ ...withHole[2], openTime: new Date(Date.UTC(2026, 0, 1, 0, 7)).toISOString() });
+    render(<Harness {...props("BTC-PERP", withHole)} />);
+    const series = lastCreatedChart!.panes()[0].getSeries()[0];
+    // series.data() omits whitespace items, so read by logical index: the
+    // 00:07 candle must sit at index 7 (after four whitespace slots), not
+    // at index 3 right after 00:02 -- which is what a time-axis jump is.
+    expect(series.dataByIndex(7)).toMatchObject({ time: Date.UTC(2026, 0, 1, 0, 7) / 1000 });
+    for (const i of [3, 4, 5, 6]) expect(series.dataByIndex(i)).toBeNull();
+    expect(series.dataByIndex(2)).toMatchObject({ time: Date.UTC(2026, 0, 1, 0, 2) / 1000 });
   });
 });

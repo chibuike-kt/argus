@@ -9,6 +9,7 @@ import {
   type ISeriesApi,
   type ISeriesPrimitive,
   type CandlestickData,
+  type WhitespaceData,
   type Time,
 } from "lightweight-charts";
 import { GearSix, CircleNotch } from "@phosphor-icons/react";
@@ -24,10 +25,11 @@ import type { LiveTick } from "@/lib/use-live-candles";
 import type { ConnectionState, WireStatusPayload } from "@/lib/live-socket";
 import { isNewerCandleKey, decideApplyAction, type CandleKey } from "@/lib/live-candles-reducer";
 import { loadChartView, saveChartView } from "./chart-view-persistence";
+import { defaultVisibleRange, isSavedViewUsable } from "./default-view";
+import { INTERVAL_SECONDS, withGapWhitespace } from "./gap-whitespace";
+import { SystemAxisLabelsPrimitive, SystemPositionPrimitive, SystemRectanglePrimitive } from "./system-axis-labels";
 import { cloneDrawing } from "./drawings/types";
 import {
-  RectanglePrimitive,
-  PositionPrimitive,
   primitiveFor,
   updatePrimitive,
 } from "./drawings/primitives";
@@ -37,13 +39,6 @@ import { ContextToolbar } from "./drawings/context-toolbar";
 import { DrawingContextMenu } from "./drawings/context-menu";
 
 const RANGES = ["1D", "5D", "1M", "3M", "6M", "YTD", "1Y", "5Y", "All"];
-// lightweight-charts computes candlestick body width as a fixed, non-
-// configurable function of bar spacing alone (optimalCandlestickWidth) --
-// there is no separate "thinness" option. fitContent() on this fixture's
-// ~20 candles stretches that spacing wide (fat candles); applying this
-// explicit, noticeably smaller spacing right after is the only lever,
-// comfortably above the library's own 0.5px zoom-out floor.
-const DEFAULT_BAR_SPACING = 10;
 
 const C = {
   up: "#2ebd85",
@@ -60,6 +55,10 @@ const C = {
 // ARGUS's own voice, distinct from the market's green/red, and never part
 // of the user drawing store or its hit testing.
 const SYSTEM_COLOR = "#6d7bff";
+
+// A visible-range change counts as the trader's (and is saved) only within
+// this long after a wheel, drag or touch on the chart. Display value.
+const USER_GESTURE_WINDOW_MS = 1000;
 
 const unix = (iso: string) => Math.floor(Date.parse(iso) / 1000) as Time;
 
@@ -391,14 +390,21 @@ export function ChartSurfaceInner({
 }: ChartSurfaceInnerProps) {
   const hasCandles = candles.length > 0;
   const lastTime = hasCandles ? unix(candles[candles.length - 1].openTime) : (0 as Time);
-  const toData = (): CandlestickData<Time>[] =>
-    candles.map((c) => ({
-      time: unix(c.openTime),
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    }));
+  // Missing candles inside the loaded range become whitespace points
+  // (time only, no price) so a hole shows as a hole instead of the time
+  // axis silently jumping -- display only (withGapWhitespace). timeframe
+  // is read at call time (it is declared further down this function).
+  const toData = () =>
+    withGapWhitespace(
+      candles.map((c) => ({
+        time: unix(c.openTime),
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      })),
+      INTERVAL_SECONDS[timeframe] ?? 60,
+    );
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -410,10 +416,16 @@ export function ChartSurfaceInner({
   // placed. These two are recreated (never mutated in place: neither
   // primitive type exposes an update() the way user-drawing primitives
   // do via updatePrimitive) whenever candles or the plan itself changes.
-  const systemPrimitivesRef = useRef<{ poi: RectanglePrimitive | null; plan: PositionPrimitive | null }>({
+  const systemPrimitivesRef = useRef<{ poi: SystemRectanglePrimitive | null; plan: SystemPositionPrimitive | null }>({
     poi: null,
     plan: null,
   });
+  // The system annotations' price-axis labels, capped so they never pile
+  // up (SystemAxisLabelsPrimitive). Created once with the chart.
+  const systemAxisLabelsRef = useRef<SystemAxisLabelsPrimitive | null>(null);
+  // How many data points (candles plus gap whitespace) the series holds
+  // now -- the logical-index length the default view is computed from.
+  const dataLengthRef = useRef(0);
   const [bar, setBar] = useState<OHLC>(hasCandles ? candles[candles.length - 1] : EMPTY_BAR);
   const [toolbarTick, setToolbarTick] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -455,6 +467,20 @@ export function ChartSurfaceInner({
   // empty chart and the restore never gets a real turn once data
   // actually arrives.
   const pendingRestoreScopeRef = useRef<string | null>(null);
+  // staleDataRef: the data last shown under the PREVIOUS scope. On a
+  // timeframe (or instrument) switch the scope can change one render before
+  // the old candles are cleared -- found on real data: a 4h switch spent its
+  // owed restore on the old 1m candles, so the 4h data then kept the
+  // library's leftover offset. The owed restore therefore waits while the
+  // candles on hand are still exactly the old scope's (same content
+  // signature); anything else -- new content, or an empty render and then
+  // data -- is the new scope's own data.
+  const staleDataRef = useRef<string | null>(null);
+  // The signature of the data the last data-effect run applied.
+  const appliedSignatureRef = useRef("");
+  const dataSignature = hasCandles
+    ? `${candles.length}|${candles[0].openTime}|${candles[candles.length - 1].openTime}|${candles[0].open}|${candles[candles.length - 1].close}`
+    : "";
   // isProgrammaticRangeChangeRef brackets a call that moves the chart's
   // own visible range but is not a user gesture (applyCandleData's own
   // setData, the saved-view restore, the no-saved-view default fit).
@@ -540,6 +566,8 @@ export function ChartSurfaceInner({
     appliedLiveKeyRef.current = null;
     if (!hasCandles) {
       series.setData([]);
+      dataLengthRef.current = 0;
+      systemAxisLabelsRef.current?.setLevels([]);
       const prev = systemPrimitivesRef.current;
       if (prev.poi) series.detachPrimitive(prev.poi);
       if (prev.plan) series.detachPrimitive(prev.plan);
@@ -550,7 +578,9 @@ export function ChartSurfaceInner({
       return;
     }
 
-    series.setData(toData());
+    const data = toData();
+    series.setData(data);
+    dataLengthRef.current = data.length;
     lastAppliedOpenTimeRef.current = candles[candles.length - 1].openTime;
 
     const prev = systemPrimitivesRef.current;
@@ -572,13 +602,13 @@ export function ChartSurfaceInner({
       // formation candle might predate it), fall back to the first visible
       // candle rather than throwing.
       const fromIndex = Math.max(0, candles.findIndex((c) => c.openTime === plan.fromTime));
-      const poi = new RectanglePrimitive({
+      const poi = new SystemRectanglePrimitive({
         p1: { time: unix(candles[fromIndex].openTime), price: poiZone.high },
         p2: { time: lastTime, price: poiZone.low },
         style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
         label: "Order block",
       });
-      const planPrimitive = new PositionPrimitive({
+      const planPrimitive = new SystemPositionPrimitive({
         kind: "position-long",
         time: unix(candles[fromIndex].openTime),
         rightTime: lastTime,
@@ -590,6 +620,15 @@ export function ChartSurfaceInner({
       series.attachPrimitive(poi);
       series.attachPrimitive(planPrimitive);
       systemPrimitivesRef.current = { poi, plan: planPrimitive };
+      systemAxisLabelsRef.current?.setLevels([
+        { key: "ob-high", price: poiZone.high, color: SYSTEM_COLOR },
+        { key: "ob-low", price: poiZone.low, color: SYSTEM_COLOR },
+        { key: "entry", price: plan.entry, color: SYSTEM_COLOR },
+        { key: "stop", price: plan.stop, color: C.down },
+        ...plan.targets.map((t, i) => ({ key: `target-${i}`, price: t, color: C.up })),
+      ]);
+    } else {
+      systemAxisLabelsRef.current?.setLevels([]);
     }
 
     // Structure labels (confirmed swings, BOS/CHOCH, the equilibrium
@@ -610,6 +649,31 @@ export function ChartSurfaceInner({
     lastBarRef.current = candles[candles.length - 1];
     setBar(candles[candles.length - 1]);
   }
+
+  // restoreOrDefaultView applies the scope's saved view when it still fits
+  // the data on the chart (isSavedViewUsable), else the default range
+  // (defaultVisibleRange: about 120 bars ending at the newest, normal bar
+  // width, never stretched). Call inside withProgrammaticRangeChange.
+  function restoreOrDefaultView(chart: IChartApi, scope: string) {
+    const n = dataLengthRef.current;
+    const saved = loadChartView(scope);
+    if (saved && isSavedViewUsable(saved, n)) {
+      chart.timeScale().setVisibleLogicalRange(saved);
+      return;
+    }
+    const range = defaultVisibleRange(n);
+    if (range) chart.timeScale().setVisibleLogicalRange(range);
+  }
+  // lastUserGestureAtRef: when the trader last scrolled, dragged or zoomed
+  // the chart (wheel, pointer drag, touch on the chart host). A view is
+  // saved only when a range change follows a gesture within
+  // USER_GESTURE_WINDOW_MS. Seen on real data: the library reports range
+  // changes it makes itself -- re-fitting after an autoSize resize, or
+  // reporting the default range a frame after it was applied, outside
+  // withProgrammaticRangeChange's bracket -- and those were being saved as
+  // if the trader had chosen them, so later visits restored stale bar
+  // indices instead of re-anchoring on the newest bar.
+  const lastUserGestureAtRef = useRef(Number.NEGATIVE_INFINITY);
 
   // chart init (once)
   useEffect(() => {
@@ -633,6 +697,23 @@ export function ChartSurfaceInner({
       timeScale: { borderColor: C.axis, timeVisible: true, secondsVisible: false, rightOffset: 6 },
     });
     chartRef.current = chart;
+
+    const host = hostRef.current;
+    const markGesture = () => {
+      lastUserGestureAtRef.current = performance.now();
+    };
+    const markDrag = (e: PointerEvent) => {
+      if (e.buttons !== 0) markGesture();
+    };
+    // Capture phase: the library handles these on its own canvas and
+    // reports the resulting range change synchronously, BEFORE the event
+    // would bubble up to the host -- a bubbling listener marks the gesture
+    // too late (measured in a real browser: range change, then the
+    // bubbled wheel event).
+    host.addEventListener("wheel", markGesture, { passive: true, capture: true });
+    host.addEventListener("pointerdown", markGesture, { capture: true });
+    host.addEventListener("pointermove", markDrag, { capture: true });
+    host.addEventListener("touchmove", markGesture, { passive: true, capture: true });
 
     createTextWatermark(chart.panes()[0], {
       horzAlign: "center",
@@ -664,19 +745,17 @@ export function ChartSurfaceInner({
     // thinner spacing fitContent's own wide auto-fit would otherwise
     // leave in place) if nothing was saved yet. Programmatic: must not
     // be mistaken for a user gesture by the save handler just below.
-    withProgrammaticRangeChange(() => {
-      const savedView = loadChartView(chartViewScopeRef.current);
-      if (savedView) {
-        chart.timeScale().setVisibleLogicalRange(savedView);
-      } else {
-        chart.timeScale().fitContent();
-        chart.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
-      }
-    });
+    const axisLabels = new SystemAxisLabelsPrimitive(
+      () => (lastAppliedOpenTimeRef.current ? lastBarRef.current.close : null),
+      "#3a4150",
+    );
+    series.attachPrimitive(axisLabels);
+    systemAxisLabelsRef.current = axisLabels;
 
     chart.subscribeCrosshairMove((param) => {
-      const d = param.seriesData.get(series) as CandlestickData<Time> | undefined;
-      if (d) setBar({ open: d.open, high: d.high, low: d.low, close: d.close });
+      const d = param.seriesData.get(series) as CandlestickData<Time> | WhitespaceData<Time> | undefined;
+      // A gap's whitespace point has no prices: show the last real bar.
+      if (d && "open" in d) setBar({ open: d.open, high: d.high, low: d.low, close: d.close });
       else setBar(lastBarRef.current);
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
@@ -684,7 +763,8 @@ export function ChartSurfaceInner({
       // Persist only a range change the trader actually made -- never
       // one caused by this component's own setData/restore/default-fit
       // calls (see withProgrammaticRangeChange's own doc comment).
-      if (range && !isProgrammaticRangeChangeRef.current) saveChartView(chartViewScopeRef.current, range);
+      const byUser = performance.now() - lastUserGestureAtRef.current < USER_GESTURE_WINDOW_MS;
+      if (range && byUser && !isProgrammaticRangeChangeRef.current) saveChartView(chartViewScopeRef.current, range);
     });
 
     const controller = new DrawingController(chart, series, hostRef.current, store, {
@@ -695,9 +775,22 @@ export function ChartSurfaceInner({
     controller.attach();
     controllerRef.current = controller;
     withProgrammaticRangeChange(() => applyCandleData());
+    appliedSignatureRef.current = dataSignature;
+    // Restore the saved view (per instrument + timeframe) if it still fits
+    // the data, else the default -- after setData, since both are measured
+    // against the data actually on the chart. No data yet: owe it.
+    if (hasCandles) {
+      withProgrammaticRangeChange(() => restoreOrDefaultView(chart, chartViewScopeRef.current));
+    } else {
+      pendingRestoreScopeRef.current = chartViewScopeRef.current;
+    }
     setChartGeneration((g) => g + 1);
 
     return () => {
+      host.removeEventListener("wheel", markGesture, { capture: true });
+      host.removeEventListener("pointerdown", markGesture, { capture: true });
+      host.removeEventListener("pointermove", markDrag, { capture: true });
+      host.removeEventListener("touchmove", markGesture, { capture: true });
       controller.detach();
       controllerRef.current = null;
       chart.remove();
@@ -740,21 +833,18 @@ export function ChartSurfaceInner({
       // render. See pendingRestoreScopeRef's own doc comment, above: a
       // slow switch can mean candles is still empty right here, below.
       pendingRestoreScopeRef.current = newScope;
+      staleDataRef.current = appliedSignatureRef.current;
     }
 
     withProgrammaticRangeChange(() => applyCandleData());
 
-    if (pendingRestoreScopeRef.current === newScope && hasCandles) {
+    if (!hasCandles) staleDataRef.current = null; // emptied: whatever comes next is new
+    const dataIsNewScopes = staleDataRef.current === null || staleDataRef.current !== dataSignature;
+    appliedSignatureRef.current = dataSignature;
+    if (pendingRestoreScopeRef.current === newScope && hasCandles && dataIsNewScopes) {
+      staleDataRef.current = null;
       pendingRestoreScopeRef.current = null;
-      withProgrammaticRangeChange(() => {
-        const savedView = loadChartView(newScope);
-        if (savedView) {
-          chart.timeScale().setVisibleLogicalRange(savedView);
-        } else {
-          chart.timeScale().fitContent();
-          chart.timeScale().applyOptions({ barSpacing: DEFAULT_BAR_SPACING });
-        }
-      });
+      withProgrammaticRangeChange(() => restoreOrDefaultView(chart, newScope));
     }
     // applyCandleData/symbol/timeframe/hasCandles are read fresh each
     // run via closure, same convention the create effect above already
