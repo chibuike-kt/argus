@@ -7,7 +7,7 @@ import type {
   Time,
   SeriesAttachedParameter,
 } from "lightweight-charts";
-import { candles as fixtureCandles } from "@/mocks/fixtures";
+import { seriesCandles } from "./series-candles";
 import {
   barsBetween,
   forwardSpan,
@@ -503,7 +503,9 @@ export class MeasurePrimitive extends BasePrimitive {
 
               const delta = p2.price - p1.price;
               const pct = (delta / p1.price) * 100;
-              const bars = barsBetween(p1.time, p2.time, fixtureCandles);
+              // The chart's own candles for this instrument and timeframe
+              // (series-candles.ts), never a fixed sample set.
+              const bars = barsBetween(p1.time, p2.time, seriesCandles(this.series));
               const seconds = Math.abs(timeSeconds(p2.time) - timeSeconds(p1.time));
               const elapsed = formatElapsed(seconds);
               const text = `${delta >= 0 ? "+" : ""}${fmt(delta)}  (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)  ${bars} bars  ${elapsed}`;
@@ -575,7 +577,7 @@ export class PositionPrimitive extends BasePrimitive {
               // absolute last resort, if even that fails to resolve.
               const resolveX = (t: Time, fallback: number) =>
                 this.x(t) ??
-                timeSecondsToSmoothCoordinate(acc, timeSeconds(t), fixtureCandles) ??
+                timeSecondsToSmoothCoordinate(acc, timeSeconds(t), seriesCandles(this.series)) ??
                 fallback;
               const xe = resolveX(time, 0);
               const xRight = resolveX(rightTime, mediaSize.width);
