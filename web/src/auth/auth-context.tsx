@@ -4,6 +4,8 @@ import * as authApi from "@/api/auth";
 import { setUnauthorizedHandler } from "@/api/client";
 import type { ApiAuthUser } from "@/api/types";
 import { fixturesEnabled } from "@/mocks/fixtures-as-api";
+import { preferences } from "@/lib/preferences";
+import { getDrawingsPersistence } from "@/components/chart/drawings/store";
 
 export type AuthStatus = "loading" | "signedIn" | "signedOut";
 
@@ -49,6 +51,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // so re-running the boot /auth/me call) on every navigation.
   const locationRef = useRef(location);
   locationRef.current = location;
+
+  // Everything the user sets syncs per signed-in user (D1): attach on
+  // sign-in or session restore, detach on sign-out so nothing of one
+  // user's settings stays in memory for the next.
+  const userId = user?.id;
+  useEffect(() => {
+    if (userId === undefined) {
+      if (status === "signedOut") {
+        preferences.detach();
+        getDrawingsPersistence().attachUser(null);
+      }
+      return;
+    }
+    preferences.attach(userId);
+    getDrawingsPersistence().attachUser(userId);
+  }, [userId, status]);
 
   useEffect(() => {
     if (usingFixtures) return;

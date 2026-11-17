@@ -5,6 +5,7 @@ import { TabsRoot, TabsList, TabsTrigger, TabsContent } from "@/components/ui/ta
 import { cn } from "@/lib/cn";
 import { formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
 import { useAnalysisWorkspace } from "./analysis-workspace";
+import { preferences, usePreferences } from "@/lib/preferences";
 import { Watchlist } from "./watchlist";
 import { AnalysisPanel } from "./analysis-panel";
 
@@ -17,24 +18,16 @@ function clampWidth(w: number): number {
   return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, w));
 }
 
-// A per-viewer convenience (not data), so read/write is wrapped -- a
-// private window, cleared site data or a blocked store should degrade to
-// the default width rather than throw.
-function readWidth(): number {
+// readLegacyWidth reads the width saved before preferences moved to the
+// server (D1), so an existing choice is kept once; wrapped -- blocked or
+// cleared storage degrades to the default rather than throwing.
+function readLegacyWidth(): number {
   try {
     const raw = window.localStorage.getItem(WIDTH_STORAGE_KEY);
     const w = raw ? Number(raw) : NaN;
     return Number.isFinite(w) ? clampWidth(w) : DEFAULT_WIDTH;
   } catch {
     return DEFAULT_WIDTH;
-  }
-}
-
-function writeWidth(w: number) {
-  try {
-    window.localStorage.setItem(WIDTH_STORAGE_KEY, String(w));
-  } catch {
-    // Not persisted this session; the panel still resizes in memory.
   }
 }
 
@@ -116,7 +109,13 @@ function SymbolDetail() {
 // one tab away, not gone. Defaulting to "analysis" is the reframe: this
 // panel used to open on the watchlist.
 export function RightPanel() {
-  const [width, setWidth] = useState(readWidth);
+  // Width and tab are preferences (D1): saved per user on the server, so
+  // they survive a refresh, a cleared browser and another device.
+  const prefs = usePreferences();
+  const savedWidth = prefs.right_panel_width !== undefined ? clampWidth(prefs.right_panel_width) : readLegacyWidth();
+  // While dragging, the live width; otherwise the saved one.
+  const [dragWidth, setWidth] = useState<number | null>(null);
+  const width = dragWidth ?? savedWidth;
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const onHandlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -134,7 +133,8 @@ export function RightPanel() {
     if (!dragRef.current) return;
     e.currentTarget.releasePointerCapture(e.pointerId);
     dragRef.current = null;
-    writeWidth(width);
+    preferences.set("right_panel_width", Math.round(width));
+    setWidth(null);
   };
 
   return (
@@ -151,7 +151,11 @@ export function RightPanel() {
         aria-label="Resize panel"
         className="absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize touch-none"
       />
-      <TabsRoot defaultValue="analysis" className="flex min-h-0 flex-1 flex-col">
+      <TabsRoot
+        value={prefs.right_panel_tab ?? "analysis"}
+        onValueChange={(v) => preferences.set("right_panel_tab", v === "watchlist" ? "watchlist" : "analysis")}
+        className="flex min-h-0 flex-1 flex-col"
+      >
         <div className="flex shrink-0 justify-center border-b border-line px-3 py-2">
           <TabsList>
             <TabsTrigger value="analysis">Analysis</TabsTrigger>

@@ -1,7 +1,8 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import type { CandleInterval } from "@/lib/live-socket";
-import { useDrawingsStore } from "./drawings/store";
+import { preferences, usePreferences } from "@/lib/preferences";
+import { getDrawingsPersistence, useDrawingsStore } from "./drawings/store";
 
 interface DrawingCtx {
   // activeTool is the rail variant id (e.g. "rect", "long", "cross"). The
@@ -30,10 +31,17 @@ const Ctx = createContext<DrawingCtx | null>(null);
 
 export function DrawingProvider({ children }: { children: ReactNode }) {
   const [activeTool, setActiveTool] = useState("cross");
-  const [magnetOn, setMagnetOn] = useState(false);
-  const [stayInDrawingMode, setStayInDrawingMode] = useState(false);
-  const [locked, setLocked] = useState(false);
-  const [hidden, setHidden] = useState(false);
+  // The drawing toolbar's toggles are preferences (D1): they survive a
+  // refresh, a cleared browser and another device.
+  const tools = usePreferences().drawing_tools ?? {};
+  const magnetOn = tools.magnet ?? false;
+  const stayInDrawingMode = tools.stay_in_drawing_mode ?? false;
+  const locked = tools.locked ?? false;
+  const hidden = tools.hidden ?? false;
+  const setMagnetOn = (v: boolean) => preferences.setEntry("drawing_tools", "magnet", v);
+  const setStayInDrawingMode = (v: boolean) => preferences.setEntry("drawing_tools", "stay_in_drawing_mode", v);
+  const setLocked = (v: boolean) => preferences.setEntry("drawing_tools", "locked", v);
+  const setHidden = (v: boolean) => preferences.setEntry("drawing_tools", "hidden", v);
 
   // Scoped by instrument + timeframe (ADR-008): switching either swaps
   // the visible set. instrument.native_symbol is the real selected
@@ -51,8 +59,12 @@ export function DrawingProvider({ children }: { children: ReactNode }) {
   // source of truth has to live there, read back here through the same
   // useAnalysisWorkspace() call this provider already makes.
   const { instrument, timeframe, setTimeframe } = useAnalysisWorkspace();
-  const scopeSymbol = instrument?.native_symbol ?? "unresolved";
-  const drawings = useDrawingsStore(`${scopeSymbol}:${timeframe}`);
+  // Scoped by instrument id + timeframe -- the key the server stores
+  // drawings under (D1). The symbol-based key drawings were cached under
+  // before is aliased, so existing drawings carry over once.
+  const scope = instrument ? `${instrument.id}:${timeframe}` : `unresolved:${timeframe}`;
+  if (instrument) getDrawingsPersistence().aliasLegacy(scope, `${instrument.native_symbol}:${timeframe}`);
+  const drawings = useDrawingsStore(scope);
 
   return (
     <Ctx.Provider

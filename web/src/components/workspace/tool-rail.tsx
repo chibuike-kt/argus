@@ -37,14 +37,14 @@ import {
 } from "@phosphor-icons/react";
 import { cn } from "@/lib/cn";
 import { useDrawing } from "@/components/chart/drawing-context";
+import { preferences, usePreferences } from "@/lib/preferences";
 import { TOOL_TO_KIND } from "@/components/chart/drawings/types";
 
 const COLLAPSE_STORAGE_KEY = "argus:tool-rail-collapsed";
 
-// A per-viewer convenience (not data), so read/write is wrapped -- a
-// private window, cleared site data or a blocked store should degrade to
-// "expanded" rather than throw.
-function readCollapsed(): boolean {
+// readLegacyCollapsed reads the state saved before preferences moved to
+// the server (D1), so an existing choice is kept once.
+function readLegacyCollapsed(): boolean {
   try {
     return window.localStorage.getItem(COLLAPSE_STORAGE_KEY) === "1";
   } catch {
@@ -52,13 +52,6 @@ function readCollapsed(): boolean {
   }
 }
 
-function writeCollapsed(v: boolean) {
-  try {
-    window.localStorage.setItem(COLLAPSE_STORAGE_KEY, v ? "1" : "0");
-  } catch {
-    // Not persisted this session; the rail still toggles in memory.
-  }
-}
 
 type Variant = { id: string; label: string; icon: Icon; fav?: boolean; disabled?: boolean };
 type Group = { id: string; variants: Variant[] };
@@ -250,15 +243,10 @@ export function ToolRail() {
   // truth for what's active (that is always TOOL_INDEX[activeTool]).
   const [lastPicked, setLastPicked] = useState<Record<string, number>>({});
   const [confirmingClear, setConfirmingClear] = useState(false);
-  const [collapsed, setCollapsed] = useState(readCollapsed);
-
-  const toggleCollapsed = () => {
-    setCollapsed((c) => {
-      const next = !c;
-      writeCollapsed(next);
-      return next;
-    });
-  };
+  // A preference (D1): survives refresh, cleared storage, other devices.
+  const prefs = usePreferences();
+  const collapsed = prefs.tool_rail_collapsed ?? readLegacyCollapsed();
+  const toggleCollapsed = () => preferences.set("tool_rail_collapsed", !collapsed);
 
   const activeEntry = TOOL_INDEX[activeTool];
 

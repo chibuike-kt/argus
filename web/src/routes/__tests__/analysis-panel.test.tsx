@@ -2,6 +2,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { preferences } from "@/lib/preferences";
 import { MemoryRouter } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnalysisWorkspaceProvider } from "@/components/workspace/analysis-workspace";
@@ -223,6 +224,9 @@ describe("/analysis right panel", () => {
     cleanup();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
+    // The active tab and other choices persist now (D1): reset the
+    // preference store so one test's tab click does not carry into the next.
+    preferences.detach();
   });
 
   it("shows a loading state before the setup resolves", () => {
