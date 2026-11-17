@@ -87,6 +87,16 @@ func newProcessor(db *sql.DB, logger *slog.Logger, clk clock.Clock, instrumentSt
 // feed, or something stopped it from fully catching up this tick.
 const lagWarnThreshold = 5 * time.Minute
 
+// candleAgeWarnThreshold: an enabled, non-fixture instrument whose
+// newest closed candle ended more than this long ago gets a WARN every
+// tick, so a feed that has gone quiet (or a worker running the wrong
+// provider) never looks healthy. [U] 5 minutes -- proposed, not an
+// ADR-006 freshness threshold (those are still open): a live 1-minute
+// feed normally closes a candle every minute, so five consecutive
+// missing closes is well past normal jitter. Fixture instruments are
+// exempt: their data is historical by design.
+const candleAgeWarnThreshold = 5 * time.Minute
+
 // instrumentRunResult is processInstrument's own bookkeeping for
 // run's end-of-tick summary and per-instrument log line (worker-
 // hardening brief, Part D) -- candlesProcessed and eventsWritten
@@ -95,8 +105,13 @@ const lagWarnThreshold = 5 * time.Minute
 type instrumentRunResult struct {
 	cursorBefore, cursorAfter time.Time
 	latestClose               time.Time
-	candlesProcessed          int
-	eventsWritten             int
+	// latestCheckedAt is when latestClose was read: the newest candle's
+	// age is measured against this, not the tick's start -- a tick that
+	// spends minutes catching up on one instrument must not make a later
+	// instrument's fresh candle look newer than "now".
+	latestCheckedAt  time.Time
+	candlesProcessed int
+	eventsWritten    int
 }
 
 func (r instrumentRunResult) lag() time.Duration {
@@ -118,8 +133,17 @@ func (p *processor) run(ctx context.Context) {
 	}
 
 	var totalCandles, totalEvents, totalErrored, totalSkippedLocked int
+	// newest_closed_candle_age per instrument ("provider:symbol"), so the
+	// tick line shows how old each feed's data really is, not only how
+	// many candles this tick happened to process.
+	ages := make([]any, 0, len(enabled))
 	for _, inst := range enabled {
 		result, skipped, err := p.processInstrumentLocked(ctx, inst)
+		// A lookup error leaves latestClose zero; that is reported by the
+		// error log below, not mislabelled here as "no candle at all".
+		if !skipped && (err == nil || !result.latestClose.IsZero()) {
+			p.reportCandleAge(inst, result.latestClose, result.latestCheckedAt, &ages)
+		}
 		if skipped {
 			totalSkippedLocked++
 			p.logger.Debug("worker: instrument locked by another worker, skipping this tick",
@@ -153,7 +177,33 @@ func (p *processor) run(ctx context.Context) {
 		"setup_events_written", totalEvents,
 		"instruments_errored", totalErrored,
 		"instruments_skipped_locked", totalSkippedLocked,
+		slog.Group("newest_closed_candle_age", ages...),
 	)
+}
+
+// reportCandleAge appends inst's newest-closed-candle age to ages and
+// WARNs when an enabled non-fixture instrument has had no new closed
+// candle for longer than candleAgeWarnThreshold (or has none at all).
+// latestClose is the newest closed candle's close time; zero means none
+// was found (or the lookup failed this tick). now is when it was read.
+// Durations are logged as strings ("41m0s"), not nanosecond integers.
+func (p *processor) reportCandleAge(inst instruments.Instrument, latestClose, now time.Time, ages *[]any) {
+	key := inst.Provider + ":" + inst.NativeSymbol
+	if latestClose.IsZero() {
+		*ages = append(*ages, slog.String(key, "none"))
+		if inst.Provider != fixtureProvider {
+			p.logger.Warn("worker: enabled instrument has no closed candle at all -- is its provider being ingested?",
+				"instrument_id", inst.ID, "provider", inst.Provider, "symbol", inst.NativeSymbol)
+		}
+		return
+	}
+	age := max(now.Sub(latestClose), 0).Truncate(time.Second)
+	*ages = append(*ages, slog.String(key, age.String()))
+	if inst.Provider != fixtureProvider && age > candleAgeWarnThreshold {
+		p.logger.Warn("worker: no new candle for an enabled instrument -- its feed is not delivering",
+			"instrument_id", inst.ID, "provider", inst.Provider, "symbol", inst.NativeSymbol,
+			"newest_closed_candle_age", age.String(), "threshold", candleAgeWarnThreshold.String())
+	}
 }
 
 // processInstrumentLocked wraps processInstrument with the advisory
@@ -201,8 +251,9 @@ func (p *processor) processInstrumentLocked(ctx context.Context, inst instrument
 // free" case run's own doc comment describes.
 func (p *processor) processInstrument(ctx context.Context, inst instruments.Instrument) (instrumentRunResult, error) {
 	latest, err := p.candles.LatestClosed(ctx, inst.ID)
+	checkedAt := p.clk.Now()
 	if errors.Is(err, analysis.ErrNoClosedCandles) {
-		return instrumentRunResult{}, nil
+		return instrumentRunResult{latestCheckedAt: checkedAt}, nil
 	}
 	if err != nil {
 		return instrumentRunResult{}, fmt.Errorf("latest closed candle: %w", err)
@@ -212,7 +263,7 @@ func (p *processor) processInstrument(ctx context.Context, inst instruments.Inst
 	if err != nil {
 		return instrumentRunResult{}, fmt.Errorf("load cursor: %w", err)
 	}
-	result := instrumentRunResult{cursorBefore: start, cursorAfter: start, latestClose: latest.CloseTime}
+	result := instrumentRunResult{cursorBefore: start, cursorAfter: start, latestClose: latest.CloseTime, latestCheckedAt: checkedAt}
 
 	end := latest.CloseTime
 	if !end.After(start) {

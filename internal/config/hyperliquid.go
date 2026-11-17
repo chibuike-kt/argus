@@ -69,4 +69,15 @@ type Hyperliquid struct {
 	// minute plus the fetch's own latency).
 	PeriodicBackfillInterval time.Duration `env:"ARGUS_HYPERLIQUID_PERIODIC_BACKFILL_INTERVAL" envDefault:"60s"` // [U]
 	PeriodicBackfillWindow   time.Duration `env:"ARGUS_HYPERLIQUID_PERIODIC_BACKFILL_WINDOW" envDefault:"5m"`    // [U]
+
+	// PingInterval/StallTimeout are the WebSocket heartbeat and stall
+	// watchdog (hyperliquid.WithHeartbeat). Hyperliquid's docs
+	// (websocket/timeouts-and-heartbeats) say the server closes a
+	// connection it has sent nothing on for 60 seconds and answers
+	// {"method":"ping"} with {"channel":"pong"}; they give no ping
+	// interval. [U]: ping every 20s; a connection that delivers
+	// nothing at all (not even a pong) for 60s is treated as dead,
+	// closed, backfilled and reconnected. 0 disables either.
+	PingInterval time.Duration `env:"ARGUS_HYPERLIQUID_PING_INTERVAL" envDefault:"20s"` // [U]
+	StallTimeout time.Duration `env:"ARGUS_HYPERLIQUID_STALL_TIMEOUT" envDefault:"60s"` // [U]
 }

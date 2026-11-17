@@ -3,6 +3,7 @@ package hyperliquid
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +11,31 @@ import (
 
 	"github.com/chibuike-kt/argus/internal/ingestion"
 )
+
+// ErrStreamStalled is what StreamCandles returns (wrapped) when the
+// connection stays open but delivers nothing -- not even a pong to its
+// own heartbeat -- for the stall timeout (WithHeartbeat).
+var ErrStreamStalled = errors.New("hyperliquid: stream stalled")
+
+// pingPayload is Hyperliquid's documented heartbeat request.
+var pingPayload = []byte(`{"method":"ping"}`)
+
+// pingLoop sends pingPayload every interval until ctx ends or a write
+// fails (the read loop then sees the dead connection on its own).
+func pingLoop(ctx context.Context, conn *websocket.Conn, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := conn.Write(ctx, websocket.MessageText, pingPayload); err != nil {
+				return
+			}
+		}
+	}
+}
 
 // dialFunc is the seam StreamCandles/StreamQuotes dial through --
 // WithDialFunc lets a test substitute a dialer pointed at a local fake
@@ -97,8 +123,26 @@ func (p *Provider) StreamCandles(ctx context.Context, symbol string, handle func
 	var trackedOpenTime time.Time
 	haveTracked := false
 
+	if p.pingInterval > 0 {
+		pingCtx, stopPing := context.WithCancel(ageCtx)
+		defer stopPing()
+		go pingLoop(pingCtx, conn, p.pingInterval)
+	}
+
 	for {
-		_, data, err := conn.Read(ageCtx)
+		// Stall watchdog: each read gets its own deadline, so ANY
+		// message (a candle, a pong, an ack) resets it. A read that
+		// times out on this deadline alone -- not because ctx or the
+		// planned-reconnect age expired -- means the socket is open
+		// but silent: dead in practice (e.g. the network vanished while
+		// the machine slept, with no close ever arriving).
+		readCtx, cancelRead := ageCtx, context.CancelFunc(func() {})
+		if p.stallTimeout > 0 {
+			readCtx, cancelRead = context.WithTimeout(ageCtx, p.stallTimeout)
+		}
+		_, data, err := conn.Read(readCtx)
+		stalled := err != nil && ageCtx.Err() == nil && errors.Is(readCtx.Err(), context.DeadlineExceeded)
+		cancelRead()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -106,6 +150,11 @@ func (p *Provider) StreamCandles(ctx context.Context, symbol string, handle func
 			if ageCtx.Err() != nil {
 				p.logger.Info("hyperliquid: planned reconnect: max connection age reached", "symbol", symbol, "max_connection_age", p.maxConnectionAge)
 				return nil
+			}
+			if stalled {
+				p.logger.Warn("hyperliquid: stream stalled -- open but silent, closing it to reconnect",
+					"symbol", symbol, "stall_timeout", p.stallTimeout)
+				return fmt.Errorf("%w: no message for %s", ErrStreamStalled, p.stallTimeout)
 			}
 			return fmt.Errorf("hyperliquid: read: %w", err)
 		}

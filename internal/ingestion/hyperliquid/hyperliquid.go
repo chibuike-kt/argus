@@ -94,6 +94,17 @@ type Provider struct {
 	limiter          *restLimiter
 	maxConnectionAge time.Duration
 
+	// pingInterval/stallTimeout are StreamCandles' own heartbeat and
+	// stall watchdog (WithHeartbeat). Hyperliquid's docs
+	// (hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/
+	// websocket/timeouts-and-heartbeats, read 16 November 2026): "The
+	// server will close any connection if it hasn't sent a message to
+	// it in the last 60 seconds"; a client may send {"method":"ping"}
+	// and "The server will respond with" {"channel":"pong"}. The docs
+	// give no ping interval -- both values are ARGUS choices.
+	pingInterval time.Duration
+	stallTimeout time.Duration
+
 	restBudget int
 	restWindow time.Duration
 
@@ -167,6 +178,23 @@ func WithMaxConnectionAge(d time.Duration) Option {
 	return func(p *Provider) { p.maxConnectionAge = d }
 }
 
+// WithHeartbeat sets StreamCandles' ping interval and stall timeout.
+// Every pingInterval it sends Hyperliquid's documented heartbeat,
+// {"method":"ping"}; if no message of any kind (candle, pong, ack)
+// arrives for stallTimeout, the connection is treated as dead -- an
+// open-but-silent socket (the network gone without a close, e.g. after
+// the machine slept) is closed and StreamCandles returns an error
+// wrapping ErrStreamStalled, so the caller backfills and reconnects. A
+// zero value disables that part. stallTimeout should exceed
+// pingInterval, or a quiet but healthy subscription is cut while its
+// pong is still in flight.
+func WithHeartbeat(pingInterval, stallTimeout time.Duration) Option {
+	return func(p *Provider) {
+		p.pingInterval = pingInterval
+		p.stallTimeout = stallTimeout
+	}
+}
+
 // WithSzDecimals opts StreamCandles into checking every streamed
 // price for the symbols named in m against Hyperliquid's own
 // price-precision rule (validatePriceFormat), counted via
@@ -220,6 +248,12 @@ func NewProvider(clk clock.Clock, logger *slog.Logger, opts ...Option) *Provider
 		// practice default, not a measured or exchange-asserted value.
 		// 12 hours.
 		maxConnectionAge: 12 * time.Hour,
+		// [U] defaults, see WithHeartbeat. A ping every 20s keeps a
+		// quiet subscription inside Hyperliquid's documented 60s idle
+		// window three times over; a connection that delivers NOTHING
+		// (not even a pong) for 60s is treated as dead.
+		pingInterval: 20 * time.Second,
+		stallTimeout: 60 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(p)
