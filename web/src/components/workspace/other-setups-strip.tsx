@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Link } from "react-router-dom";
 import { CaretDown, CaretRight } from "@phosphor-icons/react";
 import { Panel } from "@/components/ui/panel";
@@ -7,6 +6,7 @@ import { SetupStateBadge } from "@/components/ui/setup-state-badge";
 import { CoinIcon, baseTicker } from "@/components/ui/coin-icon";
 import { toSetupSummary } from "@/api/mappers";
 import { cn } from "@/lib/cn";
+import { preferences, usePreferences } from "@/lib/preferences";
 import { useAnalysisWorkspace } from "./analysis-workspace";
 
 const COLS = "grid grid-cols-[1.6fr_0.8fr_1fr_0.6fr_0.9fr_0.6fr_0.3fr] items-center gap-3";
@@ -23,10 +23,9 @@ function age(createdAt: string) {
   return h < 24 ? `${h}h` : `${Math.round(h / 24)}d`;
 }
 
-// A per-viewer convenience (not data), so read/write is wrapped -- a
-// private window, cleared site data or a blocked store should degrade to
-// "open" rather than throw.
-function readOpen(): boolean {
+// readLegacyOpen reads the state saved before preferences moved to the
+// server (D1), so an existing choice is kept once.
+function readLegacyOpen(): boolean {
   try {
     const raw = window.localStorage.getItem(OPEN_STORAGE_KEY);
     return raw === null ? true : raw === "1";
@@ -35,13 +34,6 @@ function readOpen(): boolean {
   }
 }
 
-function writeOpen(v: boolean) {
-  try {
-    window.localStorage.setItem(OPEN_STORAGE_KEY, v ? "1" : "0");
-  } catch {
-    // Not persisted this session; the strip still toggles in memory.
-  }
-}
 
 // Other non-terminal identities on the SAME instrument as the setup
 // currently open -- GET /setups filtered to this instrument, excluding
@@ -53,20 +45,16 @@ function writeOpen(v: boolean) {
 // 15.3) makes multiple concurrent/past identities on one instrument the
 // much more common, and more useful-to-compare, case.
 export function OtherSetupsStrip() {
-  const [open, setOpen] = useState(readOpen);
+  // A preference (D1): survives refresh, cleared storage, other devices.
+  const prefs = usePreferences();
+  const open = prefs.other_setups_open ?? readLegacyOpen();
   const { instrument, otherSetups, otherSetupsLoading } = useAnalysisWorkspace();
   if (!instrument) return null;
   const rows = otherSetups.slice(0, MAX_ROWS).map((s) => toSetupSummary(s, instrument));
   const apiById = new Map(otherSetups.map((s) => [String(s.id), s]));
   if (!otherSetupsLoading && rows.length === 0) return null;
 
-  const toggle = () => {
-    setOpen((o) => {
-      const next = !o;
-      writeOpen(next);
-      return next;
-    });
-  };
+  const toggle = () => preferences.set("other_setups_open", !open);
 
   return (
     <Panel variant="glass" pad="none" className="argus-in shrink-0 overflow-hidden">

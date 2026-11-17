@@ -10,7 +10,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { ChartSurfaceInner, type ChartSurfaceInnerProps } from "../chart-surface";
-import { loadChartView, saveChartView } from "../chart-view-persistence";
+import { loadChartView, saveChartView, type SavedChartView } from "../chart-view-persistence";
+import { preferences } from "@/lib/preferences";
 import { DrawingProvider, useDrawing } from "../drawing-context";
 import type { DrawingsStore } from "../drawings/store";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -168,6 +169,22 @@ type HarnessProps = Omit<
   fatalReason?: ChartSurfaceInnerProps["fatalReason"];
 };
 
+const HARNESS_IDS: Record<string, number> = { "BTC-PERP": 1, "ETH-PERP": 2, BTC: 1 };
+
+// The open time (unix seconds) of candleSet's i-th candle.
+const tSec = (i: number) => Date.UTC(2026, 0, 1, 0, i) / 1000;
+
+// A saved (time-based) view of candleSet bars [from, to], not pinned.
+function viewOver(from: number, to: number): SavedChartView {
+  return { from_time: tSec(from), to_time: tSec(to), bars_visible: to - from, bar_spacing: 6, right_offset: 0, pinned_to_latest: false };
+}
+
+// Saved views live in the preference store (a module singleton): start
+// every test from an empty one.
+beforeEach(() => {
+  preferences.detach();
+});
+
 function Harness({
   forming = null,
   connectionState = "open",
@@ -175,11 +192,13 @@ function Harness({
   fatalReason = null,
   ...props
 }: HarnessProps) {
+  const instrumentId = props.instrumentId ?? HARNESS_IDS[props.symbol];
   return (
     <Providers>
       <AddOneDrawing onReady={() => {}} />
       <ChartSurfaceInner
         {...props}
+        instrumentId={instrumentId}
         forming={forming}
         connectionState={connectionState}
         status={status}
@@ -650,8 +669,8 @@ describe("chart view persistence: only a user-made range change is saved", () =>
   });
 
   it("a programmatic setData during a slow instrument switch (candles briefly empty) does not overwrite the previously saved view", () => {
-    const goodView = { from: 1, to: 4 };
-    saveChartView("BTC-PERP:1m", goodView);
+    const goodView = viewOver(1, 4);
+    saveChartView("1:1m", goodView);
 
     const { rerender } = render(
       <Harness
@@ -666,7 +685,7 @@ describe("chart view persistence: only a user-made range change is saved", () =>
     );
     // The create effect's own restore read and re-applied goodView --
     // confirm the fix did not also stop that from happening.
-    expect(loadChartView("BTC-PERP:1m")).toEqual(goodView);
+    expect(loadChartView("1:1m")).toEqual(goodView);
 
     // Switch away, with real data (an ordinary, clean switch).
     rerender(
@@ -684,7 +703,7 @@ describe("chart view persistence: only a user-made range change is saved", () =>
     // Switch back to BTC-PERP, but candles is still empty -- exactly
     // the slow-fetch intermediate render the bug report describes.
     // applyCandleData's own setData([]) runs under the scope ref
-    // already pointed at "BTC-PERP:1m" (it updates eagerly, before data
+    // already pointed at "1:1m" (it updates eagerly, before data
     // arrives) -- this is the moment that used to corrupt the saved
     // view.
     rerender(
@@ -699,12 +718,12 @@ describe("chart view persistence: only a user-made range change is saved", () =>
       />,
     );
 
-    expect(loadChartView("BTC-PERP:1m")).toEqual(goodView);
+    expect(loadChartView("1:1m")).toEqual(goodView);
   });
 
   it("the saved view is still restored once real data arrives, even though the scope flipped earlier on an empty render", () => {
-    const goodView = { from: 1, to: 4 };
-    saveChartView("BTC-PERP:1m", goodView);
+    const goodView = viewOver(1, 4);
+    saveChartView("1:1m", goodView);
 
     const { rerender } = render(
       <Harness
@@ -764,7 +783,8 @@ describe("chart view persistence: only a user-made range change is saved", () =>
       />,
     );
 
-    expect(setRangeSpy).toHaveBeenCalledWith(goodView);
+    // The saved times map back onto the same bars: indexes 1..4.
+    expect(setRangeSpy).toHaveBeenCalledWith({ from: 1, to: 4 });
   });
 
   it("a range change made outside this component's own calls (a real user gesture, at the library level) is saved", () => {
@@ -779,7 +799,7 @@ describe("chart view persistence: only a user-made range change is saved", () =>
         formationOutsideWindow={false}
       />,
     );
-    expect(loadChartView("BTC-PERP:1m")).toBeNull(); // nothing saved yet
+    expect(loadChartView("1:1m")).toBeNull(); // nothing saved yet
 
     // The real subscribeVisibleLogicalRangeChange handler chart-
     // surface.tsx registered, invoked directly with a synthetic range
@@ -793,7 +813,8 @@ describe("chart view persistence: only a user-made range change is saved", () =>
     document.querySelector("canvas")!.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -100 }));
     capturedRangeHandler!({ from: 0, to: 3 });
 
-    expect(loadChartView("BTC-PERP:1m")).toEqual({ from: 0, to: 3 });
+    // Saved as times plus width, not raw indexes.
+    expect(loadChartView("1:1m")).toMatchObject({ from_time: tSec(0), to_time: tSec(3), bars_visible: 3, pinned_to_latest: false });
   });
 });
 
@@ -880,7 +901,8 @@ describe("default view and gap whitespace", () => {
   });
 
   it("a saved view that no longer fits the data falls back to the default", () => {
-    saveChartView("ETH-PERP:1m", { from: 800, to: 950 }); // saved on a longer series
+    // Saved over times this data does not contain at all (a long-gone window).
+    saveChartView("2:1m", { from_time: tSec(5000), to_time: tSec(5150), bars_visible: 150, bar_spacing: 6, right_offset: 0, pinned_to_latest: false });
     const { rerender } = render(<Harness {...props("BTC-PERP", candleSet(5, 100))} />);
     const setRange = vi.spyOn(lastCreatedChart!.timeScale(), "setVisibleLogicalRange");
     rerender(<Harness {...props("ETH-PERP", candleSet(40, 300))} />);
@@ -915,11 +937,13 @@ describe("default view and gap whitespace", () => {
     capturedRangeHandler?.({ from: 880, to: 1004 });
     // ...and a re-fit to a slightly different range after a resize.
     capturedRangeHandler?.({ from: 862.33, to: 1006 });
-    expect(loadChartView("ETH-PERP:1m")).toBeNull();
+    expect(loadChartView("2:1m")).toBeNull();
     // A range change that follows a real gesture (wheel on the chart) saves.
     document.querySelector("canvas")!.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -100 }));
     capturedRangeHandler?.({ from: 900, to: 1004 });
-    expect(loadChartView("ETH-PERP:1m")).toEqual({ from: 900, to: 1004 });
+    // The newest bar (index 999) was in view: saved as following the latest
+    // bar, 5 bars past it, 104 bars wide -- not as indexes 900..1004.
+    expect(loadChartView("2:1m")).toMatchObject({ pinned_to_latest: true, right_offset: 5, bars_visible: 104, from_time: tSec(900), to_time: tSec(999) });
   });
 
   it("a hole in the candles reaches the series as whitespace (time only), never as a jump", () => {

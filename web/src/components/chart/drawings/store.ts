@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { migrateDrawing, type Drawing } from "./types";
+import { SyncedDrawingsPersistence } from "./drawings-sync";
 
-// Everything the store needs from a persistence backend. localStorage is the
-// only implementation today; a server-backed sync swaps in here later
-// without the store (or anything above it) changing shape.
+// Everything the store needs from a persistence backend: localStorage alone
+// (LocalStorageDrawingsPersistence), or the server-synced one the app uses
+// (SyncedDrawingsPersistence, drawings-sync.ts: local cache plus the server
+// per user, D1).
 export interface DrawingsPersistence {
   load(scopeKey: string): Drawing[] | null;
   save(scopeKey: string, drawings: Drawing[]): void;
@@ -166,6 +168,21 @@ export class DrawingsStore {
     return this.redoStack.length > 0;
   }
 
+  // applyRemote replaces the current chart's drawings with a copy that
+  // arrived from the server (another tab or device). Not an edit: nothing
+  // is persisted back, and the undo history is left alone. A copy for a
+  // chart that is no longer showing is ignored (it is already cached).
+  applyRemote(scopeKey: string, drawings: Drawing[]) {
+    if (scopeKey !== this.scopeKey) return;
+    if (JSON.stringify(drawings) === JSON.stringify(this.list())) return;
+    const list = drawings.map(migrateDrawing);
+    const byId: Record<string, Drawing> = {};
+    for (const d of list) byId[d.id] = d;
+    const selectedId = this.state.selectedId && byId[this.state.selectedId] ? this.state.selectedId : null;
+    this.state = { order: list.map((d) => d.id), byId, selectedId };
+    this.emit();
+  }
+
   undo() {
     const prev = this.undoStack.pop();
     if (!prev) return;
@@ -190,8 +207,29 @@ export class DrawingsStore {
 // the undo stack intentionally scope-local (reset on switch) while letting
 // every consumer share the same subscription.
 let sharedStore: DrawingsStore | null = null;
+let sharedPersistence: SyncedDrawingsPersistence | null = null;
+
+// getDrawingsPersistence is the app's one synced persistence (created
+// lazily, so the store and drawings-sync modules can import each other).
+export function getDrawingsPersistence(): SyncedDrawingsPersistence {
+  if (!sharedPersistence) {
+    sharedPersistence = new SyncedDrawingsPersistence();
+    const p = sharedPersistence;
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", () => p.flushKeepalive());
+      window.addEventListener("online", () => p.nudge());
+    }
+  }
+  return sharedPersistence;
+}
+
 export function getDrawingsStore(): DrawingsStore {
-  if (!sharedStore) sharedStore = new DrawingsStore(new LocalStorageDrawingsPersistence());
+  if (!sharedStore) {
+    const persistence = getDrawingsPersistence();
+    const store = new DrawingsStore(persistence);
+    persistence.onRemote = (scope, drawings) => store.applyRemote(scope, drawings);
+    sharedStore = store;
+  }
   return sharedStore;
 }
 

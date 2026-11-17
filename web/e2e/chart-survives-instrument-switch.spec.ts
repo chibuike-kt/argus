@@ -120,11 +120,20 @@ test("switching instrument and back keeps the saved chart view for each instrume
   if (!box) throw new Error("chart host has no bounding box");
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.wheel(0, -400); // zoom in
-  await page.waitForTimeout(300); // let the localStorage save land
+  await page.waitForTimeout(300); // let the save land
 
-  const btcViewAfterZoom = await page.evaluate(() =>
-    localStorage.getItem("argus:chart-view:v1:BTC-PERP:1m"),
-  );
+  // Saved views are preferences now (D1): read the page's own cached copy
+  // of the signed-in user's preferences, keyed "<instrument_id>:<timeframe>".
+  const savedView = () =>
+    page.evaluate(
+      ([userId, key]) => {
+        const raw = localStorage.getItem(`argus:prefs:v1:user:${userId}`);
+        const v = raw ? JSON.parse(raw)?.data?.chart_views?.[key] : undefined;
+        return v ? JSON.stringify(v) : null;
+      },
+      [auth.userId, `${auth.btcInstrumentId}:1m`] as const,
+    );
+  const btcViewAfterZoom = await savedView();
   expect(btcViewAfterZoom).not.toBeNull();
 
   // Switch to ETH at ordinary speed -- nothing about this leg needs to
@@ -155,15 +164,15 @@ test("switching instrument and back keeps the saved chart view for each instrume
   // is restored (chart-surface.tsx's own loadChartView call in the
   // update effect), not reset to a generic fitContent default, and not
   // overwritten by the empty render's own spurious range.
-  const btcViewAfterReturn = await page.evaluate(() =>
-    localStorage.getItem("argus:chart-view:v1:BTC-PERP:1m"),
-  );
+  const btcViewAfterReturn = await savedView();
   expect(btcViewAfterReturn).not.toBeNull();
 
-  const parseView = (raw: string) => JSON.parse(raw) as { from: number; to: number };
+  // Saved as times (D1 Phase 1), so "the same view" means the same times
+  // and width -- not raw bar indexes.
+  const parseView = (raw: string) => JSON.parse(raw) as { from_time: number; to_time: number; bars_visible: number };
   const zoomed = parseView(btcViewAfterZoom!);
   const returned = parseView(btcViewAfterReturn!);
-  const tolerance = 1; // bar
-  expect(Math.abs(returned.from - zoomed.from)).toBeLessThanOrEqual(tolerance);
-  expect(Math.abs(returned.to - zoomed.to)).toBeLessThanOrEqual(tolerance);
+  expect(returned.from_time).toBe(zoomed.from_time);
+  expect(returned.to_time).toBe(zoomed.to_time);
+  expect(Math.abs(returned.bars_visible - zoomed.bars_visible)).toBeLessThanOrEqual(1);
 });

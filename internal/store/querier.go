@@ -152,6 +152,8 @@ type Querier interface {
 	GetSwingByID(ctx context.Context, id int64) (ConfirmedSwing, error)
 	GetUserByEmailNormalized(ctx context.Context, emailNormalized string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
+	GetUserDrawings(ctx context.Context, arg GetUserDrawingsParams) (UserDrawing, error)
+	GetUserPreferences(ctx context.Context, userID int64) (UserPreference, error)
 	// IncrementSignupWrongGuessesIfEligible atomically claims one guess
 	// against email_normalized's current code: it increments wrong_guesses
 	// and returns the row in the same statement, but only if this attempt
@@ -188,6 +190,11 @@ type Querier interface {
 	InsertStructureEvent(ctx context.Context, arg InsertStructureEventParams) (StructureEvent, error)
 	InsertSweep(ctx context.Context, arg InsertSweepParams) (LiquiditySweep, error)
 	InsertSwing(ctx context.Context, arg InsertSwingParams) (ConfirmedSwing, error)
+	InsertUserDrawings(ctx context.Context, arg InsertUserDrawingsParams) (UserDrawing, error)
+	// InsertUserPreferences creates the first version. ON CONFLICT DO NOTHING:
+	// a row that already exists means the caller's "version 0" was stale, and
+	// zero rows returned is exactly how the store reports that (409).
+	InsertUserPreferences(ctx context.Context, arg InsertUserPreferencesParams) (UserPreference, error)
 	// InsertVerifiedUser is the only way a users row is ever created
 	// (ADR-015: "no half accounts" -- signup complete is the one call
 	// site, after the emailed code and the password step). The row is
@@ -463,6 +470,10 @@ type Querier interface {
 	// never a supersede handshake. Callers set state unchanged for an
 	// amendment, and a new state for a lifecycle transition.
 	UpdateSetup(ctx context.Context, arg UpdateSetupParams) (Setup, error)
+	UpdateUserDrawings(ctx context.Context, arg UpdateUserDrawingsParams) (UserDrawing, error)
+	// UpdateUserPreferences writes only when the stored version is the one
+	// the caller based its change on; zero rows means stale (409).
+	UpdateUserPreferences(ctx context.Context, arg UpdateUserPreferencesParams) (UserPreference, error)
 	// UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 	// a still-forming row in place for a later tick of the same minute.
 	// idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE

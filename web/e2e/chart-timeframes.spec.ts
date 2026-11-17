@@ -44,9 +44,16 @@ test("real instrument: every timeframe opens on a readable default view (screens
   test.skip(!inst, "no enabled real-provider instrument in this database");
   if (!inst) return;
 
+  // No saved views on the server either: reset the preferences document.
+  const headers = { Cookie: auth.sessionCookie, Origin: ORIGIN, "Content-Type": "application/json" };
+  const cur = (await (await fetch(`${API_BASE}/api/v1/me/preferences`, { headers })).json()) as { version: number };
+  await fetch(`${API_BASE}/api/v1/me/preferences`, { method: "PUT", headers, body: JSON.stringify({ data: {}, version: cur.version }) });
+
   await page.goto("/");
   await page.evaluate(() => {
-    for (const k of Object.keys(localStorage)) if (k.startsWith("argus:chart-view:")) localStorage.removeItem(k);
+    // Saved views are preferences (D1): clear the page's cached copy here;
+    // the server copy was reset above.
+    for (const k of Object.keys(localStorage)) if (k.startsWith("argus:prefs:")) localStorage.removeItem(k);
   });
   await page.goto(`/analysis?instrumentId=${inst.id}`);
   await expect(page.locator("canvas").first()).toBeVisible({ timeout: 15_000 });
@@ -61,7 +68,13 @@ test("real instrument: every timeframe opens on a readable default view (screens
     await expect(page.getByText(/Could not load candles/)).toHaveCount(0);
     // No saved view was created by the default view itself (only a user
     // gesture saves one).
-    const saved = await page.evaluate((key) => localStorage.getItem(key), `argus:chart-view:v1:${inst.native_symbol}:${tf}`);
+    const saved = await page.evaluate(
+      ([userId, key]) => {
+        const raw = localStorage.getItem(`argus:prefs:v1:user:${userId}`);
+        return raw ? (JSON.parse(raw)?.data?.chart_views?.[key] ?? null) : null;
+      },
+      [auth.userId, `${inst.id}:${tf}`] as const,
+    );
     expect(saved).toBeNull();
     await page.screenshot({ path: `e2e/screenshots/timeframe-${inst.native_symbol}-${tf}.png` });
   }

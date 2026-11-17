@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CandlestickData, Time } from "lightweight-charts";
-import { defaultVisibleRange, isSavedViewUsable } from "../default-view";
+import { defaultVisibleRange } from "../default-view";
 import { withGapWhitespace } from "../gap-whitespace";
 import { capAxisLabels } from "../system-axis-labels";
 
@@ -28,25 +28,6 @@ describe("defaultVisibleRange", () => {
 
   it("no bars: nothing to position", () => {
     expect(defaultVisibleRange(0)).toBeNull();
-  });
-});
-
-describe("isSavedViewUsable", () => {
-  it("a view over existing bars is kept", () => {
-    expect(isSavedViewUsable({ from: 10, to: 60 }, 100)).toBe(true);
-  });
-  it("a view entirely past the data (saved on a longer series) falls back", () => {
-    expect(isSavedViewUsable({ from: 800, to: 950 }, 40)).toBe(false);
-  });
-  it("a view entirely before the data falls back", () => {
-    expect(isSavedViewUsable({ from: -50, to: -2 }, 40)).toBe(false);
-  });
-  it("a degenerate view falls back", () => {
-    expect(isSavedViewUsable({ from: 5, to: 5.5 }, 40)).toBe(false);
-    expect(isSavedViewUsable({ from: Number.NaN, to: 5 }, 40)).toBe(false);
-  });
-  it("no data: nothing fits", () => {
-    expect(isSavedViewUsable({ from: 0, to: 10 }, 0)).toBe(false);
   });
 });
 

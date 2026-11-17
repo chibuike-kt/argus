@@ -24,8 +24,8 @@ import { useDrawing } from "./drawing-context";
 import type { LiveTick } from "@/lib/use-live-candles";
 import type { ConnectionState, WireStatusPayload } from "@/lib/live-socket";
 import { isNewerCandleKey, decideApplyAction, type CandleKey } from "@/lib/live-candles-reducer";
-import { loadChartView, saveChartView } from "./chart-view-persistence";
-import { defaultVisibleRange, isSavedViewUsable } from "./default-view";
+import { fromSavedView, loadChartView, saveChartView, toSavedView } from "./chart-view-persistence";
+import { defaultVisibleRange } from "./default-view";
 import { INTERVAL_SECONDS, withGapWhitespace } from "./gap-whitespace";
 import { SystemAxisLabelsPrimitive, SystemPositionPrimitive, SystemRectanglePrimitive } from "./system-axis-labels";
 import { cloneDrawing } from "./drawings/types";
@@ -224,6 +224,7 @@ export function ChartSurface({ className }: { className?: string }) {
     <ChartSurfaceInner
       className={className}
       symbol={instrument.native_symbol}
+      instrumentId={instrument.id}
       venue={instrument.provider}
       candles={chartCandles}
       loading={candlesLoading}
@@ -254,6 +255,10 @@ const EMPTY_BAR: OHLC = { open: 0, high: 0, low: 0, close: 0 };
 export interface ChartSurfaceInnerProps {
   className?: string;
   symbol: string;
+  // The selected instrument's id: the saved chart view is keyed by
+  // "<instrumentId>:<timeframe>" (a preference, D1). Undefined only before
+  // an instrument resolves; nothing is saved then.
+  instrumentId?: number;
   venue: string;
   candles: ChartCandle[];
   loading: boolean;
@@ -376,6 +381,7 @@ function LiveStatusBadge({
 export function ChartSurfaceInner({
   className,
   symbol,
+  instrumentId,
   venue,
   candles,
   loading,
@@ -426,6 +432,10 @@ export function ChartSurfaceInner({
   // How many data points (candles plus gap whitespace) the series holds
   // now -- the logical-index length the default view is computed from.
   const dataLengthRef = useRef(0);
+  // The open time (unix seconds) of every data point on the series, by
+  // logical index (whitespace included) -- what a saved view's times are
+  // converted against.
+  const dataTimesRef = useRef<number[]>([]);
   const [bar, setBar] = useState<OHLC>(hasCandles ? candles[candles.length - 1] : EMPTY_BAR);
   const [toolbarTick, setToolbarTick] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -455,7 +465,8 @@ export function ChartSurfaceInner({
   // timeframe change after the fact (it still renders the one fixture
   // candle set regardless), so this just needs to match whatever scope
   // the drawings store itself was given at that same moment.
-  const chartViewScopeRef = useRef(`${symbol}:${timeframe}`);
+  const viewScope = `${instrumentId ?? symbol}:${timeframe}`;
+  const chartViewScopeRef = useRef(viewScope);
   // pendingRestoreScopeRef: the scope a restore-or-default is still owed
   // for, set the moment chartViewScopeRef changes and cleared only once
   // that restore actually runs against real data. A plain one-shot
@@ -567,6 +578,7 @@ export function ChartSurfaceInner({
     if (!hasCandles) {
       series.setData([]);
       dataLengthRef.current = 0;
+      dataTimesRef.current = [];
       systemAxisLabelsRef.current?.setLevels([]);
       const prev = systemPrimitivesRef.current;
       if (prev.poi) series.detachPrimitive(prev.poi);
@@ -581,6 +593,7 @@ export function ChartSurfaceInner({
     const data = toData();
     series.setData(data);
     dataLengthRef.current = data.length;
+    dataTimesRef.current = data.map((d) => d.time as number);
     lastAppliedOpenTimeRef.current = candles[candles.length - 1].openTime;
 
     const prev = systemPrimitivesRef.current;
@@ -651,14 +664,15 @@ export function ChartSurfaceInner({
   }
 
   // restoreOrDefaultView applies the scope's saved view when it still fits
-  // the data on the chart (isSavedViewUsable), else the default range
+  // the data on the chart (fromSavedView), else the default range
   // (defaultVisibleRange: about 120 bars ending at the newest, normal bar
   // width, never stretched). Call inside withProgrammaticRangeChange.
   function restoreOrDefaultView(chart: IChartApi, scope: string) {
     const n = dataLengthRef.current;
     const saved = loadChartView(scope);
-    if (saved && isSavedViewUsable(saved, n)) {
-      chart.timeScale().setVisibleLogicalRange(saved);
+    const restored = saved ? fromSavedView(saved, dataTimesRef.current) : null;
+    if (restored) {
+      chart.timeScale().setVisibleLogicalRange(restored);
       return;
     }
     const range = defaultVisibleRange(n);
@@ -764,7 +778,10 @@ export function ChartSurfaceInner({
       // one caused by this component's own setData/restore/default-fit
       // calls (see withProgrammaticRangeChange's own doc comment).
       const byUser = performance.now() - lastUserGestureAtRef.current < USER_GESTURE_WINDOW_MS;
-      if (range && byUser && !isProgrammaticRangeChangeRef.current) saveChartView(chartViewScopeRef.current, range);
+      if (range && byUser && !isProgrammaticRangeChangeRef.current) {
+        const view = toSavedView(range, dataTimesRef.current, chart.timeScale().options().barSpacing);
+        if (view) saveChartView(chartViewScopeRef.current, view);
+      }
     });
 
     const controller = new DrawingController(chart, series, hostRef.current, store, {
@@ -826,7 +843,7 @@ export function ChartSurfaceInner({
     // it was captured once at mount (see its own declaration, above),
     // which was correct while symbol/timeframe genuinely never changed
     // after that; now they can.
-    const newScope = `${symbol}:${timeframe}`;
+    const newScope = viewScope;
     if (chartViewScopeRef.current !== newScope) {
       chartViewScopeRef.current = newScope;
       // Owe this scope a restore-or-default -- not necessarily on THIS

@@ -7,6 +7,7 @@ import { useInstrumentStats } from "@/api/use-instrument-stats";
 import { listSetupEvents } from "@/api/setups";
 import { ApiClientError } from "@/api/client";
 import { useLiveCandles, type LiveTick } from "@/lib/use-live-candles";
+import { preferences, usePreferences } from "@/lib/preferences";
 import type { CandleInterval, ConnectionState, WireStatusPayload } from "@/lib/live-socket";
 
 // Centralizes every fetch the /analysis workspace's many separate panels
@@ -117,7 +118,15 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
   const [otherSetups, setOtherSetups] = useState<ApiSetup[]>([]);
   const [otherSetupsLoading, setOtherSetupsLoading] = useState(false);
 
-  const [timeframe, setTimeframeState] = useState<CandleInterval>("1m");
+  // Saved preferences (D1): the timeframe and, when the link names no
+  // instrument or setup, the last instrument the user chose.
+  const prefs = usePreferences();
+  // Only an instrument that is still enabled (in the list) counts; an old
+  // saved id falls back to the first instrument instead of an error.
+  const savedInstrumentId =
+    prefs.selected_instrument_id !== undefined && instruments.some((i) => i.id === prefs.selected_instrument_id)
+      ? prefs.selected_instrument_id
+      : undefined;
 
   // 1. Instruments, once.
   useEffect(() => {
@@ -151,7 +160,7 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
       if (urlSetupId) {
         return getSetup(Number(urlSetupId), { signal: controller.signal });
       }
-      const targetInstrumentId = urlInstrumentId ? Number(urlInstrumentId) : instruments[0]?.id;
+      const targetInstrumentId = urlInstrumentId ? Number(urlInstrumentId) : (savedInstrumentId ?? instruments[0]?.id);
       if (targetInstrumentId === undefined) return undefined;
       const list = await listSetups({ instrumentId: targetInstrumentId }, { signal: controller.signal });
       return list[0];
@@ -170,7 +179,7 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
         if (!controller.signal.aborted) setSetupLoading(false);
       });
     return () => controller.abort();
-  }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId]);
+  }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId, savedInstrumentId]);
 
   // 2b. The resolved instrument id -- independent of whether the
   // resolved setup (if any) exists, deliberately NOT just
@@ -197,8 +206,8 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
       // never consulted in this case.
       return;
     }
-    setResolvedInstrumentId(urlInstrumentId ? Number(urlInstrumentId) : instruments[0]?.id);
-  }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId]);
+    setResolvedInstrumentId(urlInstrumentId ? Number(urlInstrumentId) : (savedInstrumentId ?? instruments[0]?.id));
+  }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId, savedInstrumentId]);
 
   // setup wins: once a URL-specified setup resolves, the instrument it
   // belongs to is authoritative, even if the URL also carried a
@@ -223,21 +232,25 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
   const instrumentNotFound =
     !instrumentsLoading && resolvedInstrumentId !== undefined && !instrument;
 
-  // A genuine instrument switch can land on a timeframe the NEW
-  // instrument's own supported_intervals does not have (e.g. 1h was
-  // selected on a crypto instrument, the user then switches to a
-  // non-crypto one that only supports 1m) -- clamp rather than let
-  // useLiveCandles below subscribe with an interval the backend will
-  // reject.
+  // An explicit choice (the link names the instrument or setup -- the
+  // symbol picker selects by link too) is saved. A fallback (the saved
+  // value itself, or the first instrument) is not: saving an automatic
+  // default on a new device would mark it as this device's own change
+  // and override the choice the server copy is about to deliver.
   useEffect(() => {
-    if (instrument && !instrument.supported_intervals.includes(timeframe)) {
-      setTimeframeState("1m");
-    }
-  }, [instrument, timeframe]);
+    if (instrument && (urlInstrumentId || urlSetupId)) preferences.set("selected_instrument_id", instrument.id);
+  }, [instrument, urlInstrumentId, urlSetupId]);
+
+  // The saved timeframe, unless the selected instrument does not offer it
+  // (e.g. 1h saved, then an instrument that only has 1m): then 1m for this
+  // instrument, without overwriting the saved choice.
+  const savedTimeframe = prefs.timeframe ?? "1m";
+  const timeframe: CandleInterval =
+    instrument && !instrument.supported_intervals.includes(savedTimeframe) ? "1m" : savedTimeframe;
 
   function setTimeframe(tf: CandleInterval) {
     if (instrument && !instrument.supported_intervals.includes(tf)) return;
-    setTimeframeState(tf);
+    preferences.set("timeframe", tf);
   }
 
   // 3. Evidence (the setup's own event history).

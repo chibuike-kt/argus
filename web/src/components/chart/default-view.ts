@@ -37,14 +37,3 @@ export function defaultVisibleRange(barCount: number): LogicalRange | null {
   const from = -LEFT_PAD_BARS;
   return { from, to: from + width - 1 };
 }
-
-// isSavedViewUsable says whether a saved view still fits the data it is
-// about to be applied to: it must overlap the bars that exist and be a real
-// window. A view saved against a longer series (e.g. before the history was
-// trimmed, or on another timeframe's data) that would show only empty space
-// falls back to the default instead.
-export function isSavedViewUsable(view: LogicalRange, barCount: number): boolean {
-  if (barCount <= 0) return false;
-  if (!Number.isFinite(view.from) || !Number.isFinite(view.to) || view.to - view.from < 1) return false;
-  return view.to >= 0 && view.from <= barCount - 1;
-}

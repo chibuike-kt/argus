@@ -207,6 +207,21 @@ type CandleHistory struct {
 	LastClosedRevision *int32     `json:"last_closed_revision,omitempty"`
 }
 
+// Drawings defines model for Drawings.
+type Drawings struct {
+	Data         json.RawMessage `json:"data"`
+	InstrumentId int64           `json:"instrument_id"`
+	Timeframe    string          `json:"timeframe"`
+	UpdatedAt    *time.Time      `json:"updated_at,omitempty"`
+	Version      int32           `json:"version"`
+}
+
+// DrawingsUpdate defines model for DrawingsUpdate.
+type DrawingsUpdate struct {
+	Data    json.RawMessage `json:"data"`
+	Version int32           `json:"version"`
+}
+
 // Error defines model for Error.
 type Error struct {
 	Error struct {
@@ -300,6 +315,22 @@ type PlanSnapshot struct {
 	Targets          []TargetSnapshot `json:"targets"`
 }
 
+// Preferences defines model for Preferences.
+type Preferences struct {
+	// Data The preferences document (see internal/preferences for the exact, validated shape). Sent and stored as the raw JSON object.
+	Data      json.RawMessage `json:"data"`
+	UpdatedAt *time.Time      `json:"updated_at,omitempty"`
+	Version   int32           `json:"version"`
+}
+
+// PreferencesUpdate defines model for PreferencesUpdate.
+type PreferencesUpdate struct {
+	Data json.RawMessage `json:"data"`
+
+	// Version The version this change is based on; 0 for the first write.
+	Version int32 `json:"version"`
+}
+
 // ProfileUpdateRequest defines model for ProfileUpdateRequest.
 type ProfileUpdateRequest struct {
 	DisplayName string `json:"display_name"`
@@ -384,6 +415,12 @@ type WatchlistUpdateRequest struct {
 	InstrumentIds []int64 `json:"instrument_ids"`
 }
 
+// DrawingsInstrumentId defines model for DrawingsInstrumentId.
+type DrawingsInstrumentId = int64
+
+// DrawingsTimeframe defines model for DrawingsTimeframe.
+type DrawingsTimeframe = string
+
 // ListInstrumentsParams defines parameters for ListInstruments.
 type ListInstrumentsParams struct {
 	// Enabled true (default): only enabled instruments. false: only disabled. all: every row regardless of enablement (the endpoint's own previous default, before this parameter existed). Any other value is a 400.
@@ -425,6 +462,22 @@ type ListInstrumentCandlesParamsInterval string
 // ListInstrumentCandlesParamsOrder defines parameters for ListInstrumentCandles.
 type ListInstrumentCandlesParamsOrder string
 
+// GetDrawingsParams defines parameters for GetDrawings.
+type GetDrawingsParams struct {
+	InstrumentId DrawingsInstrumentId `form:"instrument_id" json:"instrument_id"`
+
+	// Timeframe One of 1m, 5m, 15m, 1h, 4h, 1d (validated by the handler; anything else is a 400).
+	Timeframe DrawingsTimeframe `form:"timeframe" json:"timeframe"`
+}
+
+// UpdateDrawingsParams defines parameters for UpdateDrawings.
+type UpdateDrawingsParams struct {
+	InstrumentId DrawingsInstrumentId `form:"instrument_id" json:"instrument_id"`
+
+	// Timeframe One of 1m, 5m, 15m, 1h, 4h, 1d (validated by the handler; anything else is a 400).
+	Timeframe DrawingsTimeframe `form:"timeframe" json:"timeframe"`
+}
+
 // ListSetupsParams defines parameters for ListSetups.
 type ListSetupsParams struct {
 	InstrumentId int64 `form:"instrument_id" json:"instrument_id"`
@@ -453,6 +506,12 @@ type AuthSignupStartJSONRequestBody = SignupStartRequest
 
 // AuthSignupVerifyJSONRequestBody defines body for AuthSignupVerify for application/json ContentType.
 type AuthSignupVerifyJSONRequestBody = SignupVerifyRequest
+
+// UpdateDrawingsJSONRequestBody defines body for UpdateDrawings for application/json ContentType.
+type UpdateDrawingsJSONRequestBody = DrawingsUpdate
+
+// UpdatePreferencesJSONRequestBody defines body for UpdatePreferences for application/json ContentType.
+type UpdatePreferencesJSONRequestBody = PreferencesUpdate
 
 // UpdateProfileJSONRequestBody defines body for UpdateProfile for application/json ContentType.
 type UpdateProfileJSONRequestBody = ProfileUpdateRequest
@@ -498,9 +557,21 @@ type ServerInterface interface {
 	// ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams)
+	// GetDrawings The signed-in user's own drawings on one chart (instrument and timeframe). Nothing stored yet: an empty array at version 0. An unknown or disabled instrument is a 404.
+	// (GET /me/drawings)
+	GetDrawings(w http.ResponseWriter, r *http.Request, params GetDrawingsParams)
+	// UpdateDrawings Replaces the drawings on one chart, with the same version rule as PUT /me/preferences (409 on a stale version). data is an array of drawing objects, each with a string id and kind (the rest is the web app's own drawing shape); at most 1000 drawings, and a body above 256 KB is a 413.
+	// (PUT /me/drawings)
+	UpdateDrawings(w http.ResponseWriter, r *http.Request, params UpdateDrawingsParams)
 	// CompleteOnboarding Records onboarding_completed_at (ADR-015), but only once the authenticated user already has a display name and at least one watchlist item -- 409 onboarding_incomplete otherwise: the request itself is well formed, the account's current state is just not yet eligible.
 	// (POST /me/onboarding/complete)
 	CompleteOnboarding(w http.ResponseWriter, r *http.Request)
+	// GetPreferences The signed-in user's own preferences document (owner decision D1, brief-argus-product-overhaul.md Phase 1): every setting the user has made, stored server-side so it survives a cleared browser and a login on another device. A user with nothing stored yet gets an empty object at version 0. Ownership is the session user only.
+	// (GET /me/preferences)
+	GetPreferences(w http.ResponseWriter, r *http.Request)
+	// UpdatePreferences Replaces the whole preferences document. version must be the version the change was based on (0 for the first write); a stale version is a 409 so two tabs or devices never silently overwrite each other -- the client re-reads, re-applies its own changed keys and retries. The document is schema-validated: an unknown key at any level, a wrong type or an out-of-range value is a 400; a body above 64 KB is a 413.
+	// (PUT /me/preferences)
+	UpdatePreferences(w http.ResponseWriter, r *http.Request)
 	// UpdateProfile Sets the authenticated user's display name.
 	// (PUT /me/profile)
 	UpdateProfile(w http.ResponseWriter, r *http.Request)
@@ -600,9 +671,33 @@ func (_ Unimplemented) ListInstrumentCandles(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// GetDrawings The signed-in user's own drawings on one chart (instrument and timeframe). Nothing stored yet: an empty array at version 0. An unknown or disabled instrument is a 404.
+// (GET /me/drawings)
+func (_ Unimplemented) GetDrawings(w http.ResponseWriter, r *http.Request, params GetDrawingsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// UpdateDrawings Replaces the drawings on one chart, with the same version rule as PUT /me/preferences (409 on a stale version). data is an array of drawing objects, each with a string id and kind (the rest is the web app's own drawing shape); at most 1000 drawings, and a body above 256 KB is a 413.
+// (PUT /me/drawings)
+func (_ Unimplemented) UpdateDrawings(w http.ResponseWriter, r *http.Request, params UpdateDrawingsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // CompleteOnboarding Records onboarding_completed_at (ADR-015), but only once the authenticated user already has a display name and at least one watchlist item -- 409 onboarding_incomplete otherwise: the request itself is well formed, the account's current state is just not yet eligible.
 // (POST /me/onboarding/complete)
 func (_ Unimplemented) CompleteOnboarding(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetPreferences The signed-in user's own preferences document (owner decision D1, brief-argus-product-overhaul.md Phase 1): every setting the user has made, stored server-side so it survives a cleared browser and a login on another device. A user with nothing stored yet gets an empty object at version 0. Ownership is the session user only.
+// (GET /me/preferences)
+func (_ Unimplemented) GetPreferences(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// UpdatePreferences Replaces the whole preferences document. version must be the version the change was based on (0 for the first write); a stale version is a 409 so two tabs or devices never silently overwrite each other -- the client re-reads, re-applies its own changed keys and retries. The document is schema-validated: an unknown key at any level, a wrong type or an out-of-range value is a 400; a body above 64 KB is a 413.
+// (PUT /me/preferences)
+func (_ Unimplemented) UpdatePreferences(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -981,11 +1076,131 @@ func (siw *ServerInterfaceWrapper) ListInstrumentCandles(w http.ResponseWriter, 
 	handler.ServeHTTP(w, r)
 }
 
+// GetDrawings operation middleware
+func (siw *ServerInterfaceWrapper) GetDrawings(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetDrawingsParams
+
+	// ------------- Required query parameter "instrument_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "instrument_id", r.URL.Query(), &params.InstrumentId, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "instrument_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "instrument_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "timeframe" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "timeframe", r.URL.Query(), &params.Timeframe, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "timeframe"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "timeframe", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetDrawings(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateDrawings operation middleware
+func (siw *ServerInterfaceWrapper) UpdateDrawings(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params UpdateDrawingsParams
+
+	// ------------- Required query parameter "instrument_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "instrument_id", r.URL.Query(), &params.InstrumentId, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "instrument_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "instrument_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "timeframe" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "timeframe", r.URL.Query(), &params.Timeframe, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "timeframe"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "timeframe", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateDrawings(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // CompleteOnboarding operation middleware
 func (siw *ServerInterfaceWrapper) CompleteOnboarding(w http.ResponseWriter, r *http.Request) {
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CompleteOnboarding(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetPreferences operation middleware
+func (siw *ServerInterfaceWrapper) GetPreferences(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetPreferences(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdatePreferences operation middleware
+func (siw *ServerInterfaceWrapper) UpdatePreferences(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdatePreferences(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1341,6 +1556,18 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/me/onboarding/complete", wrapper.CompleteOnboarding)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/me/preferences", wrapper.GetPreferences)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/me/preferences", wrapper.UpdatePreferences)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/me/drawings", wrapper.GetDrawings)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/me/drawings", wrapper.UpdateDrawings)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/watchlist", wrapper.GetWatchlist)
@@ -1749,6 +1976,135 @@ func (response ListInstrumentCandles404JSONResponse) VisitListInstrumentCandlesR
 	return err
 }
 
+type GetDrawingsRequestObject struct {
+	Params GetDrawingsParams
+}
+
+type GetDrawingsResponseObject interface {
+	VisitGetDrawingsResponse(w http.ResponseWriter) error
+}
+
+type GetDrawings200JSONResponse Drawings
+
+func (response GetDrawings200JSONResponse) VisitGetDrawingsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetDrawings400JSONResponse Error
+
+func (response GetDrawings400JSONResponse) VisitGetDrawingsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetDrawings404JSONResponse Error
+
+func (response GetDrawings404JSONResponse) VisitGetDrawingsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateDrawingsRequestObject struct {
+	Params UpdateDrawingsParams
+	Body   *UpdateDrawingsJSONRequestBody
+}
+
+type UpdateDrawingsResponseObject interface {
+	VisitUpdateDrawingsResponse(w http.ResponseWriter) error
+}
+
+type UpdateDrawings200JSONResponse Drawings
+
+func (response UpdateDrawings200JSONResponse) VisitUpdateDrawingsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateDrawings400JSONResponse Error
+
+func (response UpdateDrawings400JSONResponse) VisitUpdateDrawingsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateDrawings404JSONResponse Error
+
+func (response UpdateDrawings404JSONResponse) VisitUpdateDrawingsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateDrawings409JSONResponse Error
+
+func (response UpdateDrawings409JSONResponse) VisitUpdateDrawingsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateDrawings413JSONResponse Error
+
+func (response UpdateDrawings413JSONResponse) VisitUpdateDrawingsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(413)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type CompleteOnboardingRequestObject struct {
 }
 
@@ -1780,6 +2136,91 @@ func (response CompleteOnboarding409JSONResponse) VisitCompleteOnboardingRespons
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetPreferencesRequestObject struct {
+}
+
+type GetPreferencesResponseObject interface {
+	VisitGetPreferencesResponse(w http.ResponseWriter) error
+}
+
+type GetPreferences200JSONResponse Preferences
+
+func (response GetPreferences200JSONResponse) VisitGetPreferencesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdatePreferencesRequestObject struct {
+	Body *UpdatePreferencesJSONRequestBody
+}
+
+type UpdatePreferencesResponseObject interface {
+	VisitUpdatePreferencesResponse(w http.ResponseWriter) error
+}
+
+type UpdatePreferences200JSONResponse Preferences
+
+func (response UpdatePreferences200JSONResponse) VisitUpdatePreferencesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdatePreferences400JSONResponse Error
+
+func (response UpdatePreferences400JSONResponse) VisitUpdatePreferencesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdatePreferences409JSONResponse Error
+
+func (response UpdatePreferences409JSONResponse) VisitUpdatePreferencesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdatePreferences413JSONResponse Error
+
+func (response UpdatePreferences413JSONResponse) VisitUpdatePreferencesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(413)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -2046,9 +2487,21 @@ type StrictServerInterface interface {
 	// ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(ctx context.Context, request ListInstrumentCandlesRequestObject) (ListInstrumentCandlesResponseObject, error)
+	// GetDrawings The signed-in user's own drawings on one chart (instrument and timeframe). Nothing stored yet: an empty array at version 0. An unknown or disabled instrument is a 404.
+	// (GET /me/drawings)
+	GetDrawings(ctx context.Context, request GetDrawingsRequestObject) (GetDrawingsResponseObject, error)
+	// UpdateDrawings Replaces the drawings on one chart, with the same version rule as PUT /me/preferences (409 on a stale version). data is an array of drawing objects, each with a string id and kind (the rest is the web app's own drawing shape); at most 1000 drawings, and a body above 256 KB is a 413.
+	// (PUT /me/drawings)
+	UpdateDrawings(ctx context.Context, request UpdateDrawingsRequestObject) (UpdateDrawingsResponseObject, error)
 	// CompleteOnboarding Records onboarding_completed_at (ADR-015), but only once the authenticated user already has a display name and at least one watchlist item -- 409 onboarding_incomplete otherwise: the request itself is well formed, the account's current state is just not yet eligible.
 	// (POST /me/onboarding/complete)
 	CompleteOnboarding(ctx context.Context, request CompleteOnboardingRequestObject) (CompleteOnboardingResponseObject, error)
+	// GetPreferences The signed-in user's own preferences document (owner decision D1, brief-argus-product-overhaul.md Phase 1): every setting the user has made, stored server-side so it survives a cleared browser and a login on another device. A user with nothing stored yet gets an empty object at version 0. Ownership is the session user only.
+	// (GET /me/preferences)
+	GetPreferences(ctx context.Context, request GetPreferencesRequestObject) (GetPreferencesResponseObject, error)
+	// UpdatePreferences Replaces the whole preferences document. version must be the version the change was based on (0 for the first write); a stale version is a 409 so two tabs or devices never silently overwrite each other -- the client re-reads, re-applies its own changed keys and retries. The document is schema-validated: an unknown key at any level, a wrong type or an out-of-range value is a 400; a body above 64 KB is a 413.
+	// (PUT /me/preferences)
+	UpdatePreferences(ctx context.Context, request UpdatePreferencesRequestObject) (UpdatePreferencesResponseObject, error)
 	// UpdateProfile Sets the authenticated user's display name.
 	// (PUT /me/profile)
 	UpdateProfile(ctx context.Context, request UpdateProfileRequestObject) (UpdateProfileResponseObject, error)
@@ -2436,6 +2889,65 @@ func (sh *strictHandler) ListInstrumentCandles(w http.ResponseWriter, r *http.Re
 	}
 }
 
+// GetDrawings operation middleware
+func (sh *strictHandler) GetDrawings(w http.ResponseWriter, r *http.Request, params GetDrawingsParams) {
+	var request GetDrawingsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetDrawings(ctx, request.(GetDrawingsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetDrawings")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetDrawingsResponseObject); ok {
+		if err := validResponse.VisitGetDrawingsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UpdateDrawings operation middleware
+func (sh *strictHandler) UpdateDrawings(w http.ResponseWriter, r *http.Request, params UpdateDrawingsParams) {
+	var request UpdateDrawingsRequestObject
+
+	request.Params = params
+
+	var body UpdateDrawingsJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateDrawings(ctx, request.(UpdateDrawingsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateDrawings")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateDrawingsResponseObject); ok {
+		if err := validResponse.VisitUpdateDrawingsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // CompleteOnboarding operation middleware
 func (sh *strictHandler) CompleteOnboarding(w http.ResponseWriter, r *http.Request) {
 	var request CompleteOnboardingRequestObject
@@ -2453,6 +2965,61 @@ func (sh *strictHandler) CompleteOnboarding(w http.ResponseWriter, r *http.Reque
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(CompleteOnboardingResponseObject); ok {
 		if err := validResponse.VisitCompleteOnboardingResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetPreferences operation middleware
+func (sh *strictHandler) GetPreferences(w http.ResponseWriter, r *http.Request) {
+	var request GetPreferencesRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetPreferences(ctx, request.(GetPreferencesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetPreferences")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetPreferencesResponseObject); ok {
+		if err := validResponse.VisitGetPreferencesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UpdatePreferences operation middleware
+func (sh *strictHandler) UpdatePreferences(w http.ResponseWriter, r *http.Request) {
+	var request UpdatePreferencesRequestObject
+
+	var body UpdatePreferencesJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdatePreferences(ctx, request.(UpdatePreferencesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdatePreferences")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdatePreferencesResponseObject); ok {
+		if err := validResponse.VisitUpdatePreferencesResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -2653,114 +3220,128 @@ func (sh *strictHandler) UpdateWatchlist(w http.ResponseWriter, r *http.Request)
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
-	"165IrpLYmJ98+OXD/w8AAP//",
+	"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",
+	"4w6Ybllb6Mrlg8tB7Kc2+PiPj/8VAAD//w==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

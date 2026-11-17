@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { Plus, Columns, DotsThree, CaretDown, CircleNotch } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { useInstruments, useWatchlist } from "@/api/hooks";
 import { useInstrumentStats } from "@/api/use-instrument-stats";
 import { formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
+import { preferences, usePreferences } from "@/lib/preferences";
 import { cn } from "@/lib/cn";
 
 const COLS = "grid grid-cols-[1.3fr_1fr_0.9fr_0.8fr] items-center gap-2";
@@ -50,8 +51,11 @@ function Row({
   );
 }
 
+// A group's collapsed state is a preference (D1), keyed by its title.
 function Group({ title, children }: { title: string; children: ReactNode }) {
-  const [open, setOpen] = useState(true);
+  const collapsed = usePreferences().watchlist_groups_collapsed?.[title] ?? false;
+  const open = !collapsed;
+  const setOpen = (o: boolean) => preferences.setEntry("watchlist_groups_collapsed", title, !o);
   return (
     <div>
       <div className="flex items-center justify-between px-2">
