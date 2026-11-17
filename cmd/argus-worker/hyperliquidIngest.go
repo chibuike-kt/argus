@@ -41,7 +41,10 @@ func startHyperliquidIngest(
 	// Loud-warning duty for these two overrides lives in main.go,
 	// unconditionally (not gated on IngestProvider=="hyperliquid") --
 	// see its own comment on why.
-	opts := []hyperliquid.Option{hyperliquid.WithMaxConnectionAge(cfg.Hyperliquid.MaxConnectionAge)}
+	opts := []hyperliquid.Option{
+		hyperliquid.WithMaxConnectionAge(cfg.Hyperliquid.MaxConnectionAge),
+		hyperliquid.WithHeartbeat(cfg.Hyperliquid.PingInterval, cfg.Hyperliquid.StallTimeout),
+	}
 	if cfg.Hyperliquid.BaseURLOverride != "" {
 		opts = append(opts, hyperliquid.WithBaseURL(cfg.Hyperliquid.BaseURLOverride))
 	}
@@ -75,29 +78,28 @@ func startHyperliquidIngest(
 	logger.Warn("worker: ARGUS_INGEST_PROVIDER=hyperliquid is enabled -- ingesting real Hyperliquid data for private research use only (ADR-007 rights not yet confirmed); no instrument this creates is ever enabled by this process",
 		"symbols", cfg.Hyperliquid.Symbols, "backfill_days", cfg.Hyperliquid.BackfillDays)
 
+	state := storeBackfillState{instruments: instrumentStore, candles: marketdataStore}
 	for _, symbol := range cfg.Hyperliquid.Symbols {
-		go runHyperliquidSymbol(ctx, symbol, svc, cfg, logger, clk)
+		go runHyperliquidSymbol(ctx, symbol, svc, state, cfg, logger, clk)
 	}
 }
 
-// runHyperliquidSymbol backfills cfg.Hyperliquid.BackfillDays once,
-// then alternates between streaming live candles and -- on any
-// disconnect, planned or not -- backfilling exactly the gap since this
-// connection attempt started before reconnecting with exponential
-// backoff (config.LiveFeed.ReconnectBackoffBase/Cap, reused rather
-// than duplicated, per the brief's own instruction). A planned
-// reconnect (the brief's own hostile-condition test, simulated with a
-// shortened connection lifetime) loses no candle for exactly this
-// reason: the gap backfill after StreamCandles returns is unconditional,
-// whether the disconnect was planned or a real failure.
-func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Service, cfg config.Config, logger *slog.Logger, clk clock.Clock) {
-	now := clk.Now()
-	start := now.Add(-time.Duration(cfg.Hyperliquid.BackfillDays) * 24 * time.Hour)
-	if err := svc.IngestHistorical(ctx, symbol, start, now); err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		logger.Error("hyperliquid: initial backfill failed", "symbol", symbol, "error", err)
+// runHyperliquidSymbol closes any hole since the newest stored candle
+// (backfillUntilCaughtUp: window read from the database, retried until
+// it succeeds), then alternates between streaming live candles and --
+// on any disconnect, planned, failed or stalled -- the same database-
+// anchored backfill before reconnecting with exponential backoff
+// (config.LiveFeed.ReconnectBackoffBase/Cap).
+//
+// The previous version anchored the post-disconnect backfill on the
+// connection's own start time held in memory, made one attempt, and
+// reset that anchor to "now" on the next loop: after hours offline
+// (machine asleep, network down) the failed attempt's window was never
+// retried and the hole stayed forever. The startup backfill had the
+// same one-shot shape.
+func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Service, state backfillState, cfg config.Config, logger *slog.Logger, clk clock.Clock) {
+	if !backfillUntilCaughtUp(ctx, "startup", symbol, svc, state, cfg, logger, clk) {
+		return
 	}
 
 	attempt := 0
@@ -106,17 +108,14 @@ func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Ser
 			return
 		}
 
-		since := clk.Now()
-
 		// Covers the real-run gap this brief's own verification
 		// found: the stream's in-memory tracked-minute starts empty
 		// on every fresh connection, so a minute the backfill above
-		// (this one, or the gap backfill below from a PRIOR
-		// iteration) left dangling is never closed by the stream
-		// itself if the connection's first live message already
-		// belongs to a later minute. Runs only while WatchCandles is
-		// actually in flight -- canceled the instant it returns, so
-		// it is never what delays a prompt reconnect.
+		// left dangling is never closed by the stream itself if the
+		// connection's first live message already belongs to a later
+		// minute. Runs only while WatchCandles is actually in flight
+		// -- canceled the instant it returns, so it is never what
+		// delays a prompt reconnect.
 		periodicCtx, cancelPeriodic := context.WithCancel(ctx)
 		periodicDone := make(chan struct{})
 		go func() {
@@ -136,15 +135,12 @@ func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Ser
 			logger.Info("hyperliquid: stream ended cleanly, will reconnect", "symbol", symbol)
 		}
 
-		// The gap backfill: whatever this connection missed between
-		// its own start and now, regardless of whether it ended with
-		// an error or returned nil -- a planned reconnect (no error)
-		// still needs this, since StreamCandles' own contract never
-		// guarantees the LAST in-flight minute was closed before the
-		// connection ended (see hyperliquid.Provider.StreamCandles'
-		// own doc comment on this exact scenario).
-		if err := svc.IngestHistorical(ctx, symbol, since, clk.Now()); err != nil && ctx.Err() == nil {
-			logger.Error("hyperliquid: gap backfill after disconnect failed", "symbol", symbol, "error", err)
+		// Unconditional, planned disconnect or not: StreamCandles'
+		// contract never guarantees the last in-flight minute was
+		// closed before the connection ended, and after a long outage
+		// this is what fills the hole.
+		if !backfillUntilCaughtUp(ctx, "reconnect", symbol, svc, state, cfg, logger, clk) {
+			return
 		}
 
 		delay := reconnectBackoff(attempt, cfg.Live.ReconnectBackoffBase, cfg.Live.ReconnectBackoffCap)

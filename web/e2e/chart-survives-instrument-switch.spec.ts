@@ -106,6 +106,11 @@ test("switching instrument does not rebuild the chart: same canvas element, no p
 test("switching instrument and back keeps the saved chart view for each instrument's own scope", async ({ page }) => {
   await page.goto(`/analysis?setupId=${auth.btcSetupId}&instrumentId=${auth.btcInstrumentId}`);
   await expect(page.locator("canvas").first()).toBeVisible({ timeout: 15_000 });
+  // Wait for real candles on the chart before zooming: a wheel over an
+  // empty, still-loading chart moves no range, and only a range change
+  // that follows a real gesture is saved (chart-surface.tsx's gesture
+  // gate -- the library's own later re-fits are deliberately not saved).
+  await expect(page.getByTestId("legend-close")).not.toHaveText("0", { timeout: 15_000 });
 
   // Zoom in on BTC's own chart (mouse wheel over the chart host),
   // which chart-surface.tsx's own subscribeVisibleLogicalRangeChange

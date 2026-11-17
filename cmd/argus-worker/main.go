@@ -73,6 +73,23 @@ func main() {
 
 	clk := clock.Real{}
 	instrumentStore := instruments.NewStore(db)
+
+	// Silent provider fallback guard (checkIngestProvider): log the
+	// active provider loudly, and refuse to start when it was never
+	// chosen explicitly while real-provider instruments are enabled.
+	_, providerSet := os.LookupEnv(ingestProviderEnv)
+	logger.Warn("worker: active ingest provider", "provider", cfg.IngestProvider, "set_explicitly", providerSet)
+	enabledAtStart, err := instrumentStore.ListEnabled(ctx)
+	if err != nil {
+		logger.Error("startup: list enabled instruments", "error", err)
+		os.Exit(1)
+	}
+	if warning, err := checkIngestProvider(providerSet, cfg.IngestProvider, enabledAtStart); err != nil {
+		logger.Error("startup: refusing to start", "error", err)
+		os.Exit(1)
+	} else if warning != "" {
+		logger.Warn("worker: "+warning, "provider", cfg.IngestProvider)
+	}
 	marketdataStore := marketdata.NewStore(db, clk)
 	candlePublisher := hub.NewRedisPublisher(rdb)
 	candleSource := analysis.NewMarketdataSource(marketdataStore)

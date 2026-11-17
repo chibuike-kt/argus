@@ -130,7 +130,7 @@ func TestIntegration_RunHyperliquidSymbol_ReconnectsRepeatedlyWithBackfillBetwee
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		runHyperliquidSymbol(runCtx, symbol, svc, cfg, logger, clk)
+		runHyperliquidSymbol(runCtx, symbol, svc, storeBackfillState{instruments: instrumentStore, candles: marketdataStore}, cfg, logger, clk)
 		close(done)
 	}()
 
@@ -273,7 +273,7 @@ func TestIntegration_RunHyperliquidSymbol_PeriodicBackfillClosesMinuteStreamNeve
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		runHyperliquidSymbol(runCtx, symbol, svc, cfg, logger, clk)
+		runHyperliquidSymbol(runCtx, symbol, svc, storeBackfillState{instruments: instrumentStore, candles: marketdataStore}, cfg, logger, clk)
 		close(done)
 	}()
 
@@ -424,7 +424,7 @@ func TestIntegration_RunHyperliquidSymbol_PeriodicBackfillAndStreamAgreeingNever
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		runHyperliquidSymbol(runCtx, symbol, svc, cfg, logger, clk)
+		runHyperliquidSymbol(runCtx, symbol, svc, storeBackfillState{instruments: instrumentStore, candles: marketdataStore}, cfg, logger, clk)
 		close(done)
 	}()
 
@@ -561,7 +561,7 @@ func TestIntegration_RunHyperliquidSymbol_FailingPeriodicBackfillNeverStopsAHeal
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		runHyperliquidSymbol(runCtx, symbol, svc, cfg, logger, clk)
+		runHyperliquidSymbol(runCtx, symbol, svc, storeBackfillState{instruments: instrumentStore, candles: marketdataStore}, cfg, logger, clk)
 		close(done)
 	}()
 

@@ -1,5 +1,6 @@
 import type { IChartApi, ISeriesApi, ISeriesPrimitive, SeriesType, Time } from "lightweight-charts";
 import type { Candle } from "@/types/domain";
+import { setSeriesCandles } from "./series-candles";
 import type { DrawingsStore } from "./store";
 import {
   DEFAULT_STYLE,
@@ -104,8 +105,12 @@ export class DrawingController {
   setStayInDrawingMode(on: boolean) {
     this.stayInDrawingMode = on;
   }
+  // Also publishes the candles for this chart's series, so the drawing
+  // primitives (measure bar count, position projection) read the same real
+  // candles the controller does -- see series-candles.ts.
   setCandles(c: Candle[]) {
     this.candles = c;
+    setSeriesCandles(this.series, c);
   }
   // The position tool's default forward width, in bars -- used only to
   // seed rightTime on creation; dragging the left/right handles afterwards
