@@ -10,7 +10,8 @@ import {
 import { useNavigate } from "react-router-dom";
 import { MagnifyingGlass, ArrowBendDownLeft } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
-import { markets } from "@/mocks/fixtures";
+import { listInstruments } from "@/api/instruments";
+import type { ApiInstrument } from "@/api/types";
 import { cn } from "@/lib/cn";
 
 interface Command {
@@ -21,10 +22,9 @@ interface Command {
   onRun: (navigate: ReturnType<typeof useNavigate>) => void;
 }
 
-// Static nav commands + the watchlist's own symbols -- a real symbol swap
-// (routing the analysis view to a chosen instrument) is a follow-up once
-// the chart reads its instrument from route state rather than a fixture
-// constant; for now, selecting a symbol here goes to Analysis.
+// Static nav commands plus one command per enabled instrument (GET
+// /instruments, which returns enabled instruments only) -- choosing one
+// opens it on /analysis.
 const NAV_COMMANDS: Command[] = [
   { id: "nav-setups", label: "Go to Setups", hint: "Setups", onRun: (nav) => nav("/setups") },
   {
@@ -33,18 +33,21 @@ const NAV_COMMANDS: Command[] = [
     hint: "Analysis",
     onRun: (nav) => nav("/analysis"),
   },
-  { id: "nav-style", label: "Go to Design system", hint: "Style", onRun: (nav) => nav("/style") },
+  // Dev builds only (see main.tsx).
+  ...(import.meta.env.DEV
+    ? [{ id: "nav-style", label: "Go to Design system", hint: "Style", onRun: (nav: ReturnType<typeof useNavigate>) => nav("/style") }]
+    : []),
 ];
 
-const SYMBOL_COMMANDS: Command[] = markets.map((m) => ({
-  id: `sym-${m.symbol}`,
-  label: m.name,
-  hint: m.symbol.replace(".P", ""),
-  symbol: m.symbol,
-  onRun: (nav) => nav("/analysis"),
-}));
-
-const ALL_COMMANDS = [...NAV_COMMANDS, ...SYMBOL_COMMANDS];
+function symbolCommands(instruments: ApiInstrument[]): Command[] {
+  return instruments.map((inst) => ({
+    id: `sym-${inst.id}`,
+    label: inst.native_symbol,
+    hint: inst.provider,
+    symbol: inst.native_symbol,
+    onRun: (nav) => nav(`/analysis?instrumentId=${inst.id}`),
+  }));
+}
 
 interface PaletteContextValue {
   open: () => void;
@@ -59,6 +62,9 @@ export function CommandPaletteProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
+  // Fetched when the palette opens (it is mounted on signed-out pages too,
+  // where there is nothing to list).
+  const [instruments, setInstruments] = useState<ApiInstrument[]>([]);
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -75,23 +81,32 @@ export function CommandPaletteProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      setIndex(0);
-      requestAnimationFrame(() => inputRef.current?.focus());
-    }
+    if (!open) return;
+    setQuery("");
+    setIndex(0);
+    requestAnimationFrame(() => inputRef.current?.focus());
+    const controller = new AbortController();
+    listInstruments({ signal: controller.signal })
+      .then((list) => {
+        if (!controller.signal.aborted) setInstruments(list);
+      })
+      .catch(() => {
+        /* nothing to list (signed out or offline): navigation commands remain */
+      });
+    return () => controller.abort();
   }, [open]);
 
   const results = useMemo(() => {
+    const all = [...NAV_COMMANDS, ...symbolCommands(instruments)];
     const q = query.trim().toLowerCase();
-    if (!q) return ALL_COMMANDS;
-    return ALL_COMMANDS.filter(
+    if (!q) return all;
+    return all.filter(
       (c) =>
         c.label.toLowerCase().includes(q) ||
         c.hint?.toLowerCase().includes(q) ||
         c.symbol?.toLowerCase().includes(q),
     );
-  }, [query]);
+  }, [query, instruments]);
 
   const run = (c: Command) => {
     c.onRun(navigate);

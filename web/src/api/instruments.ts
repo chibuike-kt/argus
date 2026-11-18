@@ -1,9 +1,7 @@
 import { getJSON, type GetJSONOptions } from "./client";
 import type { ApiCandleHistory, ApiInstrument, ApiInstrumentStats } from "./types";
-import { fixturesEnabled, fixtureApiInstruments, fixtureApiCandles } from "@/mocks/fixtures-as-api";
 
 export function listInstruments(options?: GetJSONOptions): Promise<ApiInstrument[]> {
-  if (fixturesEnabled()) return Promise.resolve(fixtureApiInstruments());
   return getJSON<ApiInstrument[]>("/instruments", undefined, options);
 }
 
@@ -35,22 +33,11 @@ export interface ListCandlesParams {
   order?: "asc" | "desc";
 }
 
-function fixtureCandleHistory(): ApiCandleHistory {
-  const candles = fixtureApiCandles();
-  const last = candles[candles.length - 1];
-  return {
-    candles,
-    last_closed_open_time: last?.open_time ?? null,
-    last_closed_revision: last?.revision ?? null,
-  };
-}
-
 export function listInstrumentCandles(
   instrumentId: number,
   params: ListCandlesParams,
   options?: GetJSONOptions,
 ): Promise<ApiCandleHistory> {
-  if (fixturesEnabled()) return Promise.resolve(fixtureCandleHistory());
   return getJSON<ApiCandleHistory>(
     `/instruments/${instrumentId}/candles`,
     {
@@ -64,21 +51,6 @@ export function listInstrumentCandles(
   );
 }
 
-// absentStats is fixture mode's answer: VITE_USE_FIXTURES has no stats
-// source, and the app already carries a global "all data is sample"
-// badge in that mode, so every figure is absent rather than invented.
-function absentStats(id: number): ApiInstrumentStats {
-  return {
-    instrument_id: id,
-    last_close: null,
-    last_closed_open_time: null,
-    change_24h: null,
-    change_24h_pct: null,
-    volume_24h: null,
-    performance: { "1D": null, "1W": null, "1M": null, "3M": null, "6M": null, "1Y": null },
-  };
-}
-
 // MAX_STATS_IDS matches the server's own cap on GET /instruments/stats.
 export const MAX_STATS_IDS = 50;
 
@@ -88,6 +60,5 @@ export const MAX_STATS_IDS = 50;
 export function listInstrumentStats(ids: readonly number[], options?: GetJSONOptions): Promise<ApiInstrumentStats[]> {
   if (ids.length === 0) return Promise.resolve([]);
   const capped = ids.slice(0, MAX_STATS_IDS);
-  if (fixturesEnabled()) return Promise.resolve(capped.map(absentStats));
   return getJSON<ApiInstrumentStats[]>("/instruments/stats", { ids: capped.join(",") }, options);
 }

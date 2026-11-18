@@ -1,4 +1,0 @@
-services:
-  worker:
-    environment:
-      ARGUS_DEV_FIXTURE_INGEST: "true"

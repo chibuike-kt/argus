@@ -7,7 +7,8 @@ import { useInstrumentStats } from "@/api/use-instrument-stats";
 import { listSetupEvents } from "@/api/setups";
 import { ApiClientError } from "@/api/client";
 import { useLiveCandles, type LiveTick } from "@/lib/use-live-candles";
-import { preferences, usePreferences } from "@/lib/preferences";
+import { preferences, usePreferences, usePreferencesSynced } from "@/lib/preferences";
+import { useWatchlist } from "@/api/hooks";
 import type { CandleInterval, ConnectionState, WireStatusPayload } from "@/lib/live-socket";
 
 // Centralizes every fetch the /analysis workspace's many separate panels
@@ -121,12 +122,28 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
   // Saved preferences (D1): the timeframe and, when the link names no
   // instrument or setup, the last instrument the user chose.
   const prefs = usePreferences();
-  // Only an instrument that is still enabled (in the list) counts; an old
-  // saved id falls back to the first instrument instead of an error.
+  const prefsSynced = usePreferencesSynced();
+  const watchlistIds = useWatchlist().data;
+  // Only an instrument that is still enabled (in the list) counts. An old
+  // saved id (e.g. a fixture instrument the operator has since disabled)
+  // falls back to the user's first watchlist item that is enabled, then the
+  // first instrument -- never an error screen.
+  const enabledIds = useMemo(() => new Set(instruments.map((i) => i.id)), [instruments]);
   const savedInstrumentId =
-    prefs.selected_instrument_id !== undefined && instruments.some((i) => i.id === prefs.selected_instrument_id)
+    prefs.selected_instrument_id !== undefined && enabledIds.has(prefs.selected_instrument_id)
       ? prefs.selected_instrument_id
       : undefined;
+  const fallbackInstrumentId = watchlistIds?.find((id) => enabledIds.has(id)) ?? instruments[0]?.id;
+  // ...and the stale saved value is corrected to that fallback, once the
+  // server copy has been read (so a stale local cache never overwrites a
+  // valid server value).
+  const staleSavedId =
+    prefs.selected_instrument_id !== undefined && instruments.length > 0 && !enabledIds.has(prefs.selected_instrument_id);
+  useEffect(() => {
+    if (staleSavedId && prefsSynced && fallbackInstrumentId !== undefined) {
+      preferences.set("selected_instrument_id", fallbackInstrumentId);
+    }
+  }, [staleSavedId, prefsSynced, fallbackInstrumentId]);
 
   // 1. Instruments, once.
   useEffect(() => {
@@ -160,7 +177,7 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
       if (urlSetupId) {
         return getSetup(Number(urlSetupId), { signal: controller.signal });
       }
-      const targetInstrumentId = urlInstrumentId ? Number(urlInstrumentId) : (savedInstrumentId ?? instruments[0]?.id);
+      const targetInstrumentId = urlInstrumentId ? Number(urlInstrumentId) : (savedInstrumentId ?? fallbackInstrumentId);
       if (targetInstrumentId === undefined) return undefined;
       const list = await listSetups({ instrumentId: targetInstrumentId }, { signal: controller.signal });
       return list[0];
@@ -179,7 +196,7 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
         if (!controller.signal.aborted) setSetupLoading(false);
       });
     return () => controller.abort();
-  }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId, savedInstrumentId]);
+  }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId, savedInstrumentId, fallbackInstrumentId]);
 
   // 2b. The resolved instrument id -- independent of whether the
   // resolved setup (if any) exists, deliberately NOT just
@@ -206,8 +223,8 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
       // never consulted in this case.
       return;
     }
-    setResolvedInstrumentId(urlInstrumentId ? Number(urlInstrumentId) : (savedInstrumentId ?? instruments[0]?.id));
-  }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId, savedInstrumentId]);
+    setResolvedInstrumentId(urlInstrumentId ? Number(urlInstrumentId) : (savedInstrumentId ?? fallbackInstrumentId));
+  }, [instrumentsLoading, instruments, urlSetupId, urlInstrumentId, savedInstrumentId, fallbackInstrumentId]);
 
   // setup wins: once a URL-specified setup resolves, the instrument it
   // belongs to is authoritative, even if the URL also carried a

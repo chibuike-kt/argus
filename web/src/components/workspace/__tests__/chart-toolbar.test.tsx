@@ -7,7 +7,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { DrawingProvider } from "@/components/chart/drawing-context";
 import { AnalysisWorkspaceProvider } from "@/components/workspace/analysis-workspace";
 import { CommandPaletteProvider } from "@/components/workspace/command-palette";
-import { ArgusActivityProvider } from "@/components/workspace/argus-activity-feed";
 import { ChartToolbar } from "../chart-toolbar";
 import type { ApiAuthUser, ApiInstrument } from "@/api/types";
 
@@ -65,9 +64,7 @@ function renderToolbar() {
           <AnalysisWorkspaceProvider>
             <DrawingProvider>
               <CommandPaletteProvider>
-                <ArgusActivityProvider>
                   <ChartToolbar />
-                </ArgusActivityProvider>
               </CommandPaletteProvider>
             </DrawingProvider>
           </AnalysisWorkspaceProvider>
@@ -103,19 +100,21 @@ describe("ChartToolbar account avatar", () => {
   });
 });
 
-// Replay plays back sample (fixture) analysis steps, so it exists only
-// for an instrument whose own provider is "fixture" (real-panel-data
-// brief rule 8) -- decided by the selected instrument, not build mode.
+// Replay played back sample (fixture) analysis steps; Phase 2 (D2) removed
+// it for every instrument (it never meant anything for real data).
 describe("ChartToolbar Replay", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
   });
 
-  it("is shown for a fixture-provider instrument", async () => {
+  // Phase 2 (D2): Replay played back sample analysis steps; it is gone,
+  // for every instrument, including a fixture-provider one.
+  it("is gone even for a fixture-provider instrument", async () => {
     installFetchMock(BASE_USER, [makeInstrument("fixture")]);
     renderToolbar();
-    expect(await screen.findByRole("button", { name: /Replay/ })).toBeInTheDocument();
+    expect(await screen.findByText("BTC")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Replay/ })).toBeNull();
   });
 
   it("is hidden for a real-provider instrument", async () => {

@@ -118,7 +118,12 @@ services:
     environment:
       ARGUS_DATABASE_URL: postgres://argus:argus@postgres:5432/argus?sslmode=disable
       ARGUS_REDIS_URL: redis://redis:6379/0
-      ARGUS_INGEST_PROVIDER: ${ARGUS_INGEST_PROVIDER:-fixture}
+      # No default (Phase 2, D2): the worker refuses to start until this is
+      # set explicitly -- hyperliquid for the real stack (.env.example sets
+      # it). Passed through rather than required with ${...:?}, which would
+      # also block `make infra` (postgres and redis only) on a clone with no
+      # .env; the worker's own startup check is the enforcement.
+      ARGUS_INGEST_PROVIDER: ${ARGUS_INGEST_PROVIDER:-}
 
 volumes:
   pgdata:

@@ -71,12 +71,12 @@ migrate-down: ## Roll back one migration
 migrate-create: ## Create a migration: make migrate-create name=add_x
 	docker run --rm -v $(PWD)/$(MIGRATIONS_DIR):/m migrate/migrate:$(MIGRATE_VERSION) create -ext sql -dir /m -seq $(name)
 
-.PHONY: seed-dev
-seed-dev: ## DEV/TEST ONLY: seed fixture-backed instruments against DB_URL -- never run against production
+.PHONY: seed-e2e-fixtures
+seed-e2e-fixtures: ## E2E/TEST ONLY: seed the fixture instruments (db/seed/dev_fixture_instruments.sql) against DB_URL -- called by e2e-stack; never run against the dev or a production database (Phase 2, D2: the product shows real data only)
 	docker run --rm --network host -v $(PWD)/db/seed:/seed postgres:16-alpine psql "$(DB_URL)" -f /seed/dev_fixture_instruments.sql
 
 .PHONY: seed-e2e-only
-seed-e2e-only: ## E2E ONLY: seed the e2e-only fixture instrument(s) (db/seed/e2e_only_instruments.sql) against DB_URL -- called by e2e-stack alone, never by seed-dev/live-demo, so this never reaches a developer's own local dev database
+seed-e2e-only: ## E2E ONLY: seed the e2e-only fixture instrument(s) (db/seed/e2e_only_instruments.sql) against DB_URL -- called by e2e-stack alone, so this never reaches a developer's own local dev database
 	docker run --rm --network host -v $(PWD)/db/seed:/seed postgres:16-alpine psql "$(DB_URL)" -f /seed/e2e_only_instruments.sql
 
 .PHONY: generate
@@ -89,15 +89,16 @@ run-api: ## Run the API server locally
 	go run ./cmd/argus-api
 
 .PHONY: run-worker
-run-worker: ## Run the worker locally
+run-worker: ## Run the worker locally (needs ARGUS_INGEST_PROVIDER set, e.g. hyperliquid in .env -- it refuses to start without it)
 	go run ./cmd/argus-worker
 
-LIVE_DEMO_SPEED ?= 60
+.PHONY: sync-instruments
+sync-instruments: ## Register the Hyperliquid instruments (ARGUS_HYPERLIQUID_SYMBOLS) as DISABLED rows and print the enable SQL to run by hand -- nothing in code ever enables an instrument (ADR-007)
+	go run ./cmd/argus-instruments sync-hyperliquid
 
-.PHONY: live-demo
-live-demo: ## THE ONE COMMAND to watch ticks move on screen (live-chart brief, Part 2G): seeds the dev fixture against DB_URL (default: the dev argus database), then runs the worker with the one-time historical ingest AND a continuing live replay -- new candles forming and closing forward from each instrument's own last historical close, published through the hub exactly like a real feed. Needs: make infra, then make run-api (or make up), already running; open the frontend (make web-dev) on /analysis for BTC-PERP or ETH-PERP to watch it. Blocks in the foreground (Ctrl-C stops it); LIVE_DEMO_SPEED overrides the pace (default 60: about one new candle per real second).
-	$(MAKE) seed-dev DB_URL="$(DB_URL)"
-	ARGUS_DEV_FIXTURE_INGEST=true ARGUS_DEV_FIXTURE_LIVE_REPLAY=true ARGUS_DEV_FIXTURE_LIVE_REPLAY_SPEED="$(LIVE_DEMO_SPEED)" go run ./cmd/argus-worker
+# E2E_REPLAY_SPEED paces the e2e stack's fixture live replay (about one
+# new candle per real second at 60).
+E2E_REPLAY_SPEED ?= 60
 
 .PHONY: fmt
 fmt: ## Format Go code
@@ -149,8 +150,8 @@ e2e-resetdb: ## Drops and recreates the dedicated e2e database (argus_e2e) -- "f
 .PHONY: e2e-stack
 e2e-stack: e2e-resetdb ## THE ONE COMMAND for web/e2e's own backend: resets argus_e2e to a clean database, migrates + seeds + ingests the dev fixture into it, then runs a dedicated api+worker pair on E2E_HTTP_PORT (default 8090), with CORS/CSRF allowing Vite preview's own origin (4173). The worker also runs Part 2G's own live replay, so a forming candle visibly moves and a new one appears at the boundary -- exactly what the Playwright scenario in web/e2e needs. Needs: make infra running first (postgres+redis). Blocks in the foreground (Ctrl-C stops both); api's own stdout/stderr -- including the dev mailer's logged signup codes -- goes to $(E2E_API_LOG), which web/e2e's own global setup reads.
 	$(MAKE) migrate-up DB_URL="$(E2E_DB_URL)"
-	$(MAKE) seed-dev DB_URL="$(E2E_DB_URL)"
+	$(MAKE) seed-e2e-fixtures DB_URL="$(E2E_DB_URL)"
 	$(MAKE) seed-e2e-only DB_URL="$(E2E_DB_URL)"
-	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_DEV_FIXTURE_INGEST=true ARGUS_DEV_FIXTURE_LIVE_REPLAY=true ARGUS_DEV_FIXTURE_LIVE_REPLAY_SPEED="$(LIVE_DEMO_SPEED)" go run ./cmd/argus-worker &
+	ARGUS_INGEST_PROVIDER=fixture ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_DEV_FIXTURE_INGEST=true ARGUS_DEV_FIXTURE_LIVE_REPLAY=true ARGUS_DEV_FIXTURE_LIVE_REPLAY_SPEED="$(E2E_REPLAY_SPEED)" go run ./cmd/argus-worker &
 	sleep 2
 	ARGUS_DATABASE_URL="$(E2E_DB_URL)" ARGUS_REDIS_URL="$(E2E_REDIS_URL)" ARGUS_HTTP_PORT="$(E2E_HTTP_PORT)" ARGUS_AUTH_ALLOWED_ORIGINS="http://localhost:4173,http://127.0.0.1:4173" go run ./cmd/argus-api 2>&1 | tee "$(E2E_API_LOG)"

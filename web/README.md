@@ -46,9 +46,8 @@ for a reason that isn't obvious from the error alone.
 ## Environment variables
 
 See `.env.example`. `VITE_API_BASE_URL` (default a relative `/api/v1`, proxied
-by the dev server) and `VITE_USE_FIXTURES` (force every hook to serve
-`@/mocks/fixtures`-derived data instead of calling the real API -- offline
-dev, screenshots; shows a small indicator bottom-right while on).
+by the dev server). There is no mock or sample-data mode (Phase 2, D2): the
+app always talks to the real API.
 
 ## Tests
 
@@ -97,11 +96,3 @@ minutes on an assertion that normally resolves in under 15 seconds. The
 whole suite shares one backend and one session deliberately -- it must run
 one test at a time, not fan out.
 
-### Watching it on screen yourself, outside the test suite
-
-`make live-demo` is the one command for that: it seeds the dev fixture
-against the dev `argus` database and runs the worker with the same
-historical-ingest-plus-live-replay combination, so `pnpm dev`'s own already-
-running frontend (pointed at the dev api on :8080) shows real candles moving.
-`LIVE_DEMO_SPEED` (env var, default 60) controls the pace -- 60 means about
-one new candle every real second.

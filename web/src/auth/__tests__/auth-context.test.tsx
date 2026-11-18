@@ -26,9 +26,13 @@ describe("AuthProvider", () => {
     vi.unstubAllEnvs();
   });
 
-  it("bypasses auth entirely in fixtures mode -- no network call, always signed in", async () => {
+  // Phase 2 (D2): mock mode is gone. VITE_USE_FIXTURES no longer signs a
+  // fake user in -- the real session check always runs.
+  it("VITE_USE_FIXTURES no longer bypasses auth: the real /auth/me check runs", async () => {
     vi.stubEnv("VITE_USE_FIXTURES", "true");
-    const fetchMock = vi.fn();
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: { code: "unauthenticated", message: "x" } }), { status: 401 })),
+    );
     global.fetch = fetchMock as unknown as typeof fetch;
 
     render(
@@ -39,8 +43,8 @@ describe("AuthProvider", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText(/status: signedIn/)).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await screen.findByText(/status: signedOut/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalled();
   });
 
   it("the global 401 handler clears state and redirects to /login once registered", async () => {

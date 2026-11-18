@@ -6,7 +6,6 @@ import { preferences } from "@/lib/preferences";
 import { MemoryRouter } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnalysisWorkspaceProvider } from "@/components/workspace/analysis-workspace";
-import { ArgusActivityProvider } from "@/components/workspace/argus-activity-feed";
 import { RightPanel } from "@/components/workspace/right-panel";
 import type { ApiInstrument, ApiInstrumentStats, ApiSetup, ApiSetupEvent } from "@/api/types";
 
@@ -210,9 +209,7 @@ function renderAnalysisRightPanel(initialEntry: string) {
     <MemoryRouter initialEntries={[initialEntry]}>
       <TooltipProvider delayDuration={150}>
         <AnalysisWorkspaceProvider>
-          <ArgusActivityProvider>
             <RightPanel />
-          </ArgusActivityProvider>
         </AnalysisWorkspaceProvider>
       </TooltipProvider>
     </MemoryRouter>,
@@ -284,19 +281,14 @@ describe("/analysis right panel", () => {
     expect(screen.queryByText("90")).toBeNull();
   });
 
-  it("fixture mode (VITE_USE_FIXTURES=true) shows no invented performance numbers", async () => {
+  // Phase 2 (D2): mock mode is gone. Setting VITE_USE_FIXTURES changes
+  // nothing: every figure still comes from the API.
+  it("VITE_USE_FIXTURES has no effect: figures come from the API, never sample numbers", async () => {
     vi.stubEnv("VITE_USE_FIXTURES", "true");
-    // Fixture mode never calls fetch (fixtures-as-api.ts's own
-    // fixturesEnabled() branch in every api/*.ts function) -- a fetch
-    // mock here would never be hit, so none is installed; a stray real
-    // fetch would fail loudly instead of silently passing. There is no
-    // stats source in this mode, so the tiles are absent (em dashes),
-    // not the old fixture percentages. (The app shell's own global
-    // "all data is sample" badge covers this mode; it is outside
-    // RightPanel.)
-    renderAnalysisRightPanel("/analysis");
-    const tile = await screen.findByTestId("perf-1D");
-    expect(tile).toHaveTextContent("—");
+    const setup = makeApiSetup({ id: 1 });
+    installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
+    renderAnalysisRightPanel("/analysis?setupId=1");
+    await waitFor(() => expect(screen.getByTestId("perf-1D")).toHaveTextContent("-1.28%"), STATS_WAIT);
     expect(screen.queryByText(/0\.53|2\.84|4\.12/)).toBeNull();
   });
 
@@ -322,7 +314,7 @@ describe("/analysis right panel", () => {
     expect(screen.getByTestId("data-quality").textContent).not.toMatch(/\b(live|stale|degraded)\b/i);
   });
 
-  it("watchlist tab: real Last/Chg/Chg%, symbol detail from stats, forex as one plain line", async () => {
+  it("watchlist tab: real Last/Chg/Chg%, symbol detail from stats, no forex group", async () => {
     const setup = makeApiSetup({ id: 1 });
     installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
     renderAnalysisRightPanel("/analysis?setupId=1");
@@ -345,10 +337,10 @@ describe("/analysis right panel", () => {
     }, STATS_WAIT);
     expect(screen.getByTestId("symbol-detail")).toHaveTextContent("base asset volume");
 
-    // Rules 3, 5, 6: no average volume, no news, no forex numbers or badge.
+    // Rules 3, 5: no average volume, no news. D2: no forex group at all.
     expect(screen.queryByText(/Avg\. volume/)).toBeNull();
     expect(screen.queryByText(/News/)).toBeNull();
-    expect(screen.getByTestId("forex-not-connected")).toHaveTextContent("Forex is not connected yet");
+    expect(screen.queryByText(/forex/i)).toBeNull();
     expect(screen.queryByText(/GBPUSD|AUDUSD|EURGBP/)).toBeNull();
     expect(screen.queryByText(/Sample/i)).toBeNull();
   });

@@ -1,5 +1,4 @@
 import { ApiClientError, getJSON, putJSON, apiBaseUrl } from "@/api/client";
-import { fixturesEnabled } from "@/mocks/fixtures-as-api";
 import { ConflictError, RejectedError, VersionedSync, type Remote, type SyncAdapter } from "@/lib/versioned-sync";
 import { LocalStorageDrawingsPersistence, type DrawingsPersistence } from "./store";
 import type { Drawing } from "./types";
@@ -168,7 +167,7 @@ export class SyncedDrawingsPersistence implements DrawingsPersistence {
   private ensureSync(scope: string, data: Drawing[]): void {
     const m = SCOPE.exec(scope);
     const userId = this.userId;
-    if (!m || userId === null || this.syncs.has(scope) || fixturesEnabled()) return;
+    if (!m || userId === null || this.syncs.has(scope)) return;
     // Never synced from this browser: every drawing already here is the
     // user's own unsynced work (drawings made before server sync) -- push
     // it, merged onto whatever the server holds, rather than letting an

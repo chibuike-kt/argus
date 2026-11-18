@@ -8,7 +8,8 @@ import { cn } from "@/lib/cn";
 const NAV = [
   { to: "/setups", label: "Setups" },
   { to: "/analysis", label: "Analysis" },
-  { to: "/style", label: "Design system" },
+  // Dev builds only (see main.tsx).
+  ...(import.meta.env.DEV ? [{ to: "/style", label: "Design system" }] : []),
 ];
 
 export function TopBar() {

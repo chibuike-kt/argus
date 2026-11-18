@@ -12,6 +12,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -77,8 +78,16 @@ func main() {
 	// Silent provider fallback guard (checkIngestProvider): log the
 	// active provider loudly, and refuse to start when it was never
 	// chosen explicitly while real-provider instruments are enabled.
-	_, providerSet := os.LookupEnv(ingestProviderEnv)
-	logger.Warn("worker: active ingest provider", "provider", cfg.IngestProvider, "set_explicitly", providerSet)
+	// Set means set to something: an empty value (e.g. compose passing an
+	// unset variable through as "") counts as unset -- the env library
+	// would otherwise quietly substitute its "fixture" default.
+	rawProvider, providerSet := os.LookupEnv(ingestProviderEnv)
+	providerSet = providerSet && strings.TrimSpace(rawProvider) != ""
+	activeProvider := cfg.IngestProvider
+	if !providerSet {
+		activeProvider = "(not set)" // never the config default: nothing is picked silently
+	}
+	logger.Warn("worker: active ingest provider", "provider", activeProvider, "set_explicitly", providerSet)
 	enabledAtStart, err := instrumentStore.ListEnabled(ctx)
 	if err != nil {
 		logger.Error("startup: list enabled instruments", "error", err)
