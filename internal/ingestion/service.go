@@ -21,7 +21,7 @@ import (
 type candleStore interface {
 	GetCurrent(ctx context.Context, instrumentID int64, openTime clock.EventTime) (marketdata.Candle, error)
 	UpsertForming(ctx context.Context, t marketdata.Tick) (marketdata.Candle, error)
-	Close(ctx context.Context, instrumentID int64, openTime clock.EventTime) (marketdata.Candle, error)
+	CloseWith(ctx context.Context, t marketdata.Tick) (marketdata.Candle, error)
 	SupersedeCandle(ctx context.Context, instrumentID int64, openTime clock.EventTime, corr marketdata.Correction) (marketdata.Candle, error)
 	RecordGap(ctx context.Context, instrumentID int64, start, end clock.EventTime) (marketdata.Gap, error)
 	UpsertQuote(ctx context.Context, q marketdata.BidAsk) (marketdata.BidAsk, error)
@@ -238,29 +238,54 @@ func (s *Service) IngestHistorical(ctx context.Context, symbol string, start, en
 func (s *Service) applyCandle(ctx context.Context, nc NormalizedCandle) error {
 	current, err := s.store.GetCurrent(ctx, nc.InstrumentID, nc.OpenTime)
 	switch {
-	case errors.Is(err, marketdata.ErrCandleNotFound):
-		forming, err := s.store.UpsertForming(ctx, toTick(nc))
+	case errors.Is(err, marketdata.ErrCandleNotFound), err == nil && !current.IsClosed:
+		err := s.applyForming(ctx, nc)
+		if !errors.Is(err, marketdata.ErrCandleAlreadyClosed) {
+			return err
+		}
+		// Closed between the read above and the write: someone else (the
+		// live stream, or a concurrent backfill) closed this minute first.
+		// Re-read and treat it as the closed candle it now is.
+		current, err = s.store.GetCurrent(ctx, nc.InstrumentID, nc.OpenTime)
 		if err != nil {
 			return err
 		}
-		if nc.IsFinal {
-			return s.closeCandle(ctx, nc)
-		}
-		s.publishCandleEvent(ctx, hub.EventForming, forming)
-		return nil
+		return s.applyToClosed(ctx, nc, current)
 
 	case err != nil:
 		return err
 
-	case !current.IsClosed:
-		forming, err := s.store.UpsertForming(ctx, toTick(nc))
-		if err != nil {
-			return err
-		}
-		if nc.IsFinal {
-			return s.closeCandle(ctx, nc)
-		}
-		s.publishCandleEvent(ctx, hub.EventForming, forming)
+	default:
+		return s.applyToClosed(ctx, nc, current)
+	}
+}
+
+// applyForming writes nc's values to a not-yet-closed minute and closes it
+// if nc is final. An error wrapping marketdata.ErrCandleAlreadyClosed means
+// the minute was closed concurrently; applyCandle re-dispatches.
+func (s *Service) applyForming(ctx context.Context, nc NormalizedCandle) error {
+	forming, err := s.store.UpsertForming(ctx, toTick(nc))
+	if err != nil {
+		return err
+	}
+	if nc.IsFinal {
+		return s.closeCandle(ctx, nc)
+	}
+	s.publishCandleEvent(ctx, hub.EventForming, forming)
+	return nil
+}
+
+// applyToClosed applies nc to a minute that is already closed (current).
+func (s *Service) applyToClosed(ctx context.Context, nc NormalizedCandle, current marketdata.Candle) error {
+	switch {
+	case !nc.IsFinal:
+		// A FORMING value for a minute already closed is older information
+		// than the close (e.g. a backfill's newest candle, fetched while the
+		// minute was still forming, landing after the live stream closed
+		// it): dropped. It must never overwrite or "correct" a closed
+		// candle -- only a final value can do that, below.
+		s.logger.Debug("ingestion: dropped a forming value for an already-closed minute",
+			"provider", nc.Provider, "instrument_id", nc.InstrumentID, "open_time", nc.OpenTime)
 		return nil
 
 	case candleValuesEqual(current, nc):
@@ -306,8 +331,19 @@ func (s *Service) applyCandle(ctx context.Context, nc NormalizedCandle) error {
 	}
 }
 
+// closeCandle freezes nc's minute with nc's own (final) values in one
+// statement, so a concurrent forming write can never be what gets frozen.
+// If someone else closed the minute first, nc is applied to that closed
+// candle instead (equal: nothing to do; different: the correction path).
 func (s *Service) closeCandle(ctx context.Context, nc NormalizedCandle) error {
-	closed, err := s.store.Close(ctx, nc.InstrumentID, nc.OpenTime)
+	closed, err := s.store.CloseWith(ctx, toTick(nc))
+	if errors.Is(err, marketdata.ErrCandleAlreadyClosed) {
+		current, getErr := s.store.GetCurrent(ctx, nc.InstrumentID, nc.OpenTime)
+		if getErr != nil {
+			return fmt.Errorf("close: %w", getErr)
+		}
+		return s.applyToClosed(ctx, nc, current)
+	}
 	if err != nil {
 		return fmt.Errorf("close: %w", err)
 	}

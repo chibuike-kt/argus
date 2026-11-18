@@ -80,4 +80,12 @@ type Hyperliquid struct {
 	// closed, backfilled and reconnected. 0 disables either.
 	PingInterval time.Duration `env:"ARGUS_HYPERLIQUID_PING_INTERVAL" envDefault:"20s"` // [U]
 	StallTimeout time.Duration `env:"ARGUS_HYPERLIQUID_STALL_TIMEOUT" envDefault:"60s"` // [U]
+
+	// IntegrityScanInterval is how often, while streaming, the worker scans
+	// the stored series (the last BackfillDays) for holes and backfills
+	// them; it also runs after the startup and every reconnect backfill.
+	// [U] 10 minutes (proposed): holes come from stream drops, which the
+	// reconnect path already scans after, so this is the safety net for a
+	// hole nothing else noticed. 0 disables the periodic run.
+	IntegrityScanInterval time.Duration `env:"ARGUS_HYPERLIQUID_INTEGRITY_SCAN_INTERVAL" envDefault:"10m"` // [U]
 }

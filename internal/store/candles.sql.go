@@ -79,6 +79,90 @@ func (q *Queries) CloseCandle(ctx context.Context, arg CloseCandleParams) (Candl
 	return i, err
 }
 
+const closeCandleWithValues = `-- name: CloseCandleWithValues :one
+UPDATE candles
+SET open = $3, high = $4, low = $5, close = $6, volume = $7,
+    tick_aligned = $8, provider = $9, ingested_at = $10, is_closed = true
+WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL AND is_closed = false
+RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by
+`
+
+type CloseCandleWithValuesParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	OpenTime     time.Time `json:"open_time"`
+	Open         int64     `json:"open"`
+	High         int64     `json:"high"`
+	Low          int64     `json:"low"`
+	Close        int64     `json:"close"`
+	Volume       int64     `json:"volume"`
+	TickAligned  bool      `json:"tick_aligned"`
+	Provider     string    `json:"provider"`
+	IngestedAt   time.Time `json:"ingested_at"`
+}
+
+// CloseCandleWithValues freezes a forming candle WITH the final values in
+// the same statement. Closing with whatever the row happens to hold (as
+// CloseCandle does) lets a concurrent writer's stale forming value -- a
+// REST backfill fetched while the minute was still forming -- land between
+// this writer's upsert and its close and be frozen as the closed candle.
+// Zero rows: the minute is already closed, or does not exist.
+func (q *Queries) CloseCandleWithValues(ctx context.Context, arg CloseCandleWithValuesParams) (Candle, error) {
+	row := q.db.QueryRowContext(ctx, closeCandleWithValues,
+		arg.InstrumentID,
+		arg.OpenTime,
+		arg.Open,
+		arg.High,
+		arg.Low,
+		arg.Close,
+		arg.Volume,
+		arg.TickAligned,
+		arg.Provider,
+		arg.IngestedAt,
+	)
+	var i Candle
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.OpenTime,
+		&i.CloseTime,
+		&i.Open,
+		&i.High,
+		&i.Low,
+		&i.Close,
+		&i.Volume,
+		&i.Revision,
+		&i.IsClosed,
+		&i.TickAligned,
+		&i.Provider,
+		&i.IngestedAt,
+		&i.SupersededAt,
+		&i.SupersededBy,
+	)
+	return i, err
+}
+
+const countClosedCandlesInRange = `-- name: CountClosedCandlesInRange :one
+SELECT count(*)::bigint FROM candles
+WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+  AND open_time >= $2::timestamptz AND open_time < $3::timestamptz
+`
+
+type CountClosedCandlesInRangeParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	FromTime     time.Time `json:"from_time"`
+	ToTime       time.Time `json:"to_time"`
+}
+
+// CountClosedCandlesInRange counts current, closed 1-minute candles with
+// open_time in [from_time, to_time) -- the integrity scan's "how many of
+// this hole's minutes are now filled" check.
+func (q *Queries) CountClosedCandlesInRange(ctx context.Context, arg CountClosedCandlesInRangeParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countClosedCandlesInRange, arg.InstrumentID, arg.FromTime, arg.ToTime)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const getCandleStatsInputs = `-- name: GetCandleStatsInputs :one
 WITH latest AS (
     SELECT c.open_time, c.close
@@ -506,6 +590,97 @@ func (q *Queries) ListCurrentCandlesInRange(ctx context.Context, arg ListCurrent
 	return items, nil
 }
 
+const listMissingCandleRanges = `-- name: ListMissingCandleRanges :many
+WITH missing AS (
+    SELECT m AS open_time
+    FROM generate_series(
+        -- Start at the first stored candle in the window, not before it:
+        -- minutes before an instrument's history begins are not holes.
+        greatest($1::timestamptz, (
+            SELECT min(c0.open_time) FROM candles c0
+            WHERE c0.instrument_id = $2 AND c0.superseded_at IS NULL
+              AND c0.is_closed = true AND c0.open_time >= $1::timestamptz)),
+        $3::timestamptz - interval '1 minute', interval '1 minute') AS m
+    WHERE NOT EXISTS (
+        SELECT 1 FROM candles c
+        WHERE c.instrument_id = $2 AND c.open_time = m
+          AND c.superseded_at IS NULL AND c.is_closed = true
+    )
+    AND NOT (m < $4::timestamptz AND EXISTS (
+        SELECT 1 FROM candle_gaps g
+        WHERE g.instrument_id = $2 AND g.resolved_at IS NULL
+          AND m >= g.gap_start AND m < g.gap_end
+    ))
+), grouped AS (
+    SELECT open_time, open_time - (row_number() OVER (ORDER BY open_time)) * interval '1 minute' AS grp
+    FROM missing
+)
+SELECT min(open_time)::timestamptz AS gap_start,
+       (max(open_time) + interval '1 minute')::timestamptz AS gap_end,
+       count(*)::bigint AS minutes
+FROM grouped
+GROUP BY grp
+ORDER BY gap_start
+`
+
+type ListMissingCandleRangesParams struct {
+	FromTime     time.Time `json:"from_time"`
+	InstrumentID int64     `json:"instrument_id"`
+	ToTime       time.Time `json:"to_time"`
+	LostBefore   time.Time `json:"lost_before"`
+}
+
+type ListMissingCandleRangesRow struct {
+	GapStart time.Time `json:"gap_start"`
+	GapEnd   time.Time `json:"gap_end"`
+	Minutes  int64     `json:"minutes"`
+}
+
+// ListMissingCandleRanges is the integrity scan's one statement: every
+// minute in [from_time, to_time) with no current, closed 1-minute candle,
+// grouped into consecutive ranges [gap_start, gap_end), starting at the
+// first stored closed candle at or after from_time. Minutes older than
+// lost_before (the exchange's retention edge) that an OPEN candle_gaps row
+// already covers are skipped: known, recorded holes that can never be
+// fetched, so they are not reported or recorded again on every scan.
+// Minutes inside retention are always returned, whatever candle_gaps says:
+// an open gap row there is no proof the minutes cannot be fetched (the
+// dev stack has hundreds of unaligned, unresolved rows recorded by the
+// periodic backfill's own tail), and a fetchable hole must be filled. The series steps a fixed 1 minute, so the session TimeZone
+// (and DST) cannot change which minutes are expected.
+//
+// Cost: one index probe on idx_candles_current per expected minute (the
+// anti-join) plus a probe of candle_gaps -- O(window minutes), independent
+// of total history; the grouping is one window function over the missing
+// minutes only.
+func (q *Queries) ListMissingCandleRanges(ctx context.Context, arg ListMissingCandleRangesParams) ([]ListMissingCandleRangesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listMissingCandleRanges,
+		arg.FromTime,
+		arg.InstrumentID,
+		arg.ToTime,
+		arg.LostBefore,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMissingCandleRangesRow{}
+	for rows.Next() {
+		var i ListMissingCandleRangesRow
+		if err := rows.Scan(&i.GapStart, &i.GapEnd, &i.Minutes); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const resolveSupersedeCandle = `-- name: ResolveSupersedeCandle :execrows
 UPDATE candles
 SET superseded_by = $2
@@ -541,6 +716,7 @@ DO UPDATE SET
     tick_aligned = EXCLUDED.tick_aligned,
     provider = EXCLUDED.provider,
     ingested_at = EXCLUDED.ingested_at
+WHERE candles.is_closed = false
 RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by
 `
 
@@ -561,10 +737,16 @@ type UpsertFormingCandleParams struct {
 // UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 // a still-forming row in place for a later tick of the same minute.
 // idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE
-// superseded_at IS NULL) is exactly the conflict target. If the existing
-// current row is already closed, trg_candles_enforce_lifecycle rejects the
-// UPDATE outright -- a tick arriving for an already-closed minute is a
-// caller bug, not a case this query papers over.
+// superseded_at IS NULL) is exactly the conflict target.
+//
+// An already-CLOSED current row is never touched: the DO UPDATE only
+// applies WHERE the row is still forming, so a closed row yields zero rows
+// (the store reports ErrCandleAlreadyClosed) instead of the UPDATE reaching
+// trg_candles_enforce_lifecycle's "closed: OHLCV and is_closed are frozen"
+// rejection. That case is a real race, not a caller bug: a REST backfill
+// reads a minute as still forming, the live stream closes it, then the
+// backfill writes its (older) forming value -- seen on the dev stack
+// 2026-11-17T00:34:59Z. A forming value must never overwrite a close.
 func (q *Queries) UpsertFormingCandle(ctx context.Context, arg UpsertFormingCandleParams) (Candle, error) {
 	row := q.db.QueryRowContext(ctx, upsertFormingCandle,
 		arg.InstrumentID,

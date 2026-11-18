@@ -35,6 +35,13 @@ type Querier interface {
 	// than a confusing trigger error (guide 14: queue/worker retries must not
 	// turn a repeat delivery into a spurious failure).
 	CloseCandle(ctx context.Context, arg CloseCandleParams) (Candle, error)
+	// CloseCandleWithValues freezes a forming candle WITH the final values in
+	// the same statement. Closing with whatever the row happens to hold (as
+	// CloseCandle does) lets a concurrent writer's stale forming value -- a
+	// REST backfill fetched while the minute was still forming -- land between
+	// this writer's upsert and its close and be frozen as the closed candle.
+	// Zero rows: the minute is already closed, or does not exist.
+	CloseCandleWithValues(ctx context.Context, arg CloseCandleWithValuesParams) (Candle, error)
 	// ConsumeEmailToken marks a token used and returns the row, atomically,
 	// only if it exists for the given purpose, has not been used yet, and
 	// has not expired -- one statement, not a separate check-then-mark
@@ -47,6 +54,10 @@ type Querier interface {
 	// atomically, only if it exists, has not been used yet, and has not
 	// expired -- the same single-use shape as ConsumeEmailToken.
 	ConsumeSignupTicket(ctx context.Context, arg ConsumeSignupTicketParams) (SignupVerification, error)
+	// CountClosedCandlesInRange counts current, closed 1-minute candles with
+	// open_time in [from_time, to_time) -- the integrity scan's "how many of
+	// this hole's minutes are now filled" check.
+	CountClosedCandlesInRange(ctx context.Context, arg CountClosedCandlesInRangeParams) (int64, error)
 	CountWatchlistItems(ctx context.Context, userID int64) (int64, error)
 	DeleteWatchlistItems(ctx context.Context, userID int64) error
 	// EarliestCurrentSwingAfter finds the swing immediately following a
@@ -362,6 +373,24 @@ type Querier interface {
 	// RightBars+1 intervals), and such a swing must never be treated as
 	// "the most recent confirmed swing" as of a historical asOf.
 	ListLatestCurrentSwingsConfirmedBefore(ctx context.Context, arg ListLatestCurrentSwingsConfirmedBeforeParams) ([]ConfirmedSwing, error)
+	// ListMissingCandleRanges is the integrity scan's one statement: every
+	// minute in [from_time, to_time) with no current, closed 1-minute candle,
+	// grouped into consecutive ranges [gap_start, gap_end), starting at the
+	// first stored closed candle at or after from_time. Minutes older than
+	// lost_before (the exchange's retention edge) that an OPEN candle_gaps row
+	// already covers are skipped: known, recorded holes that can never be
+	// fetched, so they are not reported or recorded again on every scan.
+	// Minutes inside retention are always returned, whatever candle_gaps says:
+	// an open gap row there is no proof the minutes cannot be fetched (the
+	// dev stack has hundreds of unaligned, unresolved rows recorded by the
+	// periodic backfill's own tail), and a fetchable hole must be filled. The series steps a fixed 1 minute, so the session TimeZone
+	// (and DST) cannot change which minutes are expected.
+	//
+	// Cost: one index probe on idx_candles_current per expected minute (the
+	// anti-join) plus a probe of candle_gaps -- O(window minutes), independent
+	// of total history; the grouping is one window function over the missing
+	// minutes only.
+	ListMissingCandleRanges(ctx context.Context, arg ListMissingCandleRangesParams) ([]ListMissingCandleRangesRow, error)
 	// ListNonTerminalSetupsForBreachCheck is InvalidateBreached's own read
 	// path (internal/setups, spec v0.12.1): every non-terminal setup
 	// (detected, actionable, triggered -- invalidated is terminal and
@@ -477,10 +506,16 @@ type Querier interface {
 	// UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 	// a still-forming row in place for a later tick of the same minute.
 	// idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE
-	// superseded_at IS NULL) is exactly the conflict target. If the existing
-	// current row is already closed, trg_candles_enforce_lifecycle rejects the
-	// UPDATE outright -- a tick arriving for an already-closed minute is a
-	// caller bug, not a case this query papers over.
+	// superseded_at IS NULL) is exactly the conflict target.
+	//
+	// An already-CLOSED current row is never touched: the DO UPDATE only
+	// applies WHERE the row is still forming, so a closed row yields zero rows
+	// (the store reports ErrCandleAlreadyClosed) instead of the UPDATE reaching
+	// trg_candles_enforce_lifecycle's "closed: OHLCV and is_closed are frozen"
+	// rejection. That case is a real race, not a caller bug: a REST backfill
+	// reads a minute as still forming, the live stream closes it, then the
+	// backfill writes its (older) forming value -- seen on the dev stack
+	// 2026-11-17T00:34:59Z. A forming value must never overwrite a close.
 	UpsertFormingCandle(ctx context.Context, arg UpsertFormingCandleParams) (Candle, error)
 	// UpsertLatestQuote rejects an out-of-order quote rather than letting it
 	// silently overwrite a newer one: the WHERE clause on DO UPDATE only fires

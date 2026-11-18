@@ -60,10 +60,16 @@ LIMIT $2;
 -- UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 -- a still-forming row in place for a later tick of the same minute.
 -- idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE
--- superseded_at IS NULL) is exactly the conflict target. If the existing
--- current row is already closed, trg_candles_enforce_lifecycle rejects the
--- UPDATE outright -- a tick arriving for an already-closed minute is a
--- caller bug, not a case this query papers over.
+-- superseded_at IS NULL) is exactly the conflict target.
+--
+-- An already-CLOSED current row is never touched: the DO UPDATE only
+-- applies WHERE the row is still forming, so a closed row yields zero rows
+-- (the store reports ErrCandleAlreadyClosed) instead of the UPDATE reaching
+-- trg_candles_enforce_lifecycle's "closed: OHLCV and is_closed are frozen"
+-- rejection. That case is a real race, not a caller bug: a REST backfill
+-- reads a minute as still forming, the live stream closes it, then the
+-- backfill writes its (older) forming value -- seen on the dev stack
+-- 2026-11-17T00:34:59Z. A forming value must never overwrite a close.
 -- name: UpsertFormingCandle :one
 INSERT INTO candles (
     instrument_id, open_time, close_time, open, high, low, close, volume,
@@ -80,6 +86,7 @@ DO UPDATE SET
     tick_aligned = EXCLUDED.tick_aligned,
     provider = EXCLUDED.provider,
     ingested_at = EXCLUDED.ingested_at
+WHERE candles.is_closed = false
 RETURNING *;
 
 -- CloseCandle freezes a forming candle. The is_closed = false guard makes a
@@ -91,6 +98,19 @@ RETURNING *;
 -- name: CloseCandle :one
 UPDATE candles
 SET is_closed = true
+WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL AND is_closed = false
+RETURNING *;
+
+-- CloseCandleWithValues freezes a forming candle WITH the final values in
+-- the same statement. Closing with whatever the row happens to hold (as
+-- CloseCandle does) lets a concurrent writer's stale forming value -- a
+-- REST backfill fetched while the minute was still forming -- land between
+-- this writer's upsert and its close and be frozen as the closed candle.
+-- Zero rows: the minute is already closed, or does not exist.
+-- name: CloseCandleWithValues :one
+UPDATE candles
+SET open = $3, high = $4, low = $5, close = $6, volume = $7,
+    tick_aligned = $8, provider = $9, ingested_at = $10, is_closed = true
 WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL AND is_closed = false
 RETURNING *;
 
@@ -185,3 +205,60 @@ CROSS JOIN LATERAL (
       AND v.open_time > latest.open_time - sqlc.arg(volume_window_seconds)::bigint * interval '1 second'
       AND v.open_time <= latest.open_time
 ) vol;
+
+-- ListMissingCandleRanges is the integrity scan's one statement: every
+-- minute in [from_time, to_time) with no current, closed 1-minute candle,
+-- grouped into consecutive ranges [gap_start, gap_end), starting at the
+-- first stored closed candle at or after from_time. Minutes older than
+-- lost_before (the exchange's retention edge) that an OPEN candle_gaps row
+-- already covers are skipped: known, recorded holes that can never be
+-- fetched, so they are not reported or recorded again on every scan.
+-- Minutes inside retention are always returned, whatever candle_gaps says:
+-- an open gap row there is no proof the minutes cannot be fetched (the
+-- dev stack has hundreds of unaligned, unresolved rows recorded by the
+-- periodic backfill's own tail), and a fetchable hole must be filled. The series steps a fixed 1 minute, so the session TimeZone
+-- (and DST) cannot change which minutes are expected.
+--
+-- Cost: one index probe on idx_candles_current per expected minute (the
+-- anti-join) plus a probe of candle_gaps -- O(window minutes), independent
+-- of total history; the grouping is one window function over the missing
+-- minutes only.
+-- name: ListMissingCandleRanges :many
+WITH missing AS (
+    SELECT m AS open_time
+    FROM generate_series(
+        -- Start at the first stored candle in the window, not before it:
+        -- minutes before an instrument's history begins are not holes.
+        greatest(sqlc.arg(from_time)::timestamptz, (
+            SELECT min(c0.open_time) FROM candles c0
+            WHERE c0.instrument_id = sqlc.arg(instrument_id) AND c0.superseded_at IS NULL
+              AND c0.is_closed = true AND c0.open_time >= sqlc.arg(from_time)::timestamptz)),
+        sqlc.arg(to_time)::timestamptz - interval '1 minute', interval '1 minute') AS m
+    WHERE NOT EXISTS (
+        SELECT 1 FROM candles c
+        WHERE c.instrument_id = sqlc.arg(instrument_id) AND c.open_time = m
+          AND c.superseded_at IS NULL AND c.is_closed = true
+    )
+    AND NOT (m < sqlc.arg(lost_before)::timestamptz AND EXISTS (
+        SELECT 1 FROM candle_gaps g
+        WHERE g.instrument_id = sqlc.arg(instrument_id) AND g.resolved_at IS NULL
+          AND m >= g.gap_start AND m < g.gap_end
+    ))
+), grouped AS (
+    SELECT open_time, open_time - (row_number() OVER (ORDER BY open_time)) * interval '1 minute' AS grp
+    FROM missing
+)
+SELECT min(open_time)::timestamptz AS gap_start,
+       (max(open_time) + interval '1 minute')::timestamptz AS gap_end,
+       count(*)::bigint AS minutes
+FROM grouped
+GROUP BY grp
+ORDER BY gap_start;
+
+-- CountClosedCandlesInRange counts current, closed 1-minute candles with
+-- open_time in [from_time, to_time) -- the integrity scan's "how many of
+-- this hole's minutes are now filled" check.
+-- name: CountClosedCandlesInRange :one
+SELECT count(*)::bigint FROM candles
+WHERE instrument_id = sqlc.arg(instrument_id) AND superseded_at IS NULL AND is_closed = true
+  AND open_time >= sqlc.arg(from_time)::timestamptz AND open_time < sqlc.arg(to_time)::timestamptz;

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lib/pq"
+
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/store"
 )
@@ -30,14 +32,14 @@ func NewStore(db *sql.DB, clk clock.Clock) *Store {
 // UpsertForming records one tick of a forming (not yet closed) candle: the
 // first tick for a given (instrument, open_time) creates the row at
 // revision 1; a later tick for the same minute overwrites it in place.
-// Calling this once the candle is already closed is a caller bug, and
-// trg_candles_enforce_lifecycle rejects it rather than this method papering
-// over it.
+// If that minute is already closed, nothing is written and the error wraps
+// ErrCandleAlreadyClosed: a forming value never overwrites a close (the
+// caller decides what a FINAL value for a closed minute means).
 func (s *Store) UpsertForming(ctx context.Context, t Tick) (Candle, error) {
 	if err := t.validate(); err != nil {
 		return Candle{}, err
 	}
-	row, err := s.q.UpsertFormingCandle(ctx, store.UpsertFormingCandleParams{
+	params := store.UpsertFormingCandleParams{
 		InstrumentID: t.InstrumentID,
 		OpenTime:     t.OpenTime.Time(),
 		CloseTime:    t.closeTime(),
@@ -49,7 +51,21 @@ func (s *Store) UpsertForming(ctx context.Context, t Tick) (Candle, error) {
 		TickAligned:  t.TickAligned,
 		Provider:     t.Provider,
 		IngestedAt:   t.IngestedAt.Time(),
-	})
+	}
+	row, err := s.q.UpsertFormingCandle(ctx, params)
+	if isRevisionUniqueViolation(err) {
+		// Two writers created the same new minute at the same instant (the
+		// live stream and a backfill): the second insert can collide on the
+		// (instrument_id, open_time, revision) constraint before the
+		// ON CONFLICT arbiter sees the first row. The row exists now, so one
+		// retry resolves through the ordinary conflict path.
+		row, err = s.q.UpsertFormingCandle(ctx, params)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		// The current row at this minute is already closed (the upsert only
+		// updates a forming row): the forming value is refused, untouched.
+		return Candle{}, fmt.Errorf("marketdata: upsert forming candle instrument=%d open_time=%s: %w", t.InstrumentID, t.OpenTime, ErrCandleAlreadyClosed)
+	}
 	if err != nil {
 		return Candle{}, fmt.Errorf("marketdata: upsert forming candle instrument=%d open_time=%s: %w", t.InstrumentID, t.OpenTime, err)
 	}
@@ -91,6 +107,46 @@ func (s *Store) Close(ctx context.Context, instrumentID int64, openTime clock.Ev
 		// zero rows -- the WHERE clauses on both queries are identical
 		// except for is_closed, so this should not be reachable.
 		return Candle{}, fmt.Errorf("marketdata: close candle instrument=%d open_time=%s: candle exists, is not closed, yet the close update matched no rows", instrumentID, openTime)
+	}
+}
+
+// CloseWith freezes the forming candle at (t.InstrumentID, t.OpenTime) with
+// t's values, in one statement -- the final values, not whatever a
+// concurrent writer last left in the row. If the minute is already closed
+// the error wraps ErrCandleAlreadyClosed (the caller compares or corrects);
+// if no row exists, ErrCandleNotFound.
+func (s *Store) CloseWith(ctx context.Context, t Tick) (Candle, error) {
+	if err := t.validate(); err != nil {
+		return Candle{}, err
+	}
+	row, err := s.q.CloseCandleWithValues(ctx, store.CloseCandleWithValuesParams{
+		InstrumentID: t.InstrumentID,
+		OpenTime:     t.OpenTime.Time(),
+		Open:         int64(t.Open),
+		High:         int64(t.High),
+		Low:          int64(t.Low),
+		Close:        int64(t.Close),
+		Volume:       int64(t.Volume),
+		TickAligned:  t.TickAligned,
+		Provider:     t.Provider,
+		IngestedAt:   t.IngestedAt.Time(),
+	})
+	if err == nil {
+		return fromCandleRow(row), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Candle{}, fmt.Errorf("marketdata: close candle with values instrument=%d open_time=%s: %w", t.InstrumentID, t.OpenTime, err)
+	}
+	current, getErr := s.q.GetCurrentCandle(ctx, store.GetCurrentCandleParams{InstrumentID: t.InstrumentID, OpenTime: t.OpenTime.Time()})
+	switch {
+	case errors.Is(getErr, sql.ErrNoRows):
+		return Candle{}, fmt.Errorf("marketdata: close candle with values instrument=%d open_time=%s: %w", t.InstrumentID, t.OpenTime, ErrCandleNotFound)
+	case getErr != nil:
+		return Candle{}, fmt.Errorf("marketdata: close candle with values instrument=%d open_time=%s: %w", t.InstrumentID, t.OpenTime, getErr)
+	case current.IsClosed:
+		return Candle{}, fmt.Errorf("marketdata: close candle with values instrument=%d open_time=%s: %w", t.InstrumentID, t.OpenTime, ErrCandleAlreadyClosed)
+	default:
+		return Candle{}, fmt.Errorf("marketdata: close candle with values instrument=%d open_time=%s: row is forming yet the close matched no rows", t.InstrumentID, t.OpenTime)
 	}
 }
 
@@ -282,4 +338,15 @@ func toNullTime(t *time.Time) sql.NullTime {
 		return sql.NullTime{}
 	}
 	return sql.NullTime{Time: *t, Valid: true}
+}
+
+// candleRevisionKey is the unique constraint on (instrument_id, open_time,
+// revision) -- distinct from idx_candles_current, the upsert's arbiter.
+const candleRevisionKey = "candles_instrument_id_open_time_revision_key"
+
+// isRevisionUniqueViolation reports a unique violation (23505) on
+// candleRevisionKey: the concurrent-first-insert case UpsertForming retries.
+func isRevisionUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23505" && pqErr.Constraint == candleRevisionKey
 }
