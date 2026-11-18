@@ -56,20 +56,13 @@ func inst(provider, symbol string) instruments.Instrument {
 	return instruments.Instrument{Provider: provider, NativeSymbol: symbol, Enabled: true}
 }
 
-// (5) Provider unset while Hyperliquid instruments are enabled: refuse.
-func TestCheckIngestProvider_UnsetWithRealInstrumentsRefuses(t *testing.T) {
-	_, err := checkIngestProvider(false, "fixture", []instruments.Instrument{inst("fixture", "BTC-PERP"), inst("hyperliquid", "ETH"), inst("hyperliquid", "BTC")})
-	if err == nil {
-		t.Fatal("want refusal when ARGUS_INGEST_PROVIDER is unset and hyperliquid instruments are enabled")
-	}
-	if !strings.Contains(err.Error(), "hyperliquid (BTC, ETH)") || !strings.Contains(err.Error(), "ARGUS_INGEST_PROVIDER") {
-		t.Fatalf("error does not name the provider and instruments: %v", err)
-	}
-}
-
-func TestCheckIngestProvider_UnsetFixtureOnlyStarts(t *testing.T) {
-	if w, err := checkIngestProvider(false, "fixture", []instruments.Instrument{inst("fixture", "BTC-PERP")}); err != nil || w != "" {
-		t.Fatalf("w=%q err=%v, want a clean start with only fixture instruments", w, err)
+// Phase 2 (D2): unset always refuses, even with only fixture instruments
+// enabled (or none) -- the provider is never chosen by default.
+func TestCheckIngestProvider_UnsetAlwaysRefuses(t *testing.T) {
+	for _, enabled := range [][]instruments.Instrument{nil, {inst("fixture", "BTC-PERP")}} {
+		if _, err := checkIngestProvider(false, "fixture", enabled); err == nil || !strings.Contains(err.Error(), "ARGUS_INGEST_PROVIDER is not set") {
+			t.Fatalf("enabled=%v: err = %v, want a refusal", enabled, err)
+		}
 	}
 }
 

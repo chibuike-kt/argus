@@ -18,18 +18,21 @@ const ingestProviderEnv = "ARGUS_INGEST_PROVIDER"
 const fixtureProvider = "fixture"
 
 // checkIngestProvider is the startup guard against a silent provider
-// fallback: a worker that quietly runs the fixture default while real-
-// provider instruments are enabled looks healthy ("tick complete")
-// while ingesting nothing for them.
+// fallback: a worker that quietly runs the fixture default looks healthy
+// ("tick complete") while ingesting nothing real.
 //
-//   - ARGUS_INGEST_PROVIDER unset and any enabled instrument has a
-//     non-fixture provider: refuse to start (err).
-//   - set, but no enabled instrument of a non-fixture provider will be
-//     fed by it (e.g. explicitly "fixture" with Hyperliquid instruments
-//     enabled): start, but return a loud warning naming them.
+//   - ARGUS_INGEST_PROVIDER unset: refuse to start (err), always -- the
+//     provider must be chosen explicitly (Phase 2, D2: the product runs
+//     Hyperliquid; the e2e stack sets "fixture" on purpose).
+//   - set, but some enabled instruments use a provider it does not feed
+//     (e.g. "fixture" with Hyperliquid instruments enabled): start, but
+//     return a loud warning naming them.
 //
 // enabled is every enabled instrument.
 func checkIngestProvider(envSet bool, provider string, enabled []instruments.Instrument) (warning string, err error) {
+	if !envSet {
+		return "", fmt.Errorf("%s is not set -- the worker never picks an ingest provider by default; set it explicitly (hyperliquid for the real stack, fixture only for the e2e stack)", ingestProviderEnv)
+	}
 	unfed := map[string][]string{}
 	for _, inst := range enabled {
 		if inst.Provider == fixtureProvider || inst.Provider == provider {
@@ -47,10 +50,5 @@ func checkIngestProvider(envSet bool, provider string, enabled []instruments.Ins
 	}
 	sort.Strings(providers)
 	list := strings.Join(providers, "; ")
-
-	if !envSet {
-		return "", fmt.Errorf("%s is not set, so the worker would fall back to %q, but enabled instruments use another provider: %s -- set %s explicitly (e.g. hyperliquid) or disable those instruments",
-			ingestProviderEnv, provider, list, ingestProviderEnv)
-	}
 	return fmt.Sprintf("%s=%s does not ingest these enabled instruments; they will receive no new candles: %s", ingestProviderEnv, provider, list), nil
 }

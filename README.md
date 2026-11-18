@@ -41,8 +41,13 @@ make tools
 
 ## Quick start
 
+ARGUS runs on real Hyperliquid market data only (Phase 2, D2). There is no
+mock or sample mode.
+
 ```bash
-# 1. deps and env
+# 1. deps and env -- copies .env.example to .env, which sets
+#    ARGUS_INGEST_PROVIDER=hyperliquid (the worker refuses to start
+#    without it) and ARGUS_HYPERLIQUID_SYMBOLS=BTC,ETH,SOL
 make setup
 
 # 2. start postgres + redis
@@ -51,26 +56,40 @@ make infra
 # 3. apply migrations
 make migrate-up
 
-# 4. seed dev/test instruments (DEV/TEST ONLY, never against production)
-make seed-dev
+# 4. register the Hyperliquid instruments. They are created DISABLED; the
+#    command prints the SQL to enable them. Run that SQL yourself, for the
+#    symbols you want (nothing in code ever enables an instrument, ADR-007).
+make sync-instruments
 
 # 5. run the API (new terminal)
 make run-api
 
-# 6. run the worker with the dev dataset replay (new terminal) -- without
-# ARGUS_DEV_FIXTURE_INGEST the worker has nothing to process: nothing else
-# feeds it a candle yet (ADR-007 is still open, see docs/status/project-status.md)
-ARGUS_DEV_FIXTURE_INGEST=true make run-worker
+# 6. run the worker (new terminal): it backfills the enabled instruments
+#    from Hyperliquid, then streams live candles
+make run-worker
 
-# 7. frontend dev server (new terminal) -- wired to the real API above
-# (web/src/api); set VITE_USE_FIXTURES=true in web/.env instead to force
-# static sample data with no backend running (see web/.env.example)
+# 7. frontend dev server (new terminal), wired to the API above
 make web-dev
 ```
 
-Once all four are running, `/setups` and `/analysis` in the frontend show real
-setups computed from the replayed dev dataset. See `web/README.md` for the
-frontend's own API layer, environment variables, and test commands.
+Or run the whole backend in Docker with `make up` (the same `.env` supplies
+`ARGUS_INGEST_PROVIDER`; without it the worker container exits with a clear
+message and postgres, redis and the API still run).
+
+Once running, `/analysis` shows the enabled Hyperliquid instruments with
+live candles. See `web/README.md` for the frontend's own API layer,
+environment variables, and test commands.
+
+**An existing dev database with the old fixture instruments:** hide them by
+hand (nothing in code does this):
+
+```sql
+UPDATE instruments SET enabled = FALSE WHERE provider = 'fixture';
+```
+
+The fixture dataset survives only for the end-to-end test stack
+(`make e2e-stack`, its own `argus_e2e` database, `ARGUS_INGEST_PROVIDER=fixture`
+set there explicitly).
 
 Check the API:
 
