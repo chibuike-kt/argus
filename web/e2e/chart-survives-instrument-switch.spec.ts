@@ -120,7 +120,10 @@ test("switching instrument and back keeps the saved chart view for each instrume
   if (!box) throw new Error("chart host has no bounding box");
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.wheel(0, -400); // zoom in
-  await page.waitForTimeout(300); // let the save land
+  // A wheel zoom is followed by a few small range adjustments from the
+  // library itself; within the 1 s gesture window those are saved too.
+  // Read the saved view only after that window has passed.
+  await page.waitForTimeout(1500);
 
   // Saved views are preferences now (D1): read the page's own cached copy
   // of the signed-in user's preferences, keyed "<instrument_id>:<timeframe>".
@@ -172,7 +175,10 @@ test("switching instrument and back keeps the saved chart view for each instrume
   const parseView = (raw: string) => JSON.parse(raw) as { from_time: number; to_time: number; bars_visible: number };
   const zoomed = parseView(btcViewAfterZoom!);
   const returned = parseView(btcViewAfterReturn!);
-  expect(returned.from_time).toBe(zoomed.from_time);
-  expect(returned.to_time).toBe(zoomed.to_time);
+  // Same view to within one bar (the first fully visible bar can move by
+  // one as the library settles a fractional range).
+  const oneBar = 60; // 1m chart, seconds
+  expect(Math.abs(returned.from_time - zoomed.from_time)).toBeLessThanOrEqual(oneBar);
+  expect(Math.abs(returned.to_time - zoomed.to_time)).toBeLessThanOrEqual(oneBar);
   expect(Math.abs(returned.bars_visible - zoomed.bars_visible)).toBeLessThanOrEqual(1);
 });

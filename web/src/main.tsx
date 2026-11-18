@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { RouterProvider, createBrowserRouter, Navigate, Outlet, useLocation } from "react-router-dom";
 
@@ -18,7 +18,6 @@ import "@fontsource/ibm-plex-mono/600.css";
 import "./styles/theme.css";
 
 import { AppShell } from "@/components/layout/app-shell";
-import { StyleGuide } from "@/routes/style-guide";
 import { AnalysisPreview } from "@/routes/analysis-preview";
 import { Setups } from "@/routes/setups";
 import { Account } from "@/routes/account";
@@ -31,6 +30,14 @@ import { Privacy } from "@/routes/privacy";
 import { AuthProvider } from "@/auth/auth-context";
 import { RequireAuth } from "@/auth/require-auth";
 import { RequireOnboarded } from "@/auth/require-onboarded";
+
+// The design-system page is a developer tool with specimen numbers and
+// symbols: it exists in dev builds only. import.meta.env.DEV is false in a
+// production build, so this lazy import (and the page's chunk) is dropped
+// there entirely (Phase 2, D2: nothing sample-looking ships).
+const StyleGuide = import.meta.env.DEV
+  ? lazy(() => import("@/routes/style-guide").then((m) => ({ default: m.StyleGuide })))
+  : null;
 import { PublicOnly } from "@/auth/public-only";
 
 // /login is now just a redirect to /sign-in (web light auth redesign
@@ -81,7 +88,9 @@ const router = createBrowserRouter([
                   { path: "analysis", element: <AnalysisPreview /> },
                   { path: "setups", element: <Setups /> },
                   { path: "account", element: <Account /> },
-                  { path: "style", element: <StyleGuide /> },
+                  ...(StyleGuide
+                    ? [{ path: "style", element: <Suspense fallback={null}><StyleGuide /></Suspense> }]
+                    : []),
                 ],
               },
             ],

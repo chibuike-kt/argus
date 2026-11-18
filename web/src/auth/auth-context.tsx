@@ -3,7 +3,6 @@ import { useNavigate, useLocation } from "react-router-dom";
 import * as authApi from "@/api/auth";
 import { setUnauthorizedHandler } from "@/api/client";
 import type { ApiAuthUser } from "@/api/types";
-import { fixturesEnabled } from "@/mocks/fixtures-as-api";
 import { preferences } from "@/lib/preferences";
 import { getDrawingsPersistence } from "@/components/chart/drawings/store";
 
@@ -29,22 +28,9 @@ export interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-// A fixed fixture user (web auth UI brief, Part A2): VITE_USE_FIXTURES
-// makes no network call at all and is always "signed in", so offline
-// dev and the style guide keep working exactly as before this brief.
-const FIXTURE_USER: ApiAuthUser = {
-  id: 0,
-  email: "sample@argus.local",
-  email_verified: true,
-  created_at: new Date(0).toISOString(),
-  display_name: "Sample Account",
-  onboarding_completed: true,
-};
-
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const usingFixtures = fixturesEnabled();
-  const [status, setStatus] = useState<AuthStatus>(usingFixtures ? "signedIn" : "loading");
-  const [user, setUser] = useState<ApiAuthUser | null>(usingFixtures ? FIXTURE_USER : null);
+  const [status, setStatus] = useState<AuthStatus>("loading");
+  const [user, setUser] = useState<ApiAuthUser | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
   // Read inside the 401 handler below without re-registering it (and
@@ -69,7 +55,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [userId, status]);
 
   useEffect(() => {
-    if (usingFixtures) return;
     let cancelled = false;
 
     authApi
@@ -104,12 +89,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       setUnauthorizedHandler(null);
     };
-    // Intentionally runs once (plus if fixtures mode itself somehow
-    // changed): re-reading navigate/location on every render would
+    // Intentionally runs once: re-reading navigate/location on every render would
     // tear down and rebuild the handler (and re-run the boot call) on
     // every navigation, which is exactly what locationRef above exists
     // to avoid.
-  }, [usingFixtures]);
+  }, []);
 
   const signIn = async (email: string, password: string) => {
     const u = await authApi.login(email, password);

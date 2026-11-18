@@ -2,7 +2,6 @@ import { ChartToolbar } from "@/components/workspace/chart-toolbar";
 import { ToolRail } from "@/components/workspace/tool-rail";
 import { RightPanel } from "@/components/workspace/right-panel";
 import { OtherSetupsStrip } from "@/components/workspace/other-setups-strip";
-import { ArgusActivityProvider } from "@/components/workspace/argus-activity-feed";
 import { AnalysisWorkspaceProvider } from "@/components/workspace/analysis-workspace";
 import { ChartSurface } from "@/components/chart/chart-surface";
 import { DrawingProvider } from "@/components/chart/drawing-context";
@@ -13,15 +12,13 @@ import { DrawingProvider } from "@/components/chart/drawing-context";
 // chart only, not edge to edge under the rail/right panel too), and the
 // markets / symbol panel on the right, running the full height of the row
 // (independent of the strip) and user-resizable. The DrawingProvider shares
-// the active tool and drawn shapes between the rail and the chart;
-// ArgusActivityProvider narrates ARGUS's own analysis steps as a toast
-// feed, so the workspace feels like ARGUS is actively working it, not a
-// static read-out.
+// the active tool and drawn shapes between the rail and the chart. (The
+// scripted "activity" toast feed is gone: it narrated sample data. A real
+// feed built from stored events is Phase 6.)
 export function AnalysisPreview() {
   return (
     <AnalysisWorkspaceProvider>
       <DrawingProvider>
-        <ArgusActivityProvider>
           <div className="flex h-full flex-col gap-1.5 p-1.5">
             <ChartToolbar />
 
@@ -41,7 +38,6 @@ export function AnalysisPreview() {
               <RightPanel />
             </div>
           </div>
-        </ArgusActivityProvider>
       </DrawingProvider>
     </AnalysisWorkspaceProvider>
   );

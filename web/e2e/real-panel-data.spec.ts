@@ -98,22 +98,23 @@ function symbolMenuItem(page: Page, symbol: string, provider: string) {
   return page.getByRole("menuitem", { name: new RegExp(`\\b${escaped}\\s+${provider}$`) });
 }
 
-test("fixture-provider instrument: legend and panel are real or absent, Replay offered, forex is a plain line", async ({
+test("fixture-provider instrument: legend and panel are real or absent, no Replay, no forex group", async ({
   page,
 }) => {
   await page.goto(`/analysis?instrumentId=${auth.btcInstrumentId}`);
   await expect(symbolPickerTrigger(page)).toContainText("BTC-PERP", { timeout: 15_000 });
   await expectLegendMatchesServer(page, auth.btcInstrumentId);
 
-  // Rule 8: Replay exists only for a fixture-provider instrument.
-  await expect(page.getByRole("button", { name: /Replay/ })).toBeVisible();
+  // Phase 2 (D2): Replay is gone for every instrument, fixture ones included.
+  await expect(page.getByRole("button", { name: /Replay/ })).toHaveCount(0);
 
   await expect(page.getByTestId("performance-tiles")).toBeVisible();
   await expect(page.getByTestId("finalized-through")).not.toHaveText("—");
   await expect(page.getByTestId("data-quality")).not.toContainText(/\b(live|stale|degraded)\b/i);
 
   await page.getByRole("tab", { name: "Watchlist" }).click();
-  await expect(page.getByTestId("forex-not-connected")).toHaveText("Forex is not connected yet");
+  // Phase 2 (D2): no forex group at all.
+  await expect(page.getByText(/forex/i)).toHaveCount(0);
   await expect(page.getByText(/GBPUSD|AUDUSD|EURGBP/)).toHaveCount(0);
   await expect(page.getByText(/News|Avg\. volume/)).toHaveCount(0);
 
@@ -137,7 +138,7 @@ test("real-provider instrument: no sample marker in the side panel or legend, Re
   await expect(page.getByTestId("data-quality")).not.toContainText(/\b(live|stale|degraded)\b/i);
 
   await page.getByRole("tab", { name: "Watchlist" }).click();
-  await expect(page.getByTestId("forex-not-connected")).toHaveText("Forex is not connected yet");
+  await expect(page.getByText(/forex/i)).toHaveCount(0);
   await expect(page.getByTestId("symbol-detail")).toBeVisible();
   await expectNoSampleMarkerOnPage(page);
   await page.screenshot({ path: "e2e/screenshots/real-panel-data-real-provider.png", fullPage: true });

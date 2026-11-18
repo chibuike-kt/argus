@@ -6,7 +6,6 @@ import {
   ChartBar,
   SlidersHorizontal,
   Bell,
-  ClockCounterClockwise,
   ArrowUUpLeft,
   ArrowUUpRight,
   Camera,
@@ -16,7 +15,6 @@ import {
   MagnifyingGlass,
 } from "@phosphor-icons/react";
 import { IconButton } from "@/components/ui/icon-button";
-import { Button } from "@/components/ui/button";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
@@ -24,7 +22,6 @@ import { useAuth } from "@/auth/auth-context";
 import { useDrawing } from "@/components/chart/drawing-context";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import { useCommandPalette } from "@/components/workspace/command-palette";
-import { useArgusActivity } from "@/components/workspace/argus-activity-feed";
 import type { ApiInstrument } from "@/api/types";
 import type { CandleInterval } from "@/lib/live-socket";
 
@@ -175,7 +172,6 @@ export function ChartToolbar() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const palette = useCommandPalette();
-  const activity = useArgusActivity();
   const initial = (user?.display_name || user?.email)?.[0]?.toUpperCase() ?? "?";
   return (
     <div className="argus-in glass relative z-30 flex items-center gap-1.5 rounded-xl px-2 py-1.5">
@@ -214,25 +210,6 @@ export function ChartToolbar() {
             Ctrl K
           </kbd>
         </button>
-        {/* Replay plays back sample (fixture) analysis steps; it means
-            nothing for real data, so it exists only while the selected
-            instrument's own provider is "fixture" (real-panel-data brief
-            rule 8) -- never for a real provider's instrument, whatever
-            build mode the app is in. */}
-        {instrument?.provider === "fixture" && (
-          <>
-            <Divider />
-            <Button
-              variant="glass"
-              size="sm"
-              className="gap-1.5"
-              onClick={activity.replay}
-              title="Replay ARGUS's analysis steps (sample data)"
-            >
-              <ClockCounterClockwise className="size-4 text-accent" /> Replay
-            </Button>
-          </>
-        )}
         <IconButton
           variant="ghost"
           size="sm"

@@ -314,20 +314,14 @@ export function StyleGuide() {
 
       <Section
         title="Instrument icons"
-        desc="Real coin logos (cryptocurrency-icons, CC0) resolve from the symbol, with a lettered fallback for forex and unknown tickers."
+        desc="Real coin logos (cryptocurrency-icons, CC0) resolve from the symbol, with a lettered fallback for unknown tickers."
       >
         <div className="flex flex-wrap gap-6">
           {[
-            "BTCUSDT.P",
-            "ETHUSDT.P",
-            "SOLUSDT.P",
-            "BNBUSDT.P",
-            "XRPUSDT.P",
-            "ADAUSDT.P",
-            "AVAXUSDT.P",
-            "LINKUSDT.P",
-            "DOGEUSDT.P",
-            "GBPUSD",
+            "BTC",
+            "ETH",
+            "SOL",
+            "UNKNOWNTICKER",
           ].map((s) => (
             <div key={s} className="flex flex-col items-center gap-2">
               <CoinIcon symbol={s} size={40} />

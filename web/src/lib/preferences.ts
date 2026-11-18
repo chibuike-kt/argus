@@ -1,6 +1,5 @@
 import { useSyncExternalStore } from "react";
 import { apiBaseUrl, ApiClientError, getJSON, putJSON } from "@/api/client";
-import { fixturesEnabled } from "@/mocks/fixtures-as-api";
 import {
   ConflictError,
   RejectedError,
@@ -209,21 +208,19 @@ const serverRemote: Remote<Prefs> = {
   },
 };
 
-// Fixture mode has no server: changes still apply and cache locally.
-const localOnlyRemote: Remote<Prefs> = {
-  get: () => new Promise(() => {}),
-  put: (data, version) => Promise.resolve({ data, version: version + 1 }),
-};
-
 type Listener = () => void;
 
 class PreferencesStore {
   private userId: number | null = null;
   private sync: VersionedSync<Prefs> | null = null;
   private snapshot: Prefs = {};
+  // True once the server copy has been read since the user attached: only
+  // then is it safe to CORRECT a saved value (e.g. a now-disabled
+  // instrument) -- before that, a stale local cache could overwrite a
+  // valid server value.
+  private synced = false;
   private listeners = new Set<Listener>();
-  // Chosen when a user is attached, not at module load, so fixture mode is
-  // honoured whenever it is switched on.
+  // Chosen when a user is attached (a test can supply its own).
   private remoteFor: () => Remote<Prefs>;
 
   constructor(remoteFor: () => Remote<Prefs>) {
@@ -236,6 +233,10 @@ class PreferencesStore {
 
   get(): Prefs {
     return this.snapshot;
+  }
+
+  isSynced(): boolean {
+    return this.synced;
   }
 
   subscribe = (l: Listener): (() => void) => {
@@ -258,9 +259,18 @@ class PreferencesStore {
         this.publish(state.data);
       },
     });
+    this.synced = false;
     this.publish(initial.data);
     // Server down or offline: keep working from the cache, quietly.
-    void this.sync.pull().catch(() => {});
+    const sync = this.sync;
+    void sync
+      .pull()
+      .then(() => {
+        if (this.sync !== sync) return; // another user attached meanwhile
+        this.synced = true;
+        this.publish(this.snapshot);
+      })
+      .catch(() => {});
   }
 
   // detach stops syncing (sign-out); nothing from this user stays in memory.
@@ -269,6 +279,7 @@ class PreferencesStore {
     this.sync?.stop();
     this.sync = null;
     this.userId = null;
+    this.synced = false;
     this.publish({});
   }
 
@@ -313,7 +324,7 @@ export function createPreferencesStore(remote: Remote<Prefs>): PreferencesStore 
   return new PreferencesStore(() => remote);
 }
 
-export const preferences = new PreferencesStore(() => (fixturesEnabled() ? localOnlyRemote : serverRemote));
+export const preferences = new PreferencesStore(() => serverRemote);
 
 if (typeof window !== "undefined") {
   window.addEventListener("pagehide", () => preferences.flushKeepalive());
@@ -322,4 +333,10 @@ if (typeof window !== "undefined") {
 
 export function usePreferences(): Prefs {
   return useSyncExternalStore(preferences.subscribe, () => preferences.get());
+}
+
+// usePreferencesSynced is true once the signed-in user's server copy has
+// been read this session.
+export function usePreferencesSynced(): boolean {
+  return useSyncExternalStore(preferences.subscribe, () => preferences.isSynced());
 }

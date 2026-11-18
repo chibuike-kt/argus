@@ -158,13 +158,6 @@ export function Watchlist() {
             </div>
           )}
         </Group>
-        {/* Forex is not connected (rule 6): one plain line, no numbers,
-            no badge -- the fixture rows that used to sit here are gone. */}
-        <Group title="Forex">
-          <div className="px-2 py-2 text-[12px] text-fg-subtle" data-testid="forex-not-connected">
-            Forex is not connected yet
-          </div>
-        </Group>
       </div>
     </div>
   );
