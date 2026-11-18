@@ -97,10 +97,13 @@ func startHyperliquidIngest(
 // (machine asleep, network down) the failed attempt's window was never
 // retried and the hole stayed forever. The startup backfill had the
 // same one-shot shape.
-func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Service, state backfillState, cfg config.Config, logger *slog.Logger, clk clock.Clock) {
+func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Service, state integrityState, cfg config.Config, logger *slog.Logger, clk clock.Clock) {
 	if !backfillUntilCaughtUp(ctx, "startup", symbol, svc, state, cfg, logger, clk) {
 		return
 	}
+	// The backfill only reaches back to the newest stored candle; holes
+	// already inside the stored series are found and repaired here.
+	integrityScan(ctx, "startup", symbol, svc, state, cfg, logger, clk)
 
 	attempt := 0
 	for {
@@ -122,10 +125,16 @@ func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Ser
 			defer close(periodicDone)
 			runPeriodicGapBackfill(periodicCtx, symbol, svc, cfg.Hyperliquid.PeriodicBackfillInterval, cfg.Hyperliquid.PeriodicBackfillWindow, logger, clk)
 		}()
+		scanDone := make(chan struct{})
+		go func() {
+			defer close(scanDone)
+			runPeriodicIntegrityScan(periodicCtx, symbol, svc, state, cfg, logger, clk)
+		}()
 
 		err := svc.WatchCandles(ctx, symbol)
 		cancelPeriodic()
 		<-periodicDone
+		<-scanDone
 		if ctx.Err() != nil {
 			return
 		}
@@ -142,6 +151,7 @@ func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Ser
 		if !backfillUntilCaughtUp(ctx, "reconnect", symbol, svc, state, cfg, logger, clk) {
 			return
 		}
+		integrityScan(ctx, "reconnect", symbol, svc, state, cfg, logger, clk)
 
 		delay := reconnectBackoff(attempt, cfg.Live.ReconnectBackoffBase, cfg.Live.ReconnectBackoffCap)
 		attempt++
