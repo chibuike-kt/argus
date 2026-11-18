@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/store"
@@ -118,4 +119,40 @@ func (s *Store) ListOpenGaps(ctx context.Context, instrumentID int64) ([]Gap, er
 		out = append(out, fromGapRow(row))
 	}
 	return out, nil
+}
+
+// MissingRange is a run of consecutive minutes with no current, closed
+// 1-minute candle: [Start, End), Minutes long.
+type MissingRange struct {
+	Start   time.Time
+	End     time.Time
+	Minutes int64
+}
+
+// MissingRanges returns every run of minutes in [from, to) with no current,
+// closed candle for instrumentID, oldest first, in one statement
+// (ListMissingCandleRanges), starting at the first stored closed candle at
+// or after from. Minutes before lostBefore already covered by an open
+// recorded gap are not returned (known, unfetchable holes); minutes from
+// lostBefore on are always returned when missing.
+func (s *Store) MissingRanges(ctx context.Context, instrumentID int64, from, to, lostBefore time.Time) ([]MissingRange, error) {
+	rows, err := s.q.ListMissingCandleRanges(ctx, store.ListMissingCandleRangesParams{InstrumentID: instrumentID, FromTime: from, ToTime: to, LostBefore: lostBefore})
+	if err != nil {
+		return nil, fmt.Errorf("marketdata: missing ranges instrument=%d [%s,%s): %w", instrumentID, from, to, err)
+	}
+	out := make([]MissingRange, len(rows))
+	for i, r := range rows {
+		out[i] = MissingRange{Start: r.GapStart.UTC(), End: r.GapEnd.UTC(), Minutes: r.Minutes}
+	}
+	return out, nil
+}
+
+// CountClosed counts current, closed candles for instrumentID with
+// open_time in [from, to).
+func (s *Store) CountClosed(ctx context.Context, instrumentID int64, from, to time.Time) (int64, error) {
+	n, err := s.q.CountClosedCandlesInRange(ctx, store.CountClosedCandlesInRangeParams{InstrumentID: instrumentID, FromTime: from, ToTime: to})
+	if err != nil {
+		return 0, fmt.Errorf("marketdata: count closed instrument=%d [%s,%s): %w", instrumentID, from, to, err)
+	}
+	return n, nil
 }

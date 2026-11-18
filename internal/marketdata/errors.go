@@ -15,6 +15,12 @@ var (
 	// given (instrument, open_time).
 	ErrCandleNotFound = errors.New("marketdata: candle not found")
 
+	// ErrCandleAlreadyClosed is returned by UpsertForming when the current
+	// candle at that minute is already closed: a forming value never
+	// overwrites a closed candle (it is older information than the close).
+	// A caller holding a FINAL value goes through the correction path.
+	ErrCandleAlreadyClosed = errors.New("marketdata: candle is already closed; a forming value cannot overwrite it")
+
 	// ErrCandleStillForming is returned by SupersedeCandle: only a closed
 	// candle can be corrected (000003) -- a still-forming one should be
 	// overwritten with UpsertForming instead.

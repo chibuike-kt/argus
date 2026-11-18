@@ -68,7 +68,8 @@ func (f *fakeCandleStore) UpsertForming(_ context.Context, t marketdata.Tick) (m
 	key := f.key(t.InstrumentID, t.OpenTime)
 	existing, ok := f.byKey[key]
 	if ok && existing.IsClosed {
-		return marketdata.Candle{}, errors.New("fakeCandleStore: cannot upsert a forming tick onto a closed candle")
+		// Mirrors marketdata.Store: a forming value never overwrites a close.
+		return marketdata.Candle{}, marketdata.ErrCandleAlreadyClosed
 	}
 	id := existing.ID
 	if !ok {
@@ -85,12 +86,18 @@ func (f *fakeCandleStore) UpsertForming(_ context.Context, t marketdata.Tick) (m
 	return c, nil
 }
 
-func (f *fakeCandleStore) Close(_ context.Context, instrumentID int64, openTime clock.EventTime) (marketdata.Candle, error) {
-	key := f.key(instrumentID, openTime)
+// CloseWith mirrors marketdata.Store.CloseWith: freeze with t's values.
+func (f *fakeCandleStore) CloseWith(_ context.Context, t marketdata.Tick) (marketdata.Candle, error) {
+	key := f.key(t.InstrumentID, t.OpenTime)
 	c, ok := f.byKey[key]
 	if !ok {
 		return marketdata.Candle{}, marketdata.ErrCandleNotFound
 	}
+	if c.IsClosed {
+		return marketdata.Candle{}, marketdata.ErrCandleAlreadyClosed
+	}
+	c.Open, c.High, c.Low, c.Close, c.Volume = t.Open, t.High, t.Low, t.Close, t.Volume
+	c.TickAligned, c.Provider, c.IngestedAt = t.TickAligned, t.Provider, t.IngestedAt
 	c.IsClosed = true
 	f.byKey[key] = c
 	return c, nil
