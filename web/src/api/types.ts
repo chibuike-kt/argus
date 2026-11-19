@@ -94,14 +94,35 @@ export type ApiPerformancePeriod = "1D" | "1W" | "1M" | "3M" | "6M" | "1Y";
 
 export const PERFORMANCE_PERIODS: readonly ApiPerformancePeriod[] = ["1D", "1W", "1M", "3M", "6M", "1Y"];
 
-export interface ApiInstrumentStats {
-  instrument_id: number;
+export interface ApiInstrumentStats extends ApiLiveFigures {
+  // The latest CLOSED 1-minute candle: the performance anchor and "data
+  // finalized through", not the live price (last_price, below).
   last_close: string | null;
   last_closed_open_time: string | null;
+  performance: Record<ApiPerformancePeriod, string | null>;
+}
+
+// The live figures (D3, product overhaul brief): the same fields, the
+// same server computation and the same rendering in GET
+// /instruments/stats and in the `stats` WebSocket message, so the
+// panel's first load and every live update come from one source.
+export interface ApiLiveFigures {
+  instrument_id: number;
+  // The newest stored candle's close: the forming candle's latest close,
+  // or the latest closed candle's when nothing is forming.
+  last_price: string | null;
+  last_price_closed: boolean | null;
+  // Exchange event time of that candle (its open time, minute-grained).
+  as_of: string | null;
+  // When ARGUS stored its latest value (ingestion time).
+  last_tick_at: string | null;
   change_24h: string | null;
   change_24h_pct: string | null;
+  // The exact minute change_24h is measured against, found or not.
+  change_24h_reference_open_time: string | null;
   volume_24h: string | null;
-  performance: Record<ApiPerformancePeriod, string | null>;
+  // How many of the 1440 minutes of the 24h window are stored.
+  volume_24h_minutes: number | null;
 }
 
 // TargetSnapshot/POISnapshot/PlanSnapshot mirror internal/setups/types.go

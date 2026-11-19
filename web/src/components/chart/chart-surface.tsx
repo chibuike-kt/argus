@@ -14,18 +14,21 @@ import {
 } from "lightweight-charts";
 import { GearSix, CircleNotch } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
-import { formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
-import { Tooltip } from "@/components/ui/tooltip";
+import { compareDecimal, formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
 import { cn } from "@/lib/cn";
-import { useFlash } from "@/lib/use-flash";
+import { LiveFigure } from "@/components/ui/live-figure";
+import { LivePrice } from "@/components/ui/live-price";
+import { liveReason } from "@/lib/figure-reasons";
+import type { LiveStatsSnapshot } from "@/lib/live-stats";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import { formatMoney, toPlanOverlay } from "@/api/mappers";
 import { useDrawing } from "./drawing-context";
-import type { LiveTick } from "@/lib/use-live-candles";
+import type { HistoryBackOutcome, LiveTick } from "@/lib/use-live-candles";
 import type { ConnectionState, WireStatusPayload } from "@/lib/live-socket";
 import { isNewerCandleKey, decideApplyAction, type CandleKey } from "@/lib/live-candles-reducer";
 import { fromSavedView, loadChartView, saveChartView, toSavedView } from "./chart-view-persistence";
 import { defaultVisibleRange } from "./default-view";
+import { RANGES, describeShown, rangeStartSec, type RangeKey } from "./range-buttons";
 import { INTERVAL_SECONDS, withGapWhitespace } from "./gap-whitespace";
 import { SystemAxisLabelsPrimitive, SystemPositionPrimitive, SystemRectanglePrimitive } from "./system-axis-labels";
 import { cloneDrawing } from "./drawings/types";
@@ -38,7 +41,6 @@ import { DrawingController } from "./drawings/controller";
 import { ContextToolbar } from "./drawings/context-toolbar";
 import { DrawingContextMenu } from "./drawings/context-menu";
 
-const RANGES = ["1D", "5D", "1M", "3M", "6M", "YTD", "1Y", "5Y", "All"];
 
 const C = {
   up: "#2ebd85",
@@ -62,17 +64,30 @@ const USER_GESTURE_WINDOW_MS = 1000;
 
 const unix = (iso: string) => Math.floor(Date.parse(iso) / 1000) as Time;
 
-const fmt1 = (p: number) => p.toLocaleString("en-US", { maximumFractionDigits: 1 });
-const fmtLast = (p: number) => Math.round(p).toLocaleString("en-US");
-
 type OHLC = { open: number; high: number; low: number; close: number };
+
+// LegendBar is a bar as the server's decimal strings (the legend shows
+// these, never a number the browser rounded); null fields show a dash.
+type LegendField = "open" | "high" | "low" | "close";
+type LegendBar = Record<LegendField, string | null>;
+const LEGEND_FIELDS: readonly LegendField[] = ["open", "high", "low", "close"];
+const EMPTY_LEGEND: LegendBar = { open: null, high: null, low: null, close: null };
 
 export interface ChartCandle {
   openTime: string;
+  // Numbers for the chart canvas only (lightweight-charts plots numbers).
   open: number;
   high: number;
   low: number;
   close: number;
+  // The server's exact decimal strings, for the legend. Optional so a
+  // caller with numbers only (a test) still renders; the legend then
+  // shows the number's own string.
+  text?: LegendBar;
+}
+
+function legendOf(c: ChartCandle): LegendBar {
+  return c.text ?? { open: String(c.open), high: String(c.high), low: String(c.low), close: String(c.close) };
 }
 
 export interface ChartPoiZone {
@@ -107,17 +122,45 @@ export interface ChartPlanOverlay {
 // own small loading/error overlay (below) over whatever chart is
 // already there, however many instruments or setups come and go.
 // LegendChange is the chart legend's 24h change for the selected
-// instrument (real-panel-data brief rule 9): last close against the
-// closed 1-minute candle exactly 24h before the latest one, computed on
-// the server (GET /instruments/stats). An em dash when that candle does
-// not exist -- never a sample badge, never a computed-in-the-browser
-// number.
+// instrument, from the page's ONE live stats source -- the very entry the
+// side panel and the watchlist read (Phase 3: "from one shared source,
+// never two calculations"). D3: against the closed candle exactly 24h
+// before the current minute began, computed on the server. A dash
+// carries its reason on hover, never a sample badge, never a number
+// computed in the browser.
+const EMPTY_SNAPSHOT: LiveStatsSnapshot = {
+  entries: new Map(),
+  loading: true,
+  error: undefined,
+  connection: "closed",
+  everOpen: false,
+  fatal: null,
+};
+
 function LegendChange() {
-  const { stats } = useAnalysisWorkspace();
-  const tone = toneClass(stats?.change_24h);
+  const { statsEntry, statsSnapshot } = useAnalysisWorkspace();
+  const snap = statsSnapshot ?? EMPTY_SNAPSHOT;
+  const f = statsEntry?.figures ?? null;
+  const tone = toneClass(f?.change_24h);
   return (
-    <span className={cn("tnum", tone)} data-testid="legend-change-24h" title="Change vs the closed 1m candle exactly 24h earlier">
-      {formatDecimal(stats?.change_24h, { signed: true })} ({formatPercent(stats?.change_24h_pct)})
+    <span className="tnum flex items-center" data-testid="legend-change-24h">
+      <LiveFigure
+        tone="sign"
+        signTone={tone}
+        text={f?.change_24h != null ? formatDecimal(f.change_24h, { signed: true }) : null}
+        reason={liveReason("change_24h", statsEntry, snap)}
+        motion={statsEntry?.motion.change_24h}
+      />
+      <span className={tone}>{" "}(</span>
+      <LiveFigure
+        tone="sign"
+        signTone={tone}
+        className="px-0"
+        text={f?.change_24h_pct != null ? formatPercent(f.change_24h_pct) : null}
+        reason={liveReason("change_24h_pct", statsEntry, snap)}
+        motion={statsEntry?.motion.change_24h_pct}
+      />
+      <span className={tone}>)</span>
     </span>
   );
 }
@@ -138,6 +181,31 @@ export function ChartSurface({ className }: { className?: string }) {
   } = useAnalysisWorkspace();
   const hasLoadedOnceRef = useRef(false);
   if (candles.length > 0) hasLoadedOnceRef.current = true;
+
+  // Memoized on their real inputs, before any early return: this
+  // component re-renders on every live `stats` message (the workspace
+  // carries them), and a fresh candles array or targets array on each
+  // render re-ran the chart's data path -- a full setData that dropped
+  // the live forming bar and reset the legend to the last closed bar
+  // several times a second (seen on real data at 1h, Phase 3).
+  const chartCandles: ChartCandle[] = useMemo(
+    () =>
+      candles.map((c) => ({
+        openTime: c.open_time,
+        open: formatMoney(c.open),
+        high: formatMoney(c.high),
+        low: formatMoney(c.low),
+        close: formatMoney(c.close),
+        text: { open: c.open, high: c.high, low: c.low, close: c.close },
+      })),
+    [candles],
+  );
+  const overlay = useMemo(() => (setup ? toPlanOverlay(setup) : undefined), [setup]);
+  const poiZoneProp = useMemo(() => (overlay ? { low: overlay.poiLow, high: overlay.poiHigh } : undefined), [overlay]);
+  const planProp = useMemo(
+    () => (overlay ? { entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime } : undefined),
+    [overlay],
+  );
 
   if (!hasLoadedOnceRef.current) {
     // instrumentsLoading, not setupLoading: an instrument with zero
@@ -200,17 +268,6 @@ export function ChartSurface({ className }: { className?: string }) {
   // loading): ChartSurfaceInner below skips drawing the POI zone and
   // plan box entirely in that case, rather than this component
   // blocking the whole chart on setup the way it used to.
-  const chartCandles: ChartCandle[] =
-    candles.length === 0
-      ? []
-      : candles.map((c) => ({
-          openTime: c.open_time,
-          open: formatMoney(c.open),
-          high: formatMoney(c.high),
-          low: formatMoney(c.low),
-          close: formatMoney(c.close),
-        }));
-  const overlay = setup ? toPlanOverlay(setup) : undefined;
   // The chart window is now "the most recent MAX_CANDLES," not anchored
   // at this setup's own evaluation_time (web-wiring-followup brief, Part
   // 5) -- an older setup's formation candle can fall before that window
@@ -229,12 +286,8 @@ export function ChartSurface({ className }: { className?: string }) {
       candles={chartCandles}
       loading={candlesLoading}
       loadError={candlesError?.message}
-      poiZone={overlay ? { low: overlay.poiLow, high: overlay.poiHigh } : undefined}
-      plan={
-        overlay
-          ? { entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime }
-          : undefined
-      }
+      poiZone={poiZoneProp}
+      plan={planProp}
       formationOutsideWindow={formationOutsideWindow}
       forming={forming}
       connectionState={connectionState}
@@ -436,7 +489,29 @@ export function ChartSurfaceInner({
   // logical index (whitespace included) -- what a saved view's times are
   // converted against.
   const dataTimesRef = useRef<number[]>([]);
-  const [bar, setBar] = useState<OHLC>(hasCandles ? candles[candles.length - 1] : EMPTY_BAR);
+  // The legend: the live bar (the newest candle, moving with every tick),
+  // or the bar under the crosshair while hovering. Strings, not numbers.
+  const [legend, setLegend] = useState<{ bar: LegendBar; hovering: boolean }>({
+    bar: hasCandles ? legendOf(candles[candles.length - 1]) : EMPTY_LEGEND,
+    hovering: false,
+  });
+  // The newest bar's strings (what the legend shows when not hovering),
+  // and every loaded bar's strings by open time (unix seconds), for the
+  // crosshair -- the series itself only holds numbers.
+  const liveLegendRef = useRef<LegendBar>(hasCandles ? legendOf(candles[candles.length - 1]) : EMPTY_LEGEND);
+  // The live bar as state too: the last-price label and the symbol dot
+  // must re-render on every tick even while the legend shows a hovered bar.
+  const [liveBar, setLiveBar] = useState<LegendBar>(liveLegendRef.current);
+  const legendByTimeRef = useRef<Map<number, LegendBar>>(new Map());
+  const hoveredTimeRef = useRef<number | null>(null);
+  // The range buttons' own notice ("Showing 3.5 days, the most history
+  // stored"), and the range still waiting for older history.
+  const [rangeNotice, setRangeNotice] = useState<string | null>(null);
+  const [activeRange, setActiveRange] = useState<RangeKey | null>(null);
+  const rangeRequestRef = useRef(0);
+  // A range waiting for paged-in history to reach the chart: applied by
+  // the data path once the series starts at or before oldestSec.
+  const pendingRangeRef = useRef<{ key: RangeKey; outcome: HistoryBackOutcome; oldestSec: number; token: number } | null>(null);
   const [toolbarTick, setToolbarTick] = useState(0);
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   // Bumped once the chart/series/controller are (re)created. React 18
@@ -535,6 +610,7 @@ export function ChartSurfaceInner({
   // "last applied" for live-tick purposes stale.
   const lastAppliedOpenTimeRef = useRef<string | null>(hasCandles ? candles[candles.length - 1].openTime : null);
   const appliedLiveKeyRef = useRef<CandleKey | null>(null);
+  const appliedEpochRef = useRef<number | null>(null);
 
   // withProgrammaticRangeChange brackets fn so any visible-range change
   // it causes is not mistaken for a user gesture by
@@ -586,7 +662,10 @@ export function ChartSurfaceInner({
       systemPrimitivesRef.current = { poi: null, plan: null };
       lastBarRef.current = EMPTY_BAR;
       lastAppliedOpenTimeRef.current = null;
-      setBar(EMPTY_BAR);
+      legendByTimeRef.current = new Map();
+      liveLegendRef.current = EMPTY_LEGEND;
+      setLiveBar(EMPTY_LEGEND);
+      setLegend({ bar: EMPTY_LEGEND, hovering: false });
       return;
     }
 
@@ -660,7 +739,15 @@ export function ChartSurfaceInner({
 
     controllerRef.current?.setCandles(candles);
     lastBarRef.current = candles[candles.length - 1];
-    setBar(candles[candles.length - 1]);
+
+    const byTime = new Map<number, LegendBar>();
+    for (const c of candles) byTime.set(unix(c.openTime) as number, legendOf(c));
+    legendByTimeRef.current = byTime;
+    // (Colouring is LivePrice's: a switch resets it via resetKey.)
+    const nextLive = legendOf(candles[candles.length - 1]);
+    liveLegendRef.current = nextLive;
+    setLiveBar(nextLive);
+    setLegend((l) => (l.hovering ? l : { bar: nextLive, hovering: false }));
   }
 
   // restoreOrDefaultView applies the scope's saved view when it still fits
@@ -768,9 +855,16 @@ export function ChartSurfaceInner({
 
     chart.subscribeCrosshairMove((param) => {
       const d = param.seriesData.get(series) as CandlestickData<Time> | WhitespaceData<Time> | undefined;
-      // A gap's whitespace point has no prices: show the last real bar.
-      if (d && "open" in d) setBar({ open: d.open, high: d.high, low: d.low, close: d.close });
-      else setBar(lastBarRef.current);
+      const hovered = d && "open" in d ? legendByTimeRef.current.get(d.time as number) : undefined;
+      // A gap's whitespace point has no prices, and leaving the chart
+      // clears the crosshair: both show the live bar again.
+      if (hovered) {
+        hoveredTimeRef.current = d!.time as number;
+        setLegend({ bar: hovered, hovering: true });
+      } else {
+        hoveredTimeRef.current = null;
+        setLegend({ bar: liveLegendRef.current, hovering: false });
+      }
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
       setToolbarTick((t) => t + 1);
@@ -854,6 +948,7 @@ export function ChartSurfaceInner({
     }
 
     withProgrammaticRangeChange(() => applyCandleData());
+    flushPendingRange();
 
     if (!hasCandles) staleDataRef.current = null; // emptied: whatever comes next is new
     const dataIsNewScopes = staleDataRef.current === null || staleDataRef.current !== dataSignature;
@@ -898,6 +993,14 @@ export function ChartSurfaceInner({
       revision: forming.candle.revision,
       seq: forming.seq,
     };
+    // seq restarts with every snapshot (LiveTick.epoch): a tick from a
+    // new epoch is compared by open_time and revision only, never against
+    // a seq from before the reconnect. decideApplyAction below still
+    // drops an older bar.
+    if (forming.epoch !== appliedEpochRef.current) {
+      appliedEpochRef.current = forming.epoch;
+      if (appliedLiveKeyRef.current) appliedLiveKeyRef.current = { ...appliedLiveKeyRef.current, seq: 0 };
+    }
     if (!isNewerCandleKey(nextKey, appliedLiveKeyRef.current)) return;
 
     const action = decideApplyAction(forming.candle, lastAppliedOpenTimeRef.current);
@@ -914,8 +1017,74 @@ export function ChartSurfaceInner({
     appliedLiveKeyRef.current = nextKey;
     lastAppliedOpenTimeRef.current = forming.candle.open_time;
     lastBarRef.current = bar;
-    setBar(bar);
+
+    const text: LegendBar = {
+      open: forming.candle.open,
+      high: forming.candle.high,
+      low: forming.candle.low,
+      close: forming.candle.close,
+    };
+    const t = unix(forming.candle.open_time) as number;
+    legendByTimeRef.current.set(t, text);
+    liveLegendRef.current = text;
+    setLiveBar(text);
+    // Hovering the live bar itself keeps it moving too.
+    setLegend((l) => (!l.hovering || hoveredTimeRef.current === t ? { bar: text, hovering: l.hovering } : l));
   }, [forming]);
+
+  // Range buttons (Phase 3): set the visible range to the last 1 day, 5
+  // days, ... ending at the newest bar. When the held history is shorter,
+  // older candles are paged in first (useLiveCandles.loadHistoryBack); if
+  // the store runs out (or the chart's bar cap is reached) the range shows
+  // everything held and says so, never doing nothing silently.
+  const workspace = useAnalysisWorkspace();
+  const loadHistoryBack = workspace.loadHistoryBack;
+  function applyRange(key: RangeKey, outcome: HistoryBackOutcome) {
+    const chart = chartRef.current;
+    const times = dataTimesRef.current;
+    if (!chart || times.length === 0) return;
+    const last = times[times.length - 1];
+    const start = rangeStartSec(key, last, times[0]);
+    const from = Math.max(start, times[0]);
+    withProgrammaticRangeChange(() => {
+      chart.timeScale().setVisibleRange({ from: from as Time, to: last as Time });
+    });
+    setRangeNotice(describeShown(key, outcome, from, start, last, timeframe));
+  }
+  // flushPendingRange applies a waiting range once the chart holds the
+  // history it waited for (called from the data path after setData).
+  function flushPendingRange() {
+    const p = pendingRangeRef.current;
+    const times = dataTimesRef.current;
+    if (!p || p.token !== rangeRequestRef.current || times.length === 0) return;
+    if (times[0] > p.oldestSec) return; // not there yet
+    pendingRangeRef.current = null;
+    applyRange(p.key, p.outcome);
+  }
+  async function selectRange(key: RangeKey) {
+    const token = ++rangeRequestRef.current;
+    pendingRangeRef.current = null;
+    setActiveRange(key);
+    setRangeNotice(null);
+    const times = dataTimesRef.current;
+    if (times.length === 0) {
+      setRangeNotice("No candles loaded yet");
+      return;
+    }
+    const last = times[times.length - 1];
+    const start = rangeStartSec(key, last, times[0]);
+    if (start >= times[0] || !loadHistoryBack) {
+      applyRange(key, "covered");
+      return;
+    }
+    setRangeNotice("Loading older candles…");
+    const fromISO = Number.isFinite(start) ? new Date(start * 1000).toISOString() : "1970-01-01T00:00:00.000Z";
+    const res = await loadHistoryBack(fromISO);
+    if (token !== rangeRequestRef.current) return; // a newer click won
+    const oldestSec = res.oldest ? (unix(res.oldest) as number) : Number.POSITIVE_INFINITY;
+    pendingRangeRef.current = { key, outcome: res.outcome, oldestSec, token };
+    flushPendingRange();
+  }
 
   // keep the controller's tool/option state in sync with context, without
   // re-running chart init
@@ -989,19 +1158,17 @@ export function ChartSurfaceInner({
 
   const contextMenuDrawing = contextMenu ? store.get(contextMenu.id) : null;
 
-  // "up" colours the live dot/O-H-L-C legend by the latest candle's own
-  // colour (close vs open) -- real, from the data on screen. The 24h
-  // change next to it is LegendChange below (GET /instruments/stats).
-  const lastCandle = hasCandles ? candles[candles.length - 1] : EMPTY_BAR;
-  const up = lastCandle.close >= lastCandle.open;
-  const last = lastCandle.close;
-
-  // A brief flash on whichever OHLC value just changed under the
-  // crosshair, instead of the legend just snapping to new numbers.
-  const openFlash = useFlash(bar.open);
-  const highFlash = useFlash(bar.high);
-  const lowFlash = useFlash(bar.low);
-  const closeFlash = useFlash(bar.close);
+  // The dot next to the symbol: the live bar's own colour (close vs open,
+  // an exact string comparison). The 24h change next to it is
+  // LegendChange (the page's one stats source).
+  const liveCmp = liveBar.close !== null && liveBar.open !== null ? compareDecimal(liveBar.close, liveBar.open) : null;
+  const up = liveCmp === null || liveCmp >= 0;
+  // While hovering a past bar, its values are shown plainly (its close
+  // coloured against its own open); otherwise each value is the shared
+  // <LivePrice> (direction colour, then only the changed digits).
+  const hoverCloseCmp =
+    legend.hovering && legend.bar.close !== null && legend.bar.open !== null ? compareDecimal(legend.bar.close, legend.bar.open) : null;
+  const legendReason = loading ? "Loading candles" : loadError ? `Could not load candles: ${loadError}` : "No candle loaded for this instrument";
 
   return (
     <div className={cn("flex h-full w-full flex-col overflow-hidden", className)}>
@@ -1081,86 +1248,75 @@ export function ChartSurfaceInner({
               Setup formed before this window
             </span>
           )}
-          <div className="tnum flex items-center gap-2.5 text-fg-subtle">
-            <span>
-              O{" "}
-              <span
-                className={cn(
-                  "transition-base rounded px-0.5 text-fg-muted",
-                  openFlash === "up" && "flash-up",
-                  openFlash === "down" && "flash-down",
-                )}
-              >
-                {fmt1(bar.open)}
-              </span>
-            </span>
-            <span>
-              H{" "}
-              <span
-                className={cn(
-                  "transition-base rounded px-0.5 text-fg-muted",
-                  highFlash === "up" && "flash-up",
-                  highFlash === "down" && "flash-down",
-                )}
-              >
-                {fmt1(bar.high)}
-              </span>
-            </span>
-            <span>
-              L{" "}
-              <span
-                className={cn(
-                  "transition-base rounded px-0.5 text-fg-muted",
-                  lowFlash === "up" && "flash-up",
-                  lowFlash === "down" && "flash-down",
-                )}
-              >
-                {fmt1(bar.low)}
-              </span>
-            </span>
-            <span>
-              C{" "}
-              <span
-                data-testid="legend-close"
-                className={cn(
-                  "transition-base rounded px-0.5",
-                  bar.close >= bar.open ? "text-up" : "text-down",
-                  closeFlash === "up" && "flash-up",
-                  closeFlash === "down" && "flash-down",
-                )}
-              >
-                {fmt1(bar.close)}
-              </span>
-            </span>
+          <div className="tnum flex items-center gap-2.5 text-fg-subtle" data-testid="legend-ohlc" data-hovering={legend.hovering ? "true" : "false"}>
+            {LEGEND_FIELDS.map((f) => {
+              const label = f === "open" ? "O" : f === "high" ? "H" : f === "low" ? "L" : "C";
+              const text = legend.bar[f] !== null ? formatDecimal(legend.bar[f]) : null;
+              return (
+                <span key={f}>
+                  {label}{" "}
+                  {legend.hovering ? (
+                    <LiveFigure
+                      testId={`legend-${f}`}
+                      tone="sign"
+                      signTone={
+                        f === "close" && hoverCloseCmp !== null ? (hoverCloseCmp >= 0 ? "text-up" : "text-down") : "text-fg-muted"
+                      }
+                      text={text}
+                      reason={legendReason}
+                    />
+                  ) : (
+                    <LivePrice
+                      testId={`legend-${f}`}
+                      className="text-fg-muted"
+                      value={legend.bar[f]}
+                      text={text}
+                      reason={legendReason}
+                      resetKey={`${symbol}:${timeframe}`}
+                    />
+                  )}
+                </span>
+              );
+            })}
           </div>
         </div>
+        {rangeNotice && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-2 z-10 flex justify-center">
+            <div className="rounded-md border border-line bg-surface px-2 py-1 text-[11px] text-fg-subtle shadow-sm" data-testid="range-notice">
+              {rangeNotice}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex h-8 shrink-0 items-center justify-between border-t border-line px-2">
-        {/* Every one of these buttons did the exact same thing
-            regardless of its own label -- fitContent() plus a bar-
-            spacing reset, not an actual "last 1 day"/"last 5 years"
-            range (web-wiring-polish brief, item 3's own trace). That is
-            not real range selection, so these are disabled with a
-            tooltip rather than left looking functional. */}
-        <div className="flex items-center gap-0.5">
-          <Tooltip content="Range selection is not built yet">
-            <div className="flex items-center gap-0.5">
-              {RANGES.map((r) => (
-                <button
-                  key={r}
-                  disabled
-                  aria-disabled="true"
-                  className="cursor-not-allowed rounded px-1.5 py-0.5 text-[11px] font-medium text-fg-subtle opacity-50"
-                >
-                  {r}
-                </button>
-              ))}
-            </div>
-          </Tooltip>
+        <div className="flex items-center gap-0.5" role="group" aria-label="Visible range">
+          {RANGES.map((r) => (
+            <button
+              key={r}
+              type="button"
+              data-testid={`range-${r}`}
+              aria-pressed={activeRange === r}
+              onClick={() => void selectRange(r)}
+              className={cn(
+                "focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-white/5 hover:text-fg",
+                activeRange === r ? "bg-white/10 text-fg" : "text-fg-subtle",
+              )}
+            >
+              {r}
+            </button>
+          ))}
         </div>
         <div className="flex items-center gap-1 text-fg-subtle">
-          <span className="tnum mr-1 text-[11px]">{fmtLast(last)} · UTC</span>
+          <span className="mr-1 flex items-center text-[11px]" data-testid="last-price-label">
+            <LivePrice
+              value={liveBar.close}
+              text={liveBar.close !== null ? formatDecimal(liveBar.close) : null}
+              reason={legendReason}
+              resetKey={`${symbol}:${timeframe}`}
+            />
+            <span className="ml-1">· UTC</span>
+          </span>
           <button className="focus-ring rounded px-1.5 py-0.5 text-[11px] font-medium hover:text-fg">
             A
           </button>

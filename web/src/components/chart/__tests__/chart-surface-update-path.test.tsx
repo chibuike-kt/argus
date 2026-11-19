@@ -8,8 +8,8 @@
 // the chart and every attached primitive) because the loading/error/
 // chart states were three different element trees.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
-import { ChartSurfaceInner, type ChartSurfaceInnerProps } from "../chart-surface";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { ChartSurface, ChartSurfaceInner, type ChartSurfaceInnerProps } from "../chart-surface";
 import { loadChartView, saveChartView, type SavedChartView } from "../chart-view-persistence";
 import { preferences } from "@/lib/preferences";
 import { DrawingProvider, useDrawing } from "../drawing-context";
@@ -20,11 +20,52 @@ import type { LiveTick } from "@/lib/use-live-candles";
 
 // legendState.stats is what the mocked workspace reports as the selected
 // instrument's GET /instruments/stats row (the legend's 24h change).
-const legendState = vi.hoisted(() => ({ stats: undefined as import("@/api/types").ApiInstrumentStats | undefined }));
+const legendState = vi.hoisted(() => ({
+  stats: undefined as import("@/api/types").ApiInstrumentStats | undefined,
+  // For tests that render the ChartSurface wrapper itself.
+  apiCandles: [] as import("@/api/types").ApiCandle[],
+  loadHistoryBack: undefined as
+    | ((fromISO: string) => Promise<import("@/lib/use-live-candles").HistoryBackResult>)
+    | undefined,
+}));
 
 vi.mock("@/components/workspace/analysis-workspace", () => ({
   useAnalysisWorkspace: () => ({
     stats: legendState.stats,
+    // The page's one live stats source, as the workspace exposes it: the
+    // entry the legend shares with the panel and the watchlist.
+    // Before the figures arrive the entry exists with nothing in it, as
+    // live-stats.ts creates it on retain.
+    statsEntry: {
+          figures: legendState.stats ?? null,
+          closed: legendState.stats ?? null,
+          rejected: false,
+          motion: {
+            last_price: { dir: null, seq: 0 },
+            change_24h: { dir: null, seq: 0 },
+            change_24h_pct: { dir: null, seq: 0 },
+            volume_24h: { dir: null, seq: 0 },
+          },
+        },
+    statsSnapshot: {
+      entries: new Map(),
+      loading: legendState.stats === undefined,
+      error: undefined,
+      connection: "open",
+      everOpen: true,
+      fatal: null,
+    },
+    loadHistoryBack: legendState.loadHistoryBack,
+    candles: legendState.apiCandles,
+    candlesLoading: false,
+    candlesError: undefined,
+    instrumentsLoading: false,
+    instrumentNotFound: false,
+    setup: undefined,
+    forming: null,
+    connectionState: "open",
+    status: null,
+    fatalReason: null,
     instrument: { id: 1, native_symbol: "BTC-PERP", provider: "test" } as ApiInstrument,
     // DrawingProvider now reads timeframe/setTimeframe from this hook
     // (Part 4, item 1) instead of owning its own state -- this test
@@ -69,6 +110,12 @@ let capturedRangeHandler: ((range: { from: number; to: number } | null) => void)
 // Mirrors the bug report's own corrupted value (from:-70, to:3) --
 // what the library picks when setData leaves little or no data to show.
 const SYNTHETIC_AUTO_RANGE = { from: -70, to: 3 };
+let lastVisibleRange: { from: number; to: number } | null = null;
+let setDataCount = 0;
+// The crosshair handler chart-surface.tsx registers, so a test can hover.
+let capturedCrosshair: ((param: { seriesData: Map<unknown, unknown> }) => void) | null = null;
+let lastSeries: unknown = null;
+
 vi.mock("lightweight-charts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("lightweight-charts")>();
   return {
@@ -78,7 +125,24 @@ vi.mock("lightweight-charts", async (importOriginal) => {
       const chart = actual.createChart(...args);
       lastCreatedChart = chart;
 
+      const realCrosshair = chart.subscribeCrosshairMove.bind(chart);
+      chart.subscribeCrosshairMove = ((h: (param: { seriesData: Map<unknown, unknown> }) => void) => {
+        capturedCrosshair = h;
+        realCrosshair(h as never);
+      }) as typeof chart.subscribeCrosshairMove;
+      const realAdd = chart.addSeries.bind(chart);
+      chart.addSeries = ((...a: Parameters<typeof chart.addSeries>) => {
+        const sr = realAdd(...a);
+        lastSeries = sr;
+        return sr;
+      }) as typeof chart.addSeries;
       const ts = chart.timeScale();
+      // jsdom has no layout, so the library cannot apply a time range
+      // (its deferred resize throws): record the call instead, which is
+      // also what the range-button tests assert.
+      ts.setVisibleRange = ((r: { from: number; to: number }) => {
+        lastVisibleRange = r;
+      }) as unknown as typeof ts.setVisibleRange;
       const realSubscribe = ts.subscribeVisibleLogicalRangeChange.bind(ts);
       ts.subscribeVisibleLogicalRangeChange = ((handler: (range: { from: number; to: number } | null) => void) => {
         capturedRangeHandler = handler;
@@ -90,6 +154,7 @@ vi.mock("lightweight-charts", async (importOriginal) => {
         const series = realAddSeries(...seriesArgs);
         const realSetData = series.setData.bind(series);
         series.setData = ((data: Parameters<typeof series.setData>[0]) => {
+          setDataCount++;
           realSetData(data);
           capturedRangeHandler?.(SYNTHETIC_AUTO_RANGE);
         }) as typeof series.setData;
@@ -456,8 +521,9 @@ describe("switching instrument or interval does not rebuild the chart", () => {
 // liveTick builds a WireCandlePayload-shaped forming tick -- decimal
 // strings, like the real wire does (rule 2); formatMoney converts them
 // at the chart edge, inside chart-surface.tsx's own live-tick effect.
-function liveTick(openTime: string, close: number, opts: { revision?: number; seq: number }): LiveTick {
+function liveTick(openTime: string, close: number, opts: { revision?: number; seq: number; epoch?: number }): LiveTick {
   return {
+    epoch: opts.epoch ?? 0,
     candle: {
       open_time: openTime,
       close_time: openTime,
@@ -841,9 +907,15 @@ describe("chart legend 24h change", () => {
       instrument_id: 1,
       last_close: "95123.4",
       last_closed_open_time: "2026-11-16T18:16:00Z",
+      last_price: "95124.0",
+      last_price_closed: false,
+      as_of: "2026-11-16T18:17:00Z",
+      last_tick_at: "2026-11-16T18:17:03Z",
       change_24h: "1440.0",
       change_24h_pct: "1.54",
+      change_24h_reference_open_time: "2026-11-15T18:16:00Z",
       volume_24h: null,
+      volume_24h_minutes: 1439,
       performance: { "1D": "1.54", "1W": null, "1M": null, "3M": null, "6M": null, "1Y": null },
     };
     const { container } = render(<Harness {...legendProps} />);
@@ -851,10 +923,209 @@ describe("chart legend 24h change", () => {
     expect(container.textContent).not.toMatch(/Sample/i);
   });
 
-  it("absent change is an em dash", () => {
+  it("absent change is an em dash with its reason on hover", () => {
+    legendState.stats = {
+      instrument_id: 1,
+      last_close: "95123.4",
+      last_closed_open_time: "2026-11-16T18:16:00Z",
+      last_price: "95124.0",
+      last_price_closed: false,
+      as_of: "2026-11-16T18:17:00Z",
+      last_tick_at: "2026-11-16T18:17:03Z",
+      change_24h: null,
+      change_24h_pct: null,
+      change_24h_reference_open_time: "2026-11-15T18:16:00Z",
+      volume_24h: null,
+      volume_24h_minutes: 1439,
+      performance: { "1D": null, "1W": null, "1M": null, "3M": null, "6M": null, "1Y": null },
+    };
     const { container } = render(<Harness {...legendProps} />);
-    expect(screen.getByTestId("legend-change-24h")).toHaveTextContent("— (—)");
+    const legend = screen.getByTestId("legend-change-24h");
+    expect(legend).toHaveTextContent("— (—)");
+    // Never a bare dash: the hover names the missing minute.
+    for (const dash of legend.querySelectorAll("[title]")) {
+      expect(dash.getAttribute("title")).toMatch(/24h reference minute missing \(15 Nov, 18:16 UTC\)/);
+    }
+    expect(legend.querySelectorAll("[title]")).toHaveLength(2);
     expect(container.textContent).not.toMatch(/Sample/i);
+  });
+
+  it("before the figures arrive, the dash says they are loading", () => {
+    render(<Harness {...legendProps} />);
+    const dashes = screen.getByTestId("legend-change-24h").querySelectorAll("[title]");
+    expect(dashes).toHaveLength(2);
+    for (const d of dashes) expect(d.getAttribute("title")).toBe("Loading live figures");
+  });
+});
+
+// Phase 3: the legend OHLC and the last price label come from the live
+// forming candle, as the server's decimal strings, each coloured by the
+// direction of its last change.
+describe("chart legend live OHLC", () => {
+  afterEach(() => cleanup());
+
+  const textCandles = candleSet(3, 100).map((c) => ({
+    ...c,
+    text: { open: c.open.toFixed(2), high: c.high.toFixed(2), low: c.low.toFixed(2), close: c.close.toFixed(2) },
+  }));
+  const lastOpen = textCandles[2].openTime;
+  const tick = (close: string, high: string, seq: number, epoch = 0): LiveTick => ({
+    seq,
+    epoch,
+    candle: {
+      open_time: lastOpen,
+      close_time: new Date(Date.parse(lastOpen) + 60_000).toISOString(),
+      open: "102.00",
+      high,
+      low: "101.00",
+      close,
+      volume: "1.0000",
+      revision: 1,
+    },
+  });
+  const props = {
+    className: "",
+    symbol: "BTC",
+    venue: "hyperliquid",
+    candles: textCandles,
+    poiZone: undefined,
+    plan: undefined,
+    formationOutsideWindow: false,
+  } as unknown as HarnessProps;
+
+  it("shows the server's strings exactly, through the shared LivePrice", () => {
+    const view = render(<Harness {...props} />);
+    // The newest loaded bar: 102.00 / 103.00 / 101.00 / 102.50, at rest.
+    expect(screen.getByTestId("legend-close")).toHaveTextContent("102.50");
+    expect(screen.getByTestId("legend-close")).not.toHaveAttribute("data-dir");
+
+    // A live tick: close 102.50 -> 102.75 (up), high 103.00 -> 103.10 (up).
+    view.rerender(<Harness {...props} forming={tick("102.75", "103.10", 2)} />);
+    const close = screen.getByTestId("legend-close");
+    expect(close).toHaveTextContent("102.75");
+    expect(close).toHaveAttribute("data-dir", "up");
+    // Changed digits from the left: "102." unchanged, "75" changed.
+    expect(close.querySelector('[data-part="changed"]')).toHaveTextContent(/^75$/);
+    expect(close.querySelector('[data-part="changed"]')).toHaveClass("text-up");
+    expect(screen.getByTestId("legend-high")).toHaveAttribute("data-dir", "up");
+    // Open did not move: still at rest.
+    expect(screen.getByTestId("legend-open")).not.toHaveAttribute("data-dir");
+    expect(screen.getByTestId("last-price-label")).toHaveTextContent("102.75");
+
+    // Then down: 102.75 -> 102.40. Exact strings, never rounded.
+    view.rerender(<Harness {...props} forming={tick("102.40", "103.10", 3)} />);
+    expect(screen.getByTestId("legend-close")).toHaveTextContent("102.40");
+    expect(screen.getByTestId("legend-close")).toHaveAttribute("data-dir", "down");
+    // High unchanged this time: equal price changes nothing.
+    expect(screen.getByTestId("legend-high")).toHaveAttribute("data-dir", "up");
+    expect(screen.getByTestId("last-price-label")).toHaveTextContent("102.40");
+  });
+
+  it("while hovering an old bar, the legend shows that bar and the last price label keeps moving", () => {
+    const view = render(<Harness {...props} />);
+    // Hover the first bar (100.00 / 101.00 / 99.00 / 100.50).
+    act(() => capturedCrosshair!({ seriesData: new Map([[lastSeries, { time: tSec(0), open: 100, high: 101, low: 99, close: 100.5 }]]) }));
+    expect(screen.getByTestId("legend-close")).toHaveTextContent("100.50");
+    view.rerender(<Harness {...props} forming={tick("102.75", "103.10", 2)} />);
+    expect(screen.getByTestId("legend-close")).toHaveTextContent("100.50"); // still the hovered bar
+    expect(screen.getByTestId("last-price-label")).toHaveTextContent("102.75"); // live
+  });
+
+  it("after a reconnect (a new snapshot epoch, seq back at 1) the same bar keeps moving", () => {
+    const view = render(<Harness {...props} />);
+    view.rerender(<Harness {...props} forming={tick("102.75", "103.10", 500)} />);
+    expect(screen.getByTestId("legend-close")).toHaveTextContent("102.75");
+    // The resubscribe's snapshot restarts seq: seq 1 of a new epoch.
+    view.rerender(<Harness {...props} forming={tick("102.90", "103.10", 1, 1)} />);
+    expect(screen.getByTestId("legend-close")).toHaveTextContent("102.90");
+    view.rerender(<Harness {...props} forming={tick("102.95", "103.10", 2, 1)} />);
+    expect(screen.getByTestId("legend-close")).toHaveTextContent("102.95");
+    // Within an epoch an out-of-order (lower seq) tick is still dropped.
+    view.rerender(<Harness {...props} forming={tick("101.00", "103.10", 1, 1)} />);
+    expect(screen.getByTestId("legend-close")).toHaveTextContent("102.95");
+  });
+
+  it("an instrument with no candles shows dashes with a reason, never zeros", () => {
+    render(<Harness {...props} candles={[]} />);
+    for (const f of ["open", "high", "low", "close"]) {
+      const el = screen.getByTestId(`legend-${f}`);
+      expect(el).toHaveTextContent("—");
+      expect(el).toHaveAttribute("title", "No candle loaded for this instrument");
+    }
+  });
+});
+
+// Phase 3: the range buttons set the visible range, and say so when the
+// stored history is shorter than the range.
+describe("range buttons", () => {
+  // These tests wait asynchronously (paging is async), long enough for the
+  // library's own redraw frame to fire -- which cannot size a price axis
+  // in jsdom (no canvas layout) and throws. Faking only the animation
+  // frame keeps that redraw from running; timers and promises stay real.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["requestAnimationFrame", "cancelAnimationFrame"] });
+    lastVisibleRange = null;
+  });
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    legendState.loadHistoryBack = undefined;
+  });
+
+  const props = {
+    className: "",
+    symbol: "BTC",
+    venue: "hyperliquid",
+    poiZone: undefined,
+    plan: undefined,
+    formationOutsideWindow: false,
+  } as unknown as HarnessProps;
+
+  it("are enabled, and All shows the whole stored history", async () => {
+    render(<Harness {...props} candles={candleSet(180, 100)} />);
+    const all = screen.getByTestId("range-All");
+    expect(all).toBeEnabled();
+    legendState.loadHistoryBack = async () => ({ outcome: "exhausted", oldest: candleSet(180, 100)[0].openTime });
+    all.click();
+    await waitFor(() => expect(screen.getByTestId("range-notice")).toHaveTextContent("Showing all 3 hours of stored history"));
+    expect(all).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("says how much is shown when stored history is shorter than the range", async () => {
+    const held = candleSet(180, 100); // 179 minutes
+    legendState.loadHistoryBack = async () => ({ outcome: "exhausted", oldest: held[0].openTime });
+    render(<Harness {...props} candles={held} />);
+    screen.getByTestId("range-5D").click();
+    await waitFor(() => expect(screen.getByTestId("range-notice")).toHaveTextContent("Showing 3 hours, the most history stored"));
+    // Everything held, ending at the newest bar.
+    expect(lastVisibleRange).toEqual({ from: tSec(0), to: tSec(179) });
+  });
+
+  it("a range the held history covers is applied with no notice and no paging", async () => {
+    const held = candleSet(180, 100);
+    let paged = false;
+    legendState.loadHistoryBack = async () => {
+      paged = true;
+      return { outcome: "covered", oldest: held[0].openTime };
+    };
+    render(<Harness {...props} candles={held} />);
+    // A 1D range over 3 hours cannot be covered, so hand-build a "1D"
+    // check over a full day instead: 1441 one-minute bars.
+    cleanup();
+    const day = candleSet(1441, 100);
+    render(<Harness {...props} candles={day} />);
+    screen.getByTestId("range-1D").click();
+    await waitFor(() => expect(lastVisibleRange).toEqual({ from: tSec(0), to: tSec(1440) }));
+    expect(paged).toBe(false);
+    expect(screen.queryByTestId("range-notice")).toBeNull();
+  });
+
+  it("says so when the chart's bar cap stops the paging", async () => {
+    const held = candleSet(180, 100);
+    legendState.loadHistoryBack = async () => ({ outcome: "capped", oldest: held[0].openTime });
+    render(<Harness {...props} candles={held} />);
+    screen.getByTestId("range-1M").click();
+    await waitFor(() => expect(screen.getByTestId("range-notice")).toHaveTextContent(/the most this chart loads at 1m \(10,000 bars\)/));
   });
 });
 
@@ -958,5 +1229,61 @@ describe("default view and gap whitespace", () => {
     expect(series.dataByIndex(7)).toMatchObject({ time: Date.UTC(2026, 0, 1, 0, 7) / 1000 });
     for (const i of [3, 4, 5, 6]) expect(series.dataByIndex(i)).toBeNull();
     expect(series.dataByIndex(2)).toMatchObject({ time: Date.UTC(2026, 0, 1, 0, 2) / 1000 });
+  });
+});
+
+// Phase 3 regression (seen on real data at 1h): the workspace re-renders
+// on every live `stats` message. That must not re-run the chart's data
+// path -- a full setData dropped the live forming bar and reset the
+// legend several times a second.
+describe("a live stats update does not reload the chart", () => {
+  afterEach(() => {
+    cleanup();
+    legendState.apiCandles = [];
+    legendState.stats = undefined;
+  });
+
+  it("re-rendering with the same candles calls setData no more", () => {
+    legendState.apiCandles = Array.from({ length: 5 }, (_, i) => ({
+      open_time: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+      close_time: new Date(Date.UTC(2026, 0, 1, 0, i + 1)).toISOString(),
+      open: "100.00",
+      high: "101.00",
+      low: "99.00",
+      close: "100.50",
+      volume: "1.0000",
+      is_closed: true,
+      revision: 1,
+    }));
+    const view = render(
+      <Providers>
+        <ChartSurface />
+      </Providers>,
+    );
+    const before = setDataCount;
+    for (let i = 0; i < 5; i++) {
+      // A stats message: new figures, same candles.
+      legendState.stats = {
+        instrument_id: 1,
+        last_close: "100.50",
+        last_closed_open_time: "2026-01-01T00:04:00Z",
+        last_price: `100.5${i}`,
+        last_price_closed: false,
+        as_of: "2026-01-01T00:05:00Z",
+        last_tick_at: `2026-01-01T00:05:0${i}Z`,
+        change_24h: null,
+        change_24h_pct: null,
+        change_24h_reference_open_time: "2025-12-31T00:04:00Z",
+        volume_24h: null,
+        volume_24h_minutes: 5,
+        performance: { "1D": null, "1W": null, "1M": null, "3M": null, "6M": null, "1Y": null },
+      };
+      view.rerender(
+        <Providers>
+          <ChartSurface />
+        </Providers>,
+      );
+    }
+    expect(setDataCount).toBe(before);
   });
 });

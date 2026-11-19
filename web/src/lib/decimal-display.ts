@@ -79,3 +79,41 @@ export function formatAge(ms: number): string {
 export function addOneMinuteISO(openTimeISO: string): string {
   return new Date(new Date(openTimeISO).getTime() + 60_000).toISOString();
 }
+
+// compareDecimal compares two exact decimal strings without converting
+// either to a number (so it can never round): -1 when a < b, 0 when
+// equal, 1 when a > b. null when either is not a plain decimal string.
+// Used only to pick the direction of a change (a colour and a flash),
+// never to produce a displayed figure.
+export function compareDecimal(a: string, b: string): -1 | 0 | 1 | null {
+  const ma = DECIMAL.exec(a);
+  const mb = DECIMAL.exec(b);
+  if (!ma || !mb) return null;
+  const negA = ma[1] === "-" && !isZero(ma[2], ma[3]);
+  const negB = mb[1] === "-" && !isZero(mb[2], mb[3]);
+  if (negA !== negB) return negA ? -1 : 1;
+  const mag = compareMagnitude(ma[2], ma[3] ?? "", mb[2], mb[3] ?? "");
+  return (negA ? -mag : mag) as -1 | 0 | 1;
+}
+
+function compareMagnitude(intA: string, fracA: string, intB: string, fracB: string): -1 | 0 | 1 {
+  const ia = intA.replace(/^0+(?=\d)/, "");
+  const ib = intB.replace(/^0+(?=\d)/, "");
+  if (ia.length !== ib.length) return ia.length < ib.length ? -1 : 1;
+  if (ia !== ib) return ia < ib ? -1 : 1;
+  const len = Math.max(fracA.length, fracB.length);
+  const fa = fracA.padEnd(len, "0");
+  const fb = fracB.padEnd(len, "0");
+  if (fa === fb) return 0;
+  return fa < fb ? -1 : 1;
+}
+
+// changeDirection is the direction of a move from prev to next: "up",
+// "down", or null when either is absent or they are equal.
+export function changeDirection(prev: string | null | undefined, next: string | null | undefined): "up" | "down" | null {
+  if (prev === null || prev === undefined || next === null || next === undefined) return null;
+  const c = compareDecimal(next, prev);
+  if (c === 1) return "up";
+  if (c === -1) return "down";
+  return null;
+}

@@ -18,7 +18,7 @@
 // never a direct rewrite) -- it goes through refetchAndMergeCorrection
 // below instead, landing in `history` the same way a snapshot gap-fill
 // already does.
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listInstrumentCandles, type CandleInterval as ApiCandleInterval } from "@/api/instruments";
 import type { ApiCandleHistory } from "@/api/types";
 import {
@@ -34,9 +34,42 @@ import { checkSnapshotGap, INTERVAL_MS } from "./live-candles-reducer";
 
 const MAX_CANDLES = 1000;
 
+// [U] display values for the range buttons (Phase 3): how far back the
+// chart will page for one range, in bars, and the page size (the
+// server's own per-request cap). 10,000 one-minute bars is about 6.9
+// days; a longer range at 1m says so and suggests a longer timeframe.
+export const MAX_HISTORY_BARS = 10_000;
+const HISTORY_PAGE = 1000;
+// [U] a page can fall entirely inside a long data gap and come back
+// empty while older candles exist; this many empty pages in a row are
+// read as "nothing older is stored".
+const MAX_EMPTY_PAGES = 3;
+
+// HistoryBackResult says how a loadHistoryBack call ended:
+//   covered   -- the held history now starts at or before fromISO;
+//   exhausted -- nothing older is stored (the store ran out first);
+//   capped    -- MAX_HISTORY_BARS reached before either;
+//   cancelled -- the instrument or interval changed meanwhile, or a read failed.
+export type HistoryBackOutcome = "covered" | "exhausted" | "capped" | "cancelled";
+
+// oldest is the open time of the oldest candle held when the call ended
+// (null when none is held), so a caller can tell when that history has
+// reached the chart.
+export interface HistoryBackResult {
+  outcome: HistoryBackOutcome;
+  oldest: string | null;
+}
+
 export interface LiveTick {
   candle: WireCandlePayload;
   seq: number;
+  // epoch increments on every snapshot (a subscribe, a resubscribe after
+  // a reconnect, a stream-loss recovery). seq restarts at 1 with each
+  // snapshot, so seq is only comparable within one epoch: a consumer
+  // that keeps the last applied (open_time, revision, seq) must forget
+  // it when the epoch changes, or it drops every tick after a reconnect
+  // until a new bar opens (seen on real data at 1h, Phase 3).
+  epoch: number;
 }
 
 export interface UseLiveCandlesResult {
@@ -63,6 +96,9 @@ export interface UseLiveCandlesResult {
   // will not retry (the session itself is invalid) -- a caller shows
   // this instead of a spinner, since no amount of waiting fixes it.
   fatalReason: string | null;
+  // loadHistoryBack pages older candles into `history` until it starts
+  // at or before fromISO (see HistoryBackResult).
+  loadHistoryBack: (fromISO: string) => Promise<HistoryBackResult>;
 }
 
 export function useLiveCandles(instrumentId: number | undefined, interval: CandleInterval): UseLiveCandlesResult {
@@ -84,8 +120,15 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
   // chart-surface.tsx, for the same underlying reason).
   const historyRef = useRef<ApiCandleHistory | null>(null);
   historyRef.current = history;
+  const epochRef = useRef(0);
+  // generationRef identifies the current (instrument, interval) load, so a
+  // history page that returns after a switch is dropped, not merged.
+  const generationRef = useRef(0);
+  const currentRef = useRef<{ instrumentId: number | undefined; interval: CandleInterval }>({ instrumentId, interval });
 
   useEffect(() => {
+    generationRef.current++;
+    currentRef.current = { instrumentId, interval };
     if (instrumentId === undefined) {
       // No instrument resolved (yet, or at all) -- reset rather than
       // leave a previous instrument's own history on screen under a
@@ -145,9 +188,9 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
       onSnapshot: (payload, seq) => {
         applySnapshot(instrumentId, interval, payload, seq);
       },
-      onCandle: (payload, seq) => setForming({ candle: payload, seq }),
+      onCandle: (payload, seq) => setForming({ candle: payload, seq, epoch: epochRef.current }),
       onCandleClosed: (payload, seq) => {
-        setForming({ candle: payload, seq });
+        setForming({ candle: payload, seq, epoch: epochRef.current });
         setLastClosedSeq(seq);
       },
       // Never surfaced via `forming` -- see this file's own doc comment
@@ -163,7 +206,8 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
       const held = historyRef.current;
       const newestHeldOpenTime = held && held.candles.length > 0 ? held.candles[held.candles.length - 1].open_time : null;
       const gap = checkSnapshotGap(payload, newestHeldOpenTime, INTERVAL_MS[iv]);
-      if (payload.candle) setForming({ candle: payload.candle, seq });
+      epochRef.current++;
+      if (payload.candle) setForming({ candle: payload.candle, seq, epoch: epochRef.current });
       if (!gap.hasGap || !gap.refetchFrom || !gap.refetchTo) return;
 
       // review item 6: fill exactly the missing range before any live
@@ -216,6 +260,53 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
     };
   }, [instrumentId, interval]);
 
+  const loadHistoryBack = useCallback(async (fromISO: string): Promise<HistoryBackResult> => {
+    const gen = generationRef.current;
+    const { instrumentId: id, interval: iv } = currentRef.current;
+    if (id === undefined) return { outcome: "cancelled", oldest: null };
+    const target = Date.parse(fromISO);
+    const stepMs = INTERVAL_MS[iv] * HISTORY_PAGE;
+    let empties = 0;
+    let to: string | null = null;
+    const end = (outcome: HistoryBackOutcome): HistoryBackResult => {
+      const held = historyRef.current;
+      return { outcome, oldest: held && held.candles.length > 0 ? held.candles[0].open_time : null };
+    };
+    for (;;) {
+      const held = historyRef.current;
+      if (!held || gen !== generationRef.current) return end("cancelled");
+      const oldest = held.candles.length > 0 ? held.candles[0].open_time : null;
+      if (oldest === null) return end("exhausted");
+      if (Date.parse(oldest) <= target) return end("covered");
+      if (held.candles.length >= MAX_HISTORY_BARS) return end("capped");
+      // Walk back from the oldest held candle, or further back past the
+      // empty pages already read.
+      const pageTo: string = to ?? oldest;
+      const pageFrom = new Date(Date.parse(pageTo) - stepMs).toISOString();
+      let page: ApiCandleHistory;
+      try {
+        page = await listInstrumentCandles(id, { interval: iv as ApiCandleInterval, order: "asc", from: pageFrom, to: pageTo, limit: HISTORY_PAGE });
+      } catch {
+        return end("cancelled");
+      }
+      if (gen !== generationRef.current || !historyRef.current) return end("cancelled");
+      const current = historyRef.current;
+      const currentOldest = current.candles.length > 0 ? current.candles[0].open_time : null;
+      const older = page.candles.filter((c) => currentOldest === null || Date.parse(c.open_time) < Date.parse(currentOldest));
+      if (older.length === 0) {
+        empties++;
+        if (empties >= MAX_EMPTY_PAGES) return end("exhausted");
+        to = pageFrom;
+        continue;
+      }
+      empties = 0;
+      to = null;
+      const merged: ApiCandleHistory = { ...current, candles: [...older, ...current.candles] };
+      historyRef.current = merged;
+      setHistory(merged);
+    }
+  }, []);
+
   return {
     history,
     historyLoading,
@@ -226,5 +317,6 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
     lastError,
     status,
     fatalReason,
+    loadHistoryBack,
   };
 }

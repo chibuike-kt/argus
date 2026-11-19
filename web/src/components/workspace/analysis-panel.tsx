@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Eye,
   EyeSlash,
@@ -14,25 +14,30 @@ import { EM_DASH, addOneMinuteISO, direction, formatAge, formatPercent, toneClas
 import { PERFORMANCE_PERIODS } from "@/api/types";
 import { parseRatString } from "@/api/money";
 import { cn } from "@/lib/cn";
+import { LiveFigure } from "@/components/ui/live-figure";
+import { finalizedReason, feedLine, performanceReason } from "@/lib/figure-reasons";
+import { useNow } from "@/lib/use-now";
 import { useAnalysisWorkspace } from "./analysis-workspace";
 import { SetupPanel } from "./setup-panel";
 import { BiasGauge } from "./bias-gauge";
 
-// %-over-timeframe tiles (real-panel-data brief rule 4), every value
-// from GET /instruments/stats: last close against the closed 1-minute
-// candle exactly that far back (1D = 24h, 1W = 7d, 1M = 30d, 3M = 90d,
-// 6M = 180d, 1Y = 365d). A period whose exact reference candle does not
-// exist shows an em dash on a neutral tile -- with a few days of
-// history only 1D can show, which is correct, not a bug.
+// %-over-timeframe tiles (real-panel-data brief rule 4, unchanged by D3),
+// every value from GET /instruments/stats via the page's one stats
+// source: the latest closed close against the closed 1-minute candle
+// exactly that far back (1D = 24h, 1W = 7d, 1M = 30d, 3M = 90d, 6M =
+// 180d, 1Y = 365d). Re-read shortly after every minute closes. A period
+// whose exact reference candle does not exist shows an em dash whose
+// hover names the missing minute -- with a few days of history only 1D
+// can show, which is correct, not a bug.
 function PerformanceTiles() {
-  const { instrument, stats } = useAnalysisWorkspace();
+  const { instrument, statsEntry, statsSnapshot } = useAnalysisWorkspace();
   if (!instrument) return null;
   return (
     <div data-testid="performance-tiles">
       <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-fg-subtle">Performance</div>
       <div className="grid grid-cols-3 gap-2">
         {PERFORMANCE_PERIODS.map((tf) => {
-          const pct = stats?.performance[tf] ?? null;
+          const pct = statsEntry?.closed?.performance[tf] ?? null;
           const d = direction(pct);
           return (
             <div
@@ -44,7 +49,14 @@ function PerformanceTiles() {
               )}
             >
               <div className="text-[10px] font-medium uppercase tracking-wide text-fg-subtle">{tf}</div>
-              <div className={cn("tnum mt-0.5 text-[13px] font-semibold", toneClass(pct))}>{formatPercent(pct)}</div>
+              <div className={cn("tnum mt-0.5 text-[13px] font-semibold", toneClass(pct))}>
+                <LiveFigure
+                  tone="none"
+                  className="px-0"
+                  text={pct !== null ? formatPercent(pct) : null}
+                  reason={performanceReason(tf, statsEntry, statsSnapshot)}
+                />
+              </div>
             </div>
           );
         })}
@@ -82,23 +94,15 @@ function BiasLine() {
   );
 }
 
-// useNow re-renders once a second so an age readout keeps counting.
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
-  return now;
-}
-
 // Data quality (real-panel-data brief rule 7): "finalized through" is
 // the end of the latest closed 1-minute candle (its open time from GET
 // /instruments/stats plus one minute) in UTC, with that candle's age as
-// a plain number; provider name and connection state come from the live
-// socket. Deliberately no freshness verdict (live/stale): those
+// a plain number; then this instrument's live feed in plain words
+// (connected or not, and how long since its last stored tick) and the
+// provider. Deliberately no freshness verdict (live/stale): those
 // thresholds are open in ADR-006 and appendix C, so nothing here judges
-// the age.
+// the age; "No new ticks for Ns" is a number shown after a [U] display
+// threshold (live-stats.ts, NO_TICK_NOTICE_AFTER_MS).
 //
 // The open time comes from the stats endpoint, not the candles
 // endpoint's own last_closed_open_time: that field is the chart's
@@ -107,25 +111,33 @@ function useNow(): number {
 // above 1m. The stats value is always the latest closed 1-minute
 // candle's.
 function DataQualityRow() {
-  const { stats, status, connectionState } = useAnalysisWorkspace();
-  const now = useNow();
-  const openTime = stats?.last_closed_open_time ?? null;
+  const { statsEntry, statsSnapshot, status, connectionState } = useAnalysisWorkspace();
+  const now = useNow(1000);
+  const openTime = statsEntry?.closed?.last_closed_open_time ?? null;
   const through = openTime ? addOneMinuteISO(openTime) : null;
+  const feed = feedLine(statsEntry, statsSnapshot, now);
   return (
     <div className="flex items-start gap-2 rounded-lg bg-white/[0.03] px-3 py-2" data-testid="data-quality">
       <Broadcast className="mt-0.5 size-4 shrink-0 text-fg-subtle" />
       <div className="flex-1 text-[12px] leading-snug text-fg-muted">
         <p>
           Finalized through{" "}
-          <span className="tnum text-fg" data-testid="finalized-through">
-            {through ? formatUTC(through) : EM_DASH}
-          </span>
+          <LiveFigure
+            testId="finalized-through"
+            tone="none"
+            className="px-0 text-fg"
+            text={through ? formatUTC(through) : null}
+            reason={finalizedReason(statsEntry, statsSnapshot)}
+          />
           {through && (
             <span className="tnum text-fg-subtle" data-testid="finalized-age">
               {" "}
               · {formatAge(now - new Date(through).getTime())}
             </span>
           )}
+        </p>
+        <p className={cn(feed.quiet ? "text-fg-muted" : "text-fg-subtle")} data-testid="feed-line">
+          {feed.text}
         </p>
         <p className="text-fg-subtle">
           <span data-testid="feed-provider">{status?.provider ?? EM_DASH}</span> · socket{" "}

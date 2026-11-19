@@ -3,10 +3,10 @@ import { useSearchParams } from "react-router-dom";
 import { getSetup, listSetups } from "@/api/setups";
 import { listInstruments } from "@/api/instruments";
 import type { ApiCandle, ApiInstrument, ApiInstrumentStats, ApiSetup, ApiSetupEvent } from "@/api/types";
-import { useInstrumentStats } from "@/api/use-instrument-stats";
+import { toInstrumentStats, useLiveStat, type LiveStatsEntry, type LiveStatsSnapshot } from "@/lib/live-stats";
 import { listSetupEvents } from "@/api/setups";
 import { ApiClientError } from "@/api/client";
-import { useLiveCandles, type LiveTick } from "@/lib/use-live-candles";
+import { useLiveCandles, type HistoryBackResult, type LiveTick } from "@/lib/use-live-candles";
 import { preferences, usePreferences, usePreferencesSynced } from "@/lib/preferences";
 import { useWatchlist } from "@/api/hooks";
 import type { CandleInterval, ConnectionState, WireStatusPayload } from "@/lib/live-socket";
@@ -83,13 +83,21 @@ interface AnalysisWorkspace {
   // will not retry (the session itself is invalid) -- chart-surface.tsx
   // shows this instead of a spinner.
   fatalReason: string | null;
-  // GET /instruments/stats for the selected instrument (real-panel-data
-  // brief): the side panel's 24h change, 24h volume, performance tiles
-  // and data-quality row, and the chart legend's change, all from one
-  // request. undefined while loading or when it failed -- every consumer
-  // shows an em dash then, never a sample number. Never the previous
-  // instrument's row (useInstrumentStats' own request token).
+  // The selected instrument's figures from the page's ONE live stats
+  // source (live-stats.ts, Phase 3): GET /instruments/stats once, then
+  // every `stats` WebSocket message. The side panel, the watchlist and
+  // the chart legend all read this same entry, so they can never show
+  // two different 24h changes. stats is undefined until both the live
+  // and the closed-candle figures have arrived; statsEntry carries the
+  // live part (and its motion) on its own as soon as it exists. Never
+  // the previous instrument's figures: entries are keyed by id.
   stats: ApiInstrumentStats | undefined;
+  statsEntry: LiveStatsEntry | undefined;
+  statsSnapshot: LiveStatsSnapshot;
+  // Extends the chart's history back to fromISO (the range buttons):
+  // pages of older candles until it is covered, nothing older is stored
+  // (exhausted) or the chart's own bar cap is reached (capped).
+  loadHistoryBack: (fromISO: string) => Promise<HistoryBackResult>;
 }
 
 const Ctx = createContext<AnalysisWorkspace | null>(null);
@@ -344,12 +352,10 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     [live.historyError],
   );
 
-  // 6. Side-panel stats for the selected instrument: refreshed on its
-  // own timer and whenever the live socket delivers a closed candle
-  // (live.lastClosedSeq), never carried over from a previous instrument.
-  const statsIds = useMemo(() => (instrument ? [instrument.id] : []), [instrument]);
-  const statsState = useInstrumentStats(statsIds, live.lastClosedSeq);
-  const stats = instrument ? statsState.data?.get(instrument.id) : undefined;
+  // 6. Live figures for the selected instrument, from the page's one
+  // stats source (no polling: the socket pushes every change).
+  const { entry: statsEntry, snapshot: statsSnapshot } = useLiveStat(instrument?.id);
+  const stats = toInstrumentStats(statsEntry);
 
   const value: AnalysisWorkspace = {
     instruments,
@@ -374,6 +380,9 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     status: live.status,
     fatalReason: live.fatalReason,
     stats,
+    statsEntry,
+    statsSnapshot,
+    loadHistoryBack: live.loadHistoryBack,
   };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
