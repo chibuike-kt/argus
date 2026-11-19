@@ -261,7 +261,7 @@
     letter-spacing: -0.01em;
   }
 
-  /* A brief tint on a number right as it changes (see useFlash), fading
+  /* A brief tint on a number right as it changes (see LiveFigure, components/ui/live-figure.tsx), fading
      back to nothing over --dur/--ease-out via .transition-base -- the
      "tick" feel of a real price display, not an abrupt snap. Padded
      slightly so the tint reads as a tag around the number, not a bleed. */

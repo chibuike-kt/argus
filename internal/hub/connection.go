@@ -60,6 +60,9 @@ type Connection struct {
 
 	mu   sync.Mutex
 	subs map[subscriptionKey]*subState
+	// stats is the set of instrument ids this connection streams live
+	// stats for (stats.go). Guarded by mu.
+	stats map[int64]struct{}
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -79,6 +82,7 @@ func NewConnection(sink Sink, userID int64, sessionID, remoteIP string, cfg conf
 		cfg:       cfg,
 		clk:       clk,
 		subs:      make(map[subscriptionKey]*subState),
+		stats:     make(map[int64]struct{}),
 		closed:    make(chan struct{}),
 	}
 }

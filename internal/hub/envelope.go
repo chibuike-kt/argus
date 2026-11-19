@@ -24,6 +24,12 @@ const (
 	TypeStatus          MessageType = "status"
 	TypeHeartbeat       MessageType = "heartbeat"
 	TypeError           MessageType = "error"
+
+	// Live stats (product overhaul brief, Phase 3): subscribe_stats and
+	// unsubscribe_stats are client-sent, stats is server-sent.
+	TypeSubscribeStats   MessageType = "subscribe_stats"
+	TypeUnsubscribeStats MessageType = "unsubscribe_stats"
+	TypeStats            MessageType = "stats"
 )
 
 // envelopeVersion is the WS contract's own schema version

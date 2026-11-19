@@ -20,6 +20,8 @@
 // that silently stopped delivering data), and policy-close handling
 // (session invalid vs. rate-limited vs. an ordinary transient drop).
 
+import type { ApiLiveFigures } from "@/api/types";
+
 export type CandleInterval = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 
 // [U] -- these three mirror internal/config/live_feed.go's own
@@ -112,6 +114,27 @@ export interface WireErrorPayload {
   message: string;
 }
 
+// WireStatsPayload is the `stats` message's payload: one instrument's
+// live figures (the same shape as GET /instruments/stats' live fields).
+export type WireStatsPayload = ApiLiveFigures;
+
+// LiveStatsHandlers receives the page's one multiplexed stats
+// subscription (Phase 3): `stats` messages, per-instrument errors (an
+// instrument that is unknown or disabled), and the socket's lifecycle.
+export interface LiveStatsHandlers {
+  onStats: (payload: WireStatsPayload) => void;
+  // instrumentId is null for an error about the whole subscribe_stats
+  // message (for example, too many instruments).
+  onStatsError?: (instrumentId: number | null, payload: WireErrorPayload) => void;
+  onConnectionState?: (state: ConnectionState) => void;
+  // A fatal policy close (the session is invalid): nothing will retry.
+  onFatalClose?: (reason: string) => void;
+}
+
+// STATS_SUB_PREFIX matches internal/hub's StatsSub ("stats:<id>") and
+// StatsSubAll ("stats").
+const STATS_SUB_PREFIX = "stats";
+
 type ServerMessageType =
   | "snapshot"
   | "candle"
@@ -119,11 +142,12 @@ type ServerMessageType =
   | "candle_corrected"
   | "status"
   | "heartbeat"
+  | "stats"
   | "error";
 
 interface Envelope {
   v: number;
-  type: ServerMessageType | "subscribe" | "unsubscribe";
+  type: ServerMessageType | "subscribe" | "unsubscribe" | "subscribe_stats" | "unsubscribe_stats";
   id?: string;
   ts: string;
   sub?: string;
@@ -208,6 +232,59 @@ class LiveSocket {
   // sending a close frame), so nothing else would ever trigger a
   // reconnect in that case.
   private heartbeatWatchdog: ReturnType<typeof setTimeout> | null = null;
+  // The page's one stats subscription (Phase 3): the whole set of
+  // instruments it wants live figures for, sent as ONE subscribe_stats
+  // (never one subscription per row), and resent on every (re)open.
+  private statsIds: number[] = [];
+  private statsHandlers: LiveStatsHandlers | null = null;
+
+  // setStats replaces the page's stats subscription with ids (an empty
+  // list ends it). Opens the socket when needed; the returned function
+  // ends the subscription if it is still this one.
+  setStats(ids: readonly number[], handlers: LiveStatsHandlers): () => void {
+    if (this.closeTimer !== null) {
+      clearTimeout(this.closeTimer);
+      this.closeTimer = null;
+    }
+    if (this.statsHandlers?.onConnectionState && this.statsHandlers !== handlers) {
+      this.connectionStateListeners.delete(this.statsHandlers.onConnectionState);
+    }
+    this.statsIds = [...ids];
+    this.statsHandlers = handlers;
+    if (handlers.onConnectionState) {
+      this.connectionStateListeners.add(handlers.onConnectionState);
+      handlers.onConnectionState(this.state);
+    }
+    if (this.statsIds.length > 0) {
+      this.ensureConnected();
+      this.sendSubscribeStats();
+    } else {
+      this.send({ v: 1, type: "unsubscribe_stats", ts: new Date().toISOString() });
+      this.scheduleCloseIfIdle();
+    }
+    return () => {
+      if (this.statsHandlers !== handlers) return;
+      if (handlers.onConnectionState) this.connectionStateListeners.delete(handlers.onConnectionState);
+      this.statsHandlers = null;
+      if (this.statsIds.length > 0) this.send({ v: 1, type: "unsubscribe_stats", ts: new Date().toISOString() });
+      this.statsIds = [];
+      this.scheduleCloseIfIdle();
+    };
+  }
+
+  private wanted(): boolean {
+    return this.subs.size > 0 || this.statsIds.length > 0;
+  }
+
+  private sendSubscribeStats(): void {
+    if (this.statsIds.length === 0) return;
+    this.send({
+      v: 1,
+      type: "subscribe_stats",
+      ts: new Date().toISOString(),
+      payload: { instrument_ids: this.statsIds },
+    });
+  }
 
   // subscribe opens the connection if this is the first subscription on
   // the whole page, and sends a `subscribe` message for this
@@ -267,10 +344,10 @@ class LiveSocket {
   // earlier, synchronous-close version of this method.
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
   private scheduleCloseIfIdle(): void {
-    if (this.subs.size > 0 || this.closeTimer !== null) return;
+    if (this.wanted() || this.closeTimer !== null) return;
     this.closeTimer = setTimeout(() => {
       this.closeTimer = null;
-      if (this.subs.size === 0) this.close();
+      if (!this.wanted()) this.close();
     }, 0);
   }
 
@@ -312,6 +389,7 @@ class LiveSocket {
       // half is use-live-candles.ts's own checkSnapshotGap, triggered
       // by the snapshot this subscribe produces.
       for (const key of this.subs.keys()) this.sendSubscribe(key);
+      this.sendSubscribeStats();
     };
     ws.onmessage = (event: MessageEvent<string>) => {
       this.resetHeartbeatWatchdog();
@@ -322,7 +400,7 @@ class LiveSocket {
       this.ws = null;
       this.clearHeartbeatWatchdog();
       this.setState("closed");
-      if (this.subs.size === 0) return; // nothing wants this connection anymore
+      if (!this.wanted()) return; // nothing wants this connection anymore
 
       const policy = classifyClose(event.code, event.reason);
       if (policy === "fatal") {
@@ -332,11 +410,16 @@ class LiveSocket {
         // (a new page load) can recover from this, never a retry loop.
         const subs = [...this.subs.values()];
         this.subs.clear();
+        const stats = this.statsHandlers;
+        this.statsIds = [];
+        this.statsHandlers = null;
         this.setState("failed"); // while the listeners are still registered
         for (const sub of subs) {
           if (sub.handlers.onConnectionState) this.connectionStateListeners.delete(sub.handlers.onConnectionState);
         }
+        if (stats?.onConnectionState) this.connectionStateListeners.delete(stats.onConnectionState);
         for (const sub of subs) sub.handlers.onFatalClose?.(event.reason);
+        stats?.onFatalClose?.(event.reason);
         return;
       }
       if (policy === "rate-limited") {
@@ -366,7 +449,7 @@ class LiveSocket {
     this.reconnectAttempt++;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this.subs.size > 0) this.ensureConnected();
+      if (this.wanted()) this.ensureConnected();
     }, delay);
   }
 
@@ -428,6 +511,19 @@ class LiveSocket {
     try {
       env = JSON.parse(data) as Envelope;
     } catch {
+      return;
+    }
+    if (env.sub && (env.sub === STATS_SUB_PREFIX || env.sub.startsWith(STATS_SUB_PREFIX + ":"))) {
+      // Stats are outside every seq space (the hub sends the full current
+      // figures each time), so there is no gap check here.
+      const handlers = this.statsHandlers;
+      if (!handlers) return;
+      if (env.type === "stats") {
+        handlers.onStats(env.payload as WireStatsPayload);
+      } else if (env.type === "error") {
+        const id = env.sub === STATS_SUB_PREFIX ? null : Number(env.sub.slice(STATS_SUB_PREFIX.length + 1));
+        handlers.onStatsError?.(id !== null && Number.isFinite(id) ? id : null, env.payload as WireErrorPayload);
+      }
       return;
     }
     if (!env.sub) {

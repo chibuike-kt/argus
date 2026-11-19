@@ -2,7 +2,11 @@ import { type ReactNode } from "react";
 import { Plus, Columns, DotsThree, CaretDown, CircleNotch } from "@phosphor-icons/react";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { useInstruments, useWatchlist } from "@/api/hooks";
-import { useInstrumentStats } from "@/api/use-instrument-stats";
+import { LiveFigure } from "@/components/ui/live-figure";
+import { LivePrice } from "@/components/ui/live-price";
+import { feedLine, liveReason } from "@/lib/figure-reasons";
+import { useLiveStats, type LiveStatsEntry, type LiveStatsSnapshot } from "@/lib/live-stats";
+import { useNow } from "@/lib/use-now";
 import { formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
 import { preferences, usePreferences } from "@/lib/preferences";
 import { cn } from "@/lib/cn";
@@ -17,24 +21,29 @@ function IconBtn({ children }: { children: ReactNode }) {
   );
 }
 
-// Row renders the decimal strings GET /instruments/stats sent, as sent
-// (thousands separators only -- no number conversion, real-panel-data
-// brief rule 10). null/undefined is an em dash, never a fabricated 0.
+// Row renders one watched instrument's live figures from the page's one
+// stats source (Phase 3): the server's decimal strings as sent
+// (thousands separators only, never a number conversion). Last is the
+// shared <LivePrice>; Chg and Chg% are coloured by their sign. A dash carries its reason on
+// hover, and the row's hover names the feed state in plain words.
 function Row({
   symbol,
-  last,
-  change,
-  changePct,
+  entry,
+  snapshot,
+  now,
 }: {
   symbol: string;
-  last?: string | null;
-  change?: string | null;
-  changePct?: string | null;
+  entry: LiveStatsEntry | undefined;
+  snapshot: LiveStatsSnapshot;
+  now: number;
 }) {
-  const tone = toneClass(change);
+  const f = entry?.figures ?? null;
+  const tone = toneClass(f?.change_24h);
+  const feed = feedLine(entry, snapshot, now);
   return (
     <button
       data-testid={`watchlist-row-${symbol}`}
+      title={`${symbol.replace(".P", "")}: ${feed.text}`}
       className={cn(
         "focus-ring w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/5",
         COLS,
@@ -44,9 +53,35 @@ function Row({
         <CoinIcon symbol={symbol} size={20} />
         <span className="truncate text-[13px] font-medium">{symbol.replace(".P", "")}</span>
       </span>
-      <span className="tnum truncate text-right text-[13px]">{formatDecimal(last)}</span>
-      <span className={cn("tnum truncate text-right text-[12px]", tone)}>{formatDecimal(change, { signed: true })}</span>
-      <span className={cn("tnum truncate text-right text-[12px]", tone)}>{formatPercent(changePct)}</span>
+      <span className={cn("truncate text-right text-[13px]", feed.quiet && "opacity-70")}>
+        <LivePrice
+          testId={`watchlist-last-${symbol}`}
+          value={f?.last_price ?? null}
+          text={f?.last_price != null ? formatDecimal(f.last_price) : null}
+          reason={liveReason("last_price", entry, snapshot)}
+          resetKey={symbol}
+        />
+      </span>
+      <span className="truncate text-right text-[12px]">
+        <LiveFigure
+          testId={`watchlist-chg-${symbol}`}
+          tone="sign"
+          signTone={tone}
+          text={f?.change_24h != null ? formatDecimal(f.change_24h, { signed: true }) : null}
+          reason={liveReason("change_24h", entry, snapshot)}
+          motion={entry?.motion.change_24h}
+        />
+      </span>
+      <span className="truncate text-right text-[12px]">
+        <LiveFigure
+          testId={`watchlist-chgpct-${symbol}`}
+          tone="sign"
+          signTone={tone}
+          text={f?.change_24h_pct != null ? formatPercent(f.change_24h_pct) : null}
+          reason={liveReason("change_24h_pct", entry, snapshot)}
+          motion={entry?.motion.change_24h_pct}
+        />
+      </span>
     </button>
   );
 }
@@ -88,12 +123,15 @@ export function Watchlist() {
     .map((id) => byId.get(id))
     .filter((inst): inst is NonNullable<typeof inst> => inst !== undefined);
 
-  // Last, Chg and Chg% for every watched instrument from ONE
-  // GET /instruments/stats request (real-panel-data brief), so all three
-  // come from the same server snapshot. Chg is against the closed
-  // 1-minute candle exactly 24h before the latest one; an em dash when
-  // that candle does not exist. Refreshed on the hook's own timer.
-  const stats = useInstrumentStats(watched.map((i) => i.id)).data;
+  // Last, Chg and Chg% for every watched instrument from the page's one
+  // live stats source: one GET /instruments/stats for the whole list,
+  // then ONE multiplexed subscribe_stats on the socket (never one
+  // subscription per row). D3: Last is the forming candle's close, Chg
+  // is against the closed candle exactly 24h before the current minute.
+  // (useLiveStats keys its subscription on the ids' joined value, so a
+  // new array with the same ids each render changes nothing.)
+  const snapshot = useLiveStats(watched.map((i) => i.id));
+  const now = useNow(1000);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -140,18 +178,15 @@ export function Watchlist() {
           {error && <div className="px-2 py-2 text-[12px] text-down">{error.message}</div>}
           {!loading &&
             !error &&
-            watched.map((inst) => {
-              const row = stats?.get(inst.id);
-              return (
-                <Row
-                  key={inst.id}
-                  symbol={inst.native_symbol}
-                  last={row?.last_close}
-                  change={row?.change_24h}
-                  changePct={row?.change_24h_pct}
-                />
-              );
-            })}
+            watched.map((inst) => (
+              <Row
+                key={inst.id}
+                symbol={inst.native_symbol}
+                entry={snapshot.entries.get(inst.id)}
+                snapshot={snapshot}
+                now={now}
+              />
+            ))}
           {!loading && !error && watched.length === 0 && (
             <div className="px-2 py-2 text-[12px] text-fg-subtle">
               Your watchlist is empty. Add a pair from onboarding or account settings.

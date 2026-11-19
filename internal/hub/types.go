@@ -67,6 +67,12 @@ type CandleEvent struct {
 	Close     quant.Price `json:"close"`
 	Volume    quant.Qty   `json:"volume"`
 	Revision  int32       `json:"revision"`
+	// IngestedAt is the stored row's ingested_at (when ARGUS received
+	// this value), carried so the live `stats` message's last_tick_at
+	// means exactly what GET /instruments/stats' does. Zero from a
+	// worker that predates the field: the hub then reads the figures
+	// from the database instead of trusting a zero time.
+	IngestedAt time.Time `json:"ingested_at,omitzero"`
 }
 
 // Interval is one of the six values Phase 1's REST endpoint already

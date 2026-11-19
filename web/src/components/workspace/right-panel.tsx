@@ -4,6 +4,10 @@ import { CoinIcon } from "@/components/ui/coin-icon";
 import { TabsRoot, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/cn";
 import { formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
+import { LiveFigure } from "@/components/ui/live-figure";
+import { LivePrice } from "@/components/ui/live-price";
+import { feedLine, liveReason } from "@/lib/figure-reasons";
+import { useNow } from "@/lib/use-now";
 import { useAnalysisWorkspace } from "./analysis-workspace";
 import { preferences, usePreferences } from "@/lib/preferences";
 import { Watchlist } from "./watchlist";
@@ -40,18 +44,23 @@ function IconBtn({ children }: { children: ReactNode }) {
 }
 
 // Symbol detail: the selected instrument's own id/symbol/provider (GET
-// /instruments, via the workspace) and every figure from GET
-// /instruments/stats (real-panel-data brief rules 1, 2, 10) -- computed
-// on the server from stored candles, rendered here from the decimal
-// strings as sent. A figure whose candles do not all exist shows an em
-// dash. The fixture-era "Avg. volume (30D)" figure and News block are
-// gone (rules 3 and 5): there is no 30-day average defined and no news
-// source.
+// /instruments, via the workspace) and its live figures from the page's
+// one stats source (Phase 3, D3: the forming candle's close, the 24h
+// change against the price exactly 24h before the current minute, the
+// 24h volume over the 1440 minutes ending now). Every figure is the
+// server's decimal string as sent; the last price is the shared
+// <LivePrice> (direction colour, then only the changed digits stay
+// coloured); the change figures are coloured by sign.
+// A dash always carries its reason on hover.
 function SymbolDetail() {
-  const { instrument, stats } = useAnalysisWorkspace();
+  const { instrument, statsEntry, statsSnapshot } = useAnalysisWorkspace();
+  const now = useNow(1000);
   if (!instrument) return null;
-  const changeTone = toneClass(stats?.change_24h);
+  const f = statsEntry?.figures ?? null;
+  const motion = statsEntry?.motion;
+  const changeTone = toneClass(f?.change_24h);
   const volumeUnit = instrument.base_asset ?? "";
+  const feed = feedLine(statsEntry, statsSnapshot, now);
 
   return (
     <div className="max-h-[50%] shrink-0 overflow-y-auto border-t-2 border-line-strong" data-testid="symbol-detail">
@@ -81,22 +90,53 @@ function SymbolDetail() {
         </div>
 
         <div className="mt-3 flex items-end gap-2">
-          <span className="tnum text-3xl font-semibold leading-none" data-testid="detail-last">
-            {formatDecimal(stats?.last_close)}
-          </span>
+          <LivePrice
+            testId="detail-last"
+            className={cn("text-3xl font-semibold leading-none", feed.quiet && "opacity-70")}
+            value={f?.last_price ?? null}
+            text={f?.last_price != null ? formatDecimal(f.last_price) : null}
+            reason={liveReason("last_price", statsEntry, statsSnapshot)}
+            resetKey={instrument.id}
+          />
           {instrument.quote_asset && <span className="text-xs text-fg-subtle">{instrument.quote_asset}</span>}
         </div>
-        <div className={cn("tnum mt-1.5 flex items-center gap-1.5 text-[13px] font-medium", changeTone)}>
-          <span data-testid="detail-change-24h">{formatDecimal(stats?.change_24h, { signed: true })}</span>
-          <span data-testid="detail-change-24h-pct">({formatPercent(stats?.change_24h_pct)})</span>
+        <div className="tnum mt-1.5 flex items-center gap-1.5 text-[13px] font-medium">
+          <LiveFigure
+            testId="detail-change-24h"
+            tone="sign"
+            signTone={changeTone}
+            text={f?.change_24h != null ? formatDecimal(f.change_24h, { signed: true }) : null}
+            reason={liveReason("change_24h", statsEntry, statsSnapshot)}
+            motion={motion?.change_24h}
+          />
+          <span className={changeTone}>(</span>
+          <LiveFigure
+            testId="detail-change-24h-pct"
+            tone="sign"
+            signTone={changeTone}
+            className="px-0"
+            text={f?.change_24h_pct != null ? formatPercent(f.change_24h_pct) : null}
+            reason={liveReason("change_24h_pct", statsEntry, statsSnapshot)}
+            motion={motion?.change_24h_pct}
+          />
+          <span className={changeTone}>)</span>
           <span className="text-[11px] font-normal text-fg-subtle">24h</span>
         </div>
+        <p className="mt-1 text-[11px] text-fg-subtle" data-testid="detail-feed">
+          {feed.text}
+        </p>
 
         <div className="mt-4">
           <div className="mb-1 text-[11px] text-fg-subtle">Volume 24h (base asset volume)</div>
-          <div className="tnum text-[13px] font-medium" data-testid="detail-volume-24h">
-            {formatDecimal(stats?.volume_24h)}
-            {stats?.volume_24h != null && volumeUnit && <span className="ml-1 text-fg-subtle">{volumeUnit}</span>}
+          <div className="text-[13px] font-medium">
+            <LiveFigure
+              testId="detail-volume-24h"
+              tone="none"
+              text={f?.volume_24h != null ? formatDecimal(f.volume_24h) : null}
+              reason={liveReason("volume_24h", statsEntry, statsSnapshot)}
+              motion={motion?.volume_24h}
+              suffix={f?.volume_24h != null && volumeUnit ? <span className="ml-1 text-fg-subtle">{volumeUnit}</span> : null}
+            />
           </div>
         </div>
       </div>

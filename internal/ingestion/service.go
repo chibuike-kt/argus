@@ -97,6 +97,7 @@ func (s *Service) publishCandleEvent(ctx context.Context, kind hub.EventKind, c 
 		Close:        c.Close,
 		Volume:       c.Volume,
 		Revision:     c.Revision,
+		IngestedAt:   c.IngestedAt.Time(),
 	}
 	if err := s.publisher.Publish(ctx, ev); err != nil {
 		s.logger.Warn("ingestion: publish candle event", "instrument_id", c.InstrumentID, "open_time", c.OpenTime, "kind", kind, "error", err)

@@ -86,21 +86,32 @@ type Querier interface {
 	// that got zero rows from ResolveCandleGap can tell "never existed" apart
 	// from "already resolved" instead of guessing.
 	GetCandleGap(ctx context.Context, arg GetCandleGapParams) (CandleGap, error)
-	// GetCandleStatsInputs is GET /instruments/stats' own read path (real-
-	// panel-data brief): everything the side panel's 24h change, 24h volume
-	// and performance tiles need for one instrument, in one statement.
+	// GetCandleStatsInputs is GET /instruments/stats' own read path and the
+	// live `stats` WebSocket message's (re)base: everything the side panel's
+	// live price, 24h change, 24h volume and performance tiles need for one
+	// instrument, in one statement.
 	//
-	//   * latest: the latest current, closed 1-minute candle (the same row
-	//     GetLatestClosedCandle returns).
-	//   * vol: count and sum of base volume over the current, closed
-	//     candles with open_time in (latest - volume_window_seconds,
-	//     latest] -- the caller treats the sum as present only when count
-	//     equals the full window (no gap, nothing guessed).
-	//   * reference_found/reference_closes: for each offset in
-	//     offsets_seconds (in order), whether a current, closed candle
-	//     exists at EXACTLY latest.open_time - offset, and its close (0
-	//     when not found -- reference_found is the only signal; a nearby
-	//     candle is never used, nothing is interpolated).
+	//   * anchor: the newest current 1-minute candle, forming or closed --
+	//     D3 (product overhaul brief, approved 16 November 2026): the live
+	//     price is the forming candle's close. When no forming row is newer
+	//     than the latest closed one, the anchor is that closed candle.
+	//   * change reference: whether a current, closed candle exists at
+	//     EXACTLY anchor.open_time - offset, and its close, where offset is
+	//     forming_reference_offset_seconds for a forming anchor (D3: 24h + 1
+	//     minute, the price at exactly 24h before the current minute began)
+	//     and closed_reference_offset_seconds for a closed one (24h, the
+	//     price 24h before that candle's own close). The caller chooses both
+	//     offsets; this statement only picks by anchor.is_closed.
+	//   * vol: count and sum of base volume over the current, closed candles
+	//     with open_time in (anchor - volume_window_seconds, anchor) -- the
+	//     window BEFORE the anchor. The caller adds the anchor itself (D3:
+	//     the 1440 candles ending at the forming one) and treats the sum as
+	//     present only when the total reaches the full window.
+	//   * latest: the latest current, closed 1-minute candle (NULL columns
+	//     when none is closed yet), and the performance references:
+	//     reference_found/reference_closes for each offset in
+	//     offsets_seconds (in order), at EXACTLY latest.open_time - offset.
+	//     A nearby candle is never used, nothing is interpolated.
 	//
 	// Offsets are whole seconds multiplied by interval '1 second', never
 	// '1 day' / '1 month' intervals: timestamptz minus a day or month
@@ -109,10 +120,10 @@ type Querier interface {
 	//
 	// Cost: every lookup rides idx_candles_current (instrument_id,
 	// open_time) WHERE superseded_at IS NULL -- one backward index probe for
-	// latest, one probe per offset, and one index range scan of at most
-	// volume_window_seconds/60 rows for vol: O(log n + window), independent
-	// of how much history the instrument has. No row means the instrument
-	// has no closed candle at all.
+	// the anchor and one for latest, one probe per offset, and one index
+	// range scan of at most volume_window_seconds/60 rows for vol:
+	// O(log n + window), independent of how much history the instrument
+	// has. No row means the instrument has no current candle at all.
 	GetCandleStatsInputs(ctx context.Context, arg GetCandleStatsInputsParams) (GetCandleStatsInputsRow, error)
 	GetCurrentCandle(ctx context.Context, arg GetCurrentCandleParams) (Candle, error)
 	// GetCurrentEventByTrigger keys on trigger_open_time, not

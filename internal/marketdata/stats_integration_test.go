@@ -76,13 +76,13 @@ func TestIntegration_Stats_ExactlyTwentyFourHours(t *testing.T) {
 		t.Fatalf("latest open time = %v", s.Latest.OpenTime)
 	}
 	// Hand-computed: 114.40 - 100.00 = 14.40; 14.40/100.00 = 14.40%.
-	if s.Change24h == nil || s.Change24h.Abs.String(2) != "14.40" || s.Change24h.Pct.String() != "14.40" {
-		t.Fatalf("Change24h = %+v, want 14.40 / 14.40%%", s.Change24h)
+	if s.Live.Change24h == nil || s.Live.Change24h.Abs.String(2) != "14.40" || s.Live.Change24h.Pct.String() != "14.40" {
+		t.Fatalf("Change24h = %+v, want 14.40 / 14.40%%", s.Live.Change24h)
 	}
 	// Window (i=0, i=1440] holds 1440 candles x volume 2 = 2880 -> at
 	// qty scale 6, "0.002880".
-	if s.Volume24h == nil || s.Volume24h.String(6) != "0.002880" {
-		t.Fatalf("Volume24h = %v, want 0.002880", s.Volume24h)
+	if s.Live.Volume24h == nil || s.Live.Volume24h.String(6) != "0.002880" {
+		t.Fatalf("Volume24h = %v, want 0.002880", s.Live.Volume24h)
 	}
 	if s.Performance["1D"] == nil || s.Performance["1D"].String() != "14.40" {
 		t.Fatalf("1D = %v", s.Performance["1D"])
@@ -103,11 +103,11 @@ func TestIntegration_Stats_ShorterThanTwentyFourHours(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s.Change24h != nil || s.Performance["1D"] != nil {
-			t.Fatalf("Change24h = %+v, 1D = %v, want both absent", s.Change24h, s.Performance["1D"])
+		if s.Live.Change24h != nil || s.Performance["1D"] != nil {
+			t.Fatalf("Change24h = %+v, 1D = %v, want both absent", s.Live.Change24h, s.Performance["1D"])
 		}
-		if s.Volume24h == nil || *s.Volume24h != 2880 {
-			t.Fatalf("Volume24h = %v, want 2880", s.Volume24h)
+		if s.Live.Volume24h == nil || *s.Live.Volume24h != 2880 {
+			t.Fatalf("Volume24h = %v, want 2880", s.Live.Volume24h)
 		}
 	})
 
@@ -121,8 +121,8 @@ func TestIntegration_Stats_ShorterThanTwentyFourHours(t *testing.T) {
 		if s.Latest == nil || s.Latest.Close != 10099 {
 			t.Fatalf("Latest = %+v", s.Latest)
 		}
-		if s.Change24h != nil || s.Volume24h != nil {
-			t.Fatalf("Change24h = %+v Volume24h = %v, want absent", s.Change24h, s.Volume24h)
+		if s.Live.Change24h != nil || s.Live.Volume24h != nil {
+			t.Fatalf("Change24h = %+v Volume24h = %v, want absent", s.Live.Change24h, s.Live.Volume24h)
 		}
 	})
 
@@ -132,7 +132,7 @@ func TestIntegration_Stats_ShorterThanTwentyFourHours(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s.Latest != nil || s.Change24h != nil || s.Volume24h != nil {
+		if s.Latest != nil || s.Live != nil || s.Base != nil {
 			t.Fatalf("got %+v, want all absent", s)
 		}
 		if len(s.Performance) != len(PerformancePeriods()) {
@@ -154,11 +154,11 @@ func TestIntegration_Stats_MissingReferenceMinute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Change24h != nil || s.Performance["1D"] != nil {
-		t.Fatalf("Change24h = %+v 1D = %v, want absent (reference minute missing)", s.Change24h, s.Performance["1D"])
+	if s.Live.Change24h != nil || s.Performance["1D"] != nil {
+		t.Fatalf("Change24h = %+v 1D = %v, want absent (reference minute missing)", s.Live.Change24h, s.Performance["1D"])
 	}
-	if s.Volume24h == nil || *s.Volume24h != 2880 {
-		t.Fatalf("Volume24h = %v, want 2880", s.Volume24h)
+	if s.Live.Volume24h == nil || *s.Live.Volume24h != 2880 {
+		t.Fatalf("Volume24h = %v, want 2880", s.Live.Volume24h)
 	}
 
 	// A missing minute inside the volume window makes volume absent.
@@ -168,10 +168,10 @@ func TestIntegration_Stats_MissingReferenceMinute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s2.Volume24h != nil {
-		t.Fatalf("Volume24h = %v with minute 700 missing, want absent", *s2.Volume24h)
+	if s2.Live.Volume24h != nil {
+		t.Fatalf("Volume24h = %v with minute 700 missing, want absent", *s2.Live.Volume24h)
 	}
-	if s2.Change24h == nil {
+	if s2.Live.Change24h == nil {
 		t.Fatal("Change24h absent, want present (reference minute exists)")
 	}
 }
@@ -203,20 +203,78 @@ func TestIntegration_Stats_UsesCurrentRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Hand-computed: 114.40 - 80.00 = 34.40; 34.40/80.00 = 43.00%.
-	if s.Change24h == nil || s.Change24h.Abs.String(2) != "34.40" || s.Change24h.Pct.String() != "43.00" {
-		t.Fatalf("Change24h = %+v, want 34.40 / 43.00%%", s.Change24h)
+	if s.Live.Change24h == nil || s.Live.Change24h.Abs.String(2) != "34.40" || s.Live.Change24h.Pct.String() != "43.00" {
+		t.Fatalf("Change24h = %+v, want 34.40 / 43.00%%", s.Live.Change24h)
 	}
 	// 1439 x 2 + 102 = 2980.
-	if s.Volume24h == nil || *s.Volume24h != 2980 {
-		t.Fatalf("Volume24h = %v, want 2980", s.Volume24h)
+	if s.Live.Volume24h == nil || *s.Live.Volume24h != 2980 {
+		t.Fatalf("Volume24h = %v, want 2980", s.Live.Volume24h)
 	}
 }
 
-// A forming (not yet closed) candle is never "latest".
-func TestIntegration_Stats_IgnoresFormingCandle(t *testing.T) {
+// D3: the forming candle is the live anchor. Its close is the live
+// price; the 24h reference is the closed candle at forming.open_time -
+// 24h - 1 minute; the volume window is the 1440 minutes ending at the
+// forming one. Performance stays on the latest CLOSED candle.
+func TestIntegration_Stats_FormingAnchor(t *testing.T) {
 	db := testDB(t)
 	id := testInstrument(t, db)
 	seedSeries(t, db, id, statsT0, 0, 1440)
+	store := NewStore(db, clock.Real{})
+	tickAt := time.Date(2026, 11, 11, 0, 1, 17, 0, time.UTC)
+	if _, err := store.UpsertForming(context.Background(), Tick{
+		InstrumentID: id, OpenTime: clock.NewEventTime(statsT0.Add(1441 * time.Minute)),
+		Open: 50000, High: 50000, Low: 50000, Close: 50000, Volume: 9, Provider: "test", IngestedAt: it(tickAt),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Stats(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Latest == nil || s.Latest.Close != 11440 {
+		t.Fatalf("Latest = %+v, want the closed i=1440 candle", s.Latest)
+	}
+	if s.Live == nil || s.Live.LastPrice != 50000 || s.Live.AnchorClosed {
+		t.Fatalf("Live = %+v, want the forming close 50000", s.Live)
+	}
+	if !s.Live.AsOf.Time().Equal(statsT0.Add(1441*time.Minute)) || !s.Live.LastTickAt.Time().Equal(tickAt) {
+		t.Fatalf("as_of %v last tick %v", s.Live.AsOf, s.Live.LastTickAt)
+	}
+	// Reference: 1441 - 1441 minutes = i=0, close 100.00. Hand-computed:
+	// 500.00 - 100.00 = 400.00; 400/100 = 400.00%.
+	if !s.Live.ReferenceOpenTime.Time().Equal(statsT0) {
+		t.Fatalf("reference open time = %v, want %v", s.Live.ReferenceOpenTime, statsT0)
+	}
+	if s.Live.Change24h == nil || s.Live.Change24h.Abs.String(2) != "400.00" || s.Live.Change24h.Pct.String() != "400.00" {
+		t.Fatalf("Change24h = %+v, want 400.00 / 400.00%%", s.Live.Change24h)
+	}
+	// Window: closed i=2..1440 (1439 x 2 = 2878) plus the forming 9.
+	if s.Live.VolumeMinutes != 1440 || s.Live.Volume24h == nil || *s.Live.Volume24h != 2887 {
+		t.Fatalf("Volume24h = %v over %d minutes, want 2887 over 1440", s.Live.Volume24h, s.Live.VolumeMinutes)
+	}
+	// Rule 4 unchanged: i=1440 (114.40) vs i=0 (100.00) = 14.40%.
+	if p := s.Performance["1D"]; p == nil || p.String() != "14.40" {
+		t.Fatalf("1D = %v, want 14.40 (closed anchor)", p)
+	}
+
+	// The per-tick path gives the same figures from the same base.
+	again, err := s.Base.Apply(50000, 9, it(tickAt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Change24h.Abs != s.Live.Change24h.Abs || *again.Volume24h != *s.Live.Volume24h {
+		t.Fatalf("Base.Apply = %+v, want the same as Stats' %+v", again, s.Live)
+	}
+}
+
+// D3's reference is EXACTLY forming.open_time - 24h - 1 minute: a missing
+// minute there is absent even though the closed-anchor reference (24h
+// before the latest closed candle) exists.
+func TestIntegration_Stats_FormingAnchorMissingReference(t *testing.T) {
+	db := testDB(t)
+	id := testInstrument(t, db)
+	seedSeries(t, db, id, statsT0, -5, 1440, 0)
 	store := NewStore(db, clock.Real{})
 	if _, err := store.UpsertForming(context.Background(), Tick{
 		InstrumentID: id, OpenTime: clock.NewEventTime(statsT0.Add(1441 * time.Minute)),
@@ -228,8 +286,36 @@ func TestIntegration_Stats_IgnoresFormingCandle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Latest.Close != 11440 || s.Change24h.Abs.String(2) != "14.40" {
-		t.Fatalf("Latest = %+v Change = %+v, want the closed i=1440 candle", s.Latest, s.Change24h)
+	if s.Live.Change24h != nil {
+		t.Fatalf("Change24h = %+v, want absent (i=0 missing)", s.Live.Change24h)
+	}
+	if !s.Live.ReferenceOpenTime.Time().Equal(statsT0) {
+		t.Fatalf("reference open time = %v, want the missing minute %v", s.Live.ReferenceOpenTime, statsT0)
+	}
+}
+
+// A forming row older than the newest candle (a minute that never
+// closed) is neither the anchor nor counted in the volume window.
+func TestIntegration_Stats_StaleFormingRowNotCounted(t *testing.T) {
+	db := testDB(t)
+	id := testInstrument(t, db)
+	seedSeries(t, db, id, statsT0, 0, 1440, 700)
+	store := NewStore(db, clock.Real{})
+	if _, err := store.UpsertForming(context.Background(), Tick{
+		InstrumentID: id, OpenTime: clock.NewEventTime(statsT0.Add(700 * time.Minute)),
+		Open: 1, High: 1, Low: 1, Close: 1, Volume: 1, Provider: "test", IngestedAt: it(time.Now()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Stats(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Live.LastPrice != 11440 || !s.Live.AnchorClosed {
+		t.Fatalf("Live = %+v, want the closed i=1440 candle as anchor", s.Live)
+	}
+	if s.Live.Volume24h != nil || s.Live.VolumeMinutes != 1439 {
+		t.Fatalf("Volume24h = %v over %d minutes, want absent over 1439", s.Live.Volume24h, s.Live.VolumeMinutes)
 	}
 }
 
@@ -280,11 +366,32 @@ func TestIntegration_Stats_TimeZones(t *testing.T) {
 			if !s.Latest.OpenTime.Time().Equal(wantLatest) {
 				t.Fatalf("latest open time = %v, want %v", s.Latest.OpenTime, wantLatest)
 			}
-			if s.Change24h == nil || s.Change24h.Abs.String(2) != "14.40" {
-				t.Fatalf("Change24h = %+v, want 14.40 (reference exactly 86400s back)", s.Change24h)
+			if s.Live.Change24h == nil || s.Live.Change24h.Abs.String(2) != "14.40" {
+				t.Fatalf("Change24h = %+v, want 14.40 (reference exactly 86400s back)", s.Live.Change24h)
 			}
-			if s.Volume24h == nil || *s.Volume24h != quant.Qty(2880) {
-				t.Fatalf("Volume24h = %v, want 2880", s.Volume24h)
+			if s.Live.Volume24h == nil || *s.Live.Volume24h != quant.Qty(2880) {
+				t.Fatalf("Volume24h = %v, want 2880", s.Live.Volume24h)
+			}
+
+			// D3 with a forming anchor at 12:01 UTC: the reference is
+			// exactly 86460s back (2026-10-31 12:00 UTC), whatever the
+			// session zone.
+			if _, err := NewStore(db, clock.Real{}).UpsertForming(context.Background(), Tick{
+				InstrumentID: id, OpenTime: clock.NewEventTime(wantLatest.Add(time.Minute)),
+				Open: 20000, High: 20000, Low: 20000, Close: 20000, Volume: 1, Provider: "test", IngestedAt: it(time.Now()),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			s, err = NewStore(db, clock.Real{}).Stats(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !s.Live.ReferenceOpenTime.Time().Equal(start) {
+				t.Fatalf("forming reference = %v, want %v", s.Live.ReferenceOpenTime, start)
+			}
+			// 200.00 - 100.00 = 100.00.
+			if s.Live.Change24h == nil || s.Live.Change24h.Abs.String(2) != "100.00" {
+				t.Fatalf("forming Change24h = %+v, want 100.00", s.Live.Change24h)
 			}
 		})
 	}
@@ -322,7 +429,7 @@ func TestIntegration_Stats_Timing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if s.Change24h == nil || s.Volume24h == nil {
+			if s.Live.Change24h == nil || s.Live.Volume24h == nil {
 				t.Fatalf("n=%d: want change and volume present", n)
 			}
 			total += el

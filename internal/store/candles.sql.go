@@ -164,78 +164,129 @@ func (q *Queries) CountClosedCandlesInRange(ctx context.Context, arg CountClosed
 }
 
 const getCandleStatsInputs = `-- name: GetCandleStatsInputs :one
-WITH latest AS (
+WITH anchor AS (
+    SELECT a.open_time, a.close, a.volume, a.is_closed, a.ingested_at
+    FROM candles a
+    WHERE a.instrument_id = $4
+      AND a.superseded_at IS NULL
+    ORDER BY a.open_time DESC
+    LIMIT 1
+),
+latest AS (
     SELECT c.open_time, c.close
     FROM candles c
-    WHERE c.instrument_id = $2
+    WHERE c.instrument_id = $4
       AND c.superseded_at IS NULL AND c.is_closed = true
     ORDER BY c.open_time DESC
     LIMIT 1
 )
 SELECT
-    latest.open_time AS latest_open_time,
-    latest.close AS latest_close,
+    anchor.open_time AS anchor_open_time,
+    anchor.close AS anchor_close,
+    anchor.volume AS anchor_volume,
+    anchor.is_closed AS anchor_is_closed,
+    anchor.ingested_at AS anchor_ingested_at,
+    (anchor.open_time - (CASE WHEN anchor.is_closed
+        THEN $1::bigint
+        ELSE $2::bigint END) * interval '1 second')::timestamptz AS change_reference_open_time,
+    (ref.close IS NOT NULL)::boolean AS change_reference_found,
+    coalesce(ref.close, 0)::bigint AS change_reference_close,
     vol.n AS volume_window_count,
     vol.total AS volume_window_sum,
+    (latest.open_time IS NOT NULL)::boolean AS latest_found,
+    coalesce(latest.open_time, anchor.open_time)::timestamptz AS latest_open_time,
+    coalesce(latest.close, 0)::bigint AS latest_close,
     ARRAY(
         SELECT r.id IS NOT NULL
-        FROM unnest($1::bigint[]) WITH ORDINALITY AS o(secs, ord)
+        FROM unnest($3::bigint[]) WITH ORDINALITY AS o(secs, ord)
         LEFT JOIN candles r
-          ON r.instrument_id = $2
+          ON r.instrument_id = $4
          AND r.superseded_at IS NULL AND r.is_closed = true
          AND r.open_time = latest.open_time - o.secs * interval '1 second'
         ORDER BY o.ord
     )::boolean[] AS reference_found,
     ARRAY(
         SELECT coalesce(r.close, 0)
-        FROM unnest($1::bigint[]) WITH ORDINALITY AS o(secs, ord)
+        FROM unnest($3::bigint[]) WITH ORDINALITY AS o(secs, ord)
         LEFT JOIN candles r
-          ON r.instrument_id = $2
+          ON r.instrument_id = $4
          AND r.superseded_at IS NULL AND r.is_closed = true
          AND r.open_time = latest.open_time - o.secs * interval '1 second'
         ORDER BY o.ord
     )::bigint[] AS reference_closes
-FROM latest
+FROM anchor
+LEFT JOIN latest ON true
+LEFT JOIN LATERAL (
+    SELECT rc.close
+    FROM candles rc
+    WHERE rc.instrument_id = $4
+      AND rc.superseded_at IS NULL AND rc.is_closed = true
+      AND rc.open_time = anchor.open_time - (CASE WHEN anchor.is_closed
+          THEN $1::bigint
+          ELSE $2::bigint END) * interval '1 second'
+) ref ON true
 CROSS JOIN LATERAL (
     SELECT count(*)::bigint AS n, coalesce(sum(v.volume), 0)::bigint AS total
     FROM candles v
-    WHERE v.instrument_id = $2
+    WHERE v.instrument_id = $4
       AND v.superseded_at IS NULL AND v.is_closed = true
-      AND v.open_time > latest.open_time - $3::bigint * interval '1 second'
-      AND v.open_time <= latest.open_time
+      AND v.open_time > anchor.open_time - $5::bigint * interval '1 second'
+      AND v.open_time < anchor.open_time
 ) vol
 `
 
 type GetCandleStatsInputsParams struct {
-	OffsetsSeconds      []int64 `json:"offsets_seconds"`
-	InstrumentID        int64   `json:"instrument_id"`
-	VolumeWindowSeconds int64   `json:"volume_window_seconds"`
+	ClosedReferenceOffsetSeconds  int64   `json:"closed_reference_offset_seconds"`
+	FormingReferenceOffsetSeconds int64   `json:"forming_reference_offset_seconds"`
+	OffsetsSeconds                []int64 `json:"offsets_seconds"`
+	InstrumentID                  int64   `json:"instrument_id"`
+	VolumeWindowSeconds           int64   `json:"volume_window_seconds"`
 }
 
 type GetCandleStatsInputsRow struct {
-	LatestOpenTime    time.Time `json:"latest_open_time"`
-	LatestClose       int64     `json:"latest_close"`
-	VolumeWindowCount int64     `json:"volume_window_count"`
-	VolumeWindowSum   int64     `json:"volume_window_sum"`
-	ReferenceFound    []bool    `json:"reference_found"`
-	ReferenceCloses   []int64   `json:"reference_closes"`
+	AnchorOpenTime          time.Time `json:"anchor_open_time"`
+	AnchorClose             int64     `json:"anchor_close"`
+	AnchorVolume            int64     `json:"anchor_volume"`
+	AnchorIsClosed          bool      `json:"anchor_is_closed"`
+	AnchorIngestedAt        time.Time `json:"anchor_ingested_at"`
+	ChangeReferenceOpenTime time.Time `json:"change_reference_open_time"`
+	ChangeReferenceFound    bool      `json:"change_reference_found"`
+	ChangeReferenceClose    int64     `json:"change_reference_close"`
+	VolumeWindowCount       int64     `json:"volume_window_count"`
+	VolumeWindowSum         int64     `json:"volume_window_sum"`
+	LatestFound             bool      `json:"latest_found"`
+	LatestOpenTime          time.Time `json:"latest_open_time"`
+	LatestClose             int64     `json:"latest_close"`
+	ReferenceFound          []bool    `json:"reference_found"`
+	ReferenceCloses         []int64   `json:"reference_closes"`
 }
 
-// GetCandleStatsInputs is GET /instruments/stats' own read path (real-
-// panel-data brief): everything the side panel's 24h change, 24h volume
-// and performance tiles need for one instrument, in one statement.
+// GetCandleStatsInputs is GET /instruments/stats' own read path and the
+// live `stats` WebSocket message's (re)base: everything the side panel's
+// live price, 24h change, 24h volume and performance tiles need for one
+// instrument, in one statement.
 //
-//   - latest: the latest current, closed 1-minute candle (the same row
-//     GetLatestClosedCandle returns).
-//   - vol: count and sum of base volume over the current, closed
-//     candles with open_time in (latest - volume_window_seconds,
-//     latest] -- the caller treats the sum as present only when count
-//     equals the full window (no gap, nothing guessed).
-//   - reference_found/reference_closes: for each offset in
-//     offsets_seconds (in order), whether a current, closed candle
-//     exists at EXACTLY latest.open_time - offset, and its close (0
-//     when not found -- reference_found is the only signal; a nearby
-//     candle is never used, nothing is interpolated).
+//   - anchor: the newest current 1-minute candle, forming or closed --
+//     D3 (product overhaul brief, approved 16 November 2026): the live
+//     price is the forming candle's close. When no forming row is newer
+//     than the latest closed one, the anchor is that closed candle.
+//   - change reference: whether a current, closed candle exists at
+//     EXACTLY anchor.open_time - offset, and its close, where offset is
+//     forming_reference_offset_seconds for a forming anchor (D3: 24h + 1
+//     minute, the price at exactly 24h before the current minute began)
+//     and closed_reference_offset_seconds for a closed one (24h, the
+//     price 24h before that candle's own close). The caller chooses both
+//     offsets; this statement only picks by anchor.is_closed.
+//   - vol: count and sum of base volume over the current, closed candles
+//     with open_time in (anchor - volume_window_seconds, anchor) -- the
+//     window BEFORE the anchor. The caller adds the anchor itself (D3:
+//     the 1440 candles ending at the forming one) and treats the sum as
+//     present only when the total reaches the full window.
+//   - latest: the latest current, closed 1-minute candle (NULL columns
+//     when none is closed yet), and the performance references:
+//     reference_found/reference_closes for each offset in
+//     offsets_seconds (in order), at EXACTLY latest.open_time - offset.
+//     A nearby candle is never used, nothing is interpolated.
 //
 // Offsets are whole seconds multiplied by interval '1 second', never
 // '1 day' / '1 month' intervals: timestamptz minus a day or month
@@ -244,18 +295,33 @@ type GetCandleStatsInputsRow struct {
 //
 // Cost: every lookup rides idx_candles_current (instrument_id,
 // open_time) WHERE superseded_at IS NULL -- one backward index probe for
-// latest, one probe per offset, and one index range scan of at most
-// volume_window_seconds/60 rows for vol: O(log n + window), independent
-// of how much history the instrument has. No row means the instrument
-// has no closed candle at all.
+// the anchor and one for latest, one probe per offset, and one index
+// range scan of at most volume_window_seconds/60 rows for vol:
+// O(log n + window), independent of how much history the instrument
+// has. No row means the instrument has no current candle at all.
 func (q *Queries) GetCandleStatsInputs(ctx context.Context, arg GetCandleStatsInputsParams) (GetCandleStatsInputsRow, error) {
-	row := q.db.QueryRowContext(ctx, getCandleStatsInputs, pq.Array(arg.OffsetsSeconds), arg.InstrumentID, arg.VolumeWindowSeconds)
+	row := q.db.QueryRowContext(ctx, getCandleStatsInputs,
+		arg.ClosedReferenceOffsetSeconds,
+		arg.FormingReferenceOffsetSeconds,
+		pq.Array(arg.OffsetsSeconds),
+		arg.InstrumentID,
+		arg.VolumeWindowSeconds,
+	)
 	var i GetCandleStatsInputsRow
 	err := row.Scan(
-		&i.LatestOpenTime,
-		&i.LatestClose,
+		&i.AnchorOpenTime,
+		&i.AnchorClose,
+		&i.AnchorVolume,
+		&i.AnchorIsClosed,
+		&i.AnchorIngestedAt,
+		&i.ChangeReferenceOpenTime,
+		&i.ChangeReferenceFound,
+		&i.ChangeReferenceClose,
 		&i.VolumeWindowCount,
 		&i.VolumeWindowSum,
+		&i.LatestFound,
+		&i.LatestOpenTime,
+		&i.LatestClose,
 		pq.Array(&i.ReferenceFound),
 		pq.Array(&i.ReferenceCloses),
 	)

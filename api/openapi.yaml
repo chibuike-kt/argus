@@ -1096,8 +1096,8 @@ components:
     InstrumentStats:
       type: object
       description: >
-        One instrument's side-panel figures. Prices (last_close,
-        change_24h) are decimal strings at the instrument's own
+        One instrument's side-panel figures. Prices (last_price,
+        last_close, change_24h) are decimal strings at the instrument's own
         price_scale; volume_24h is a decimal string at its qty_scale;
         percentages (change_24h_pct, performance.*) are decimal strings
         in percent units (no "%" sign), exactly 2 decimal places, rounded
@@ -1115,7 +1115,10 @@ components:
           type: string
           nullable: true
           x-omitempty: false
-          description: Close of the latest current, closed 1-minute candle. Null when there is none yet.
+          description: >
+            Close of the latest current, closed 1-minute candle: the
+            performance anchor, not the live price (see last_price).
+            Null when there is none yet.
         last_closed_open_time:
           type: string
           format: date-time
@@ -1124,28 +1127,86 @@ components:
           description: >
             Open time of that candle (UTC). Its own end -- data finalized
             through -- is this plus one minute.
+        last_price:
+          type: string
+          nullable: true
+          x-omitempty: false
+          description: >
+            The live price (D3, product overhaul brief): the close of the
+            newest current 1-minute candle -- the forming candle's latest
+            close, or, when nothing is forming, the latest closed
+            candle's close (last_price_closed says which). The same
+            figure, computed the same way, as the `stats` WebSocket
+            message's last_price. Null when no candle is stored at all.
+        last_price_closed:
+          type: boolean
+          nullable: true
+          x-omitempty: false
+          description: >
+            True when last_price is a closed candle's close (no forming
+            candle is newer), false when it is the forming candle's. Null
+            with last_price.
+        as_of:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: >
+            Exchange event time last_price belongs to: the open time of
+            the candle it is the close of (UTC). Minute-grained: the
+            provider's candle feed carries no per-trade timestamp.
+        last_tick_at:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: >
+            When ARGUS last stored a value for that candle (its ingestion
+            time, UTC) -- the basis for "no new ticks for N seconds". Not
+            an exchange time.
         change_24h:
           type: string
           nullable: true
           x-omitempty: false
           description: >
-            last_close minus the close of the current, closed 1-minute
-            candle whose open time is exactly 24 hours before
-            last_closed_open_time. Null when that exact candle does not
-            exist (history shorter than 24h, or that minute missing).
+            last_price minus the close of the current, closed 1-minute
+            candle at change_24h_reference_open_time: as_of - 24h - 1
+            minute when last_price is a forming candle's (the price at
+            exactly 24h before the current minute began), as_of - 24h
+            when it is a closed candle's. Null when that exact candle
+            does not exist (history shorter than 24h, or that minute
+            missing).
         change_24h_pct:
           type: string
           nullable: true
           x-omitempty: false
           description: change_24h divided by the reference close, in percent. Null when change_24h is null or the reference close is zero.
+        change_24h_reference_open_time:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: >
+            The exact minute change_24h is measured against, whether or
+            not a candle exists there -- so a null change_24h can say
+            which minute is missing. Null with last_price.
         volume_24h:
           type: string
           nullable: true
           x-omitempty: false
           description: >
-            Sum of base asset volume over the 1440 current, closed
-            1-minute candles ending at (and including) the latest one.
-            Null unless all 1440 exist.
+            Sum of base asset volume over the 1440 current 1-minute
+            candles ending at (and including) the candle last_price
+            comes from (the forming candle counts; any other candle must
+            be closed). Null unless all 1440 exist.
+        volume_24h_minutes:
+          type: integer
+          format: int64
+          nullable: true
+          x-omitempty: false
+          description: >
+            How many of those 1440 minutes are stored, so a null
+            volume_24h can say why. Null with last_price.
         performance:
           $ref: "#/components/schemas/InstrumentPerformance"
     InstrumentPerformance:

@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnalysisWorkspaceProvider } from "@/components/workspace/analysis-workspace";
 import { RightPanel } from "@/components/workspace/right-panel";
+import { resetLiveStatsForTests } from "@/lib/live-stats";
 import type { ApiInstrument, ApiInstrumentStats, ApiSetup, ApiSetupEvent } from "@/api/types";
 
 // This exercises /analysis's data-driven right panel (bias gauge, plan
@@ -116,11 +117,18 @@ function candles(n = 3) {
 // test instrument: about three days of history, so only 1D can exist.
 const realStats: ApiInstrumentStats = {
   instrument_id: 1,
-  last_close: "95123.40",
+  last_close: "95120.00",
   last_closed_open_time: "2026-11-16T18:16:00Z",
+  // D3: the live price is the forming 18:17 candle's close.
+  last_price: "95123.40",
+  last_price_closed: false,
+  as_of: "2026-11-16T18:17:00Z",
+  last_tick_at: "2026-11-16T18:17:12Z",
   change_24h: "-1234.50",
   change_24h_pct: "-1.28",
+  change_24h_reference_open_time: "2026-11-15T18:16:00Z",
   volume_24h: "12345.6789",
+  volume_24h_minutes: 1440,
   performance: { "1D": "-1.28", "1W": null, "1M": null, "3M": null, "6M": null, "1Y": null },
 };
 
@@ -135,11 +143,17 @@ const STATS_WAIT = { timeout: 5_000 };
 // the em dashes (an em dash is also what every tile shows before load).
 const shortHistoryStats: ApiInstrumentStats = {
   instrument_id: 1,
-  last_close: "95123.40",
+  last_close: "95120.00",
   last_closed_open_time: "2026-11-16T18:16:00Z",
+  last_price: "95123.40",
+  last_price_closed: false,
+  as_of: "2026-11-16T18:17:00Z",
+  last_tick_at: "2026-11-16T18:17:12Z",
   change_24h: null,
   change_24h_pct: null,
+  change_24h_reference_open_time: "2026-11-15T18:16:00Z",
   volume_24h: null,
+  volume_24h_minutes: 300,
   performance: { "1D": null, "1W": null, "1M": null, "3M": null, "6M": null, "1Y": null },
 };
 
@@ -224,6 +238,7 @@ describe("/analysis right panel", () => {
     // The active tab and other choices persist now (D1): reset the
     // preference store so one test's tab click does not carry into the next.
     preferences.detach();
+    resetLiveStatsForTests();
   });
 
   it("shows a loading state before the setup resolves", () => {
@@ -332,7 +347,7 @@ describe("/analysis right panel", () => {
     await waitFor(() => {
       expect(screen.getByTestId("detail-last")).toHaveTextContent("95,123.40");
       expect(screen.getByTestId("detail-change-24h")).toHaveTextContent("-1,234.50");
-      expect(screen.getByTestId("detail-change-24h-pct")).toHaveTextContent("(-1.28%)");
+      expect(screen.getByTestId("detail-change-24h-pct")).toHaveTextContent("-1.28%");
       expect(screen.getByTestId("detail-volume-24h")).toHaveTextContent(/^12,345\.6789\s*BTC$/);
     }, STATS_WAIT);
     expect(screen.getByTestId("symbol-detail")).toHaveTextContent("base asset volume");
@@ -367,8 +382,34 @@ describe("/analysis right panel", () => {
     expect(within(row).getAllByText("—")).toHaveLength(2);
     await waitFor(() => expect(screen.getByTestId("detail-last")).toHaveTextContent("95,123.40"), STATS_WAIT);
     expect(screen.getByTestId("detail-change-24h")).toHaveTextContent("—");
-    expect(screen.getByTestId("detail-change-24h-pct")).toHaveTextContent("(—)");
+    expect(screen.getByTestId("detail-change-24h-pct")).toHaveTextContent("—");
     expect(screen.getByTestId("detail-volume-24h")).toHaveTextContent(/^—$/);
+
+    // Phase 3: a dash is never without a reason. The hover names the
+    // missing 24h reference minute and the volume window's coverage,
+    // from the fields the server sent.
+    expect(screen.getByTestId("detail-change-24h")).toHaveAttribute(
+      "title",
+      "24h reference minute missing (15 Nov, 18:16 UTC): data gap or less than 24h of history stored",
+    );
+    expect(screen.getByTestId("detail-volume-24h")).toHaveAttribute(
+      "title",
+      "Only 300 of 1,440 minutes of the last 24h are stored: data gap or less than 24h of history",
+    );
+    expect(within(row).getByTestId("watchlist-chg-BTC-PERP")).toHaveAttribute("title", expect.stringContaining("24h reference minute missing"));
+  });
+
+  it("every performance dash says which exact minute is missing", async () => {
+    const setup = makeApiSetup({ id: 1 });
+    installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
+    renderAnalysisRightPanel("/analysis?setupId=1");
+    await waitFor(() => expect(screen.getByTestId("perf-1D")).toHaveTextContent("-1.28%"), STATS_WAIT);
+    // 1W before 16 Nov 18:16 UTC is 9 Nov 18:16 UTC.
+    const dash = within(screen.getByTestId("perf-1W")).getByText("—");
+    expect(dash).toHaveAttribute(
+      "title",
+      "No stored candle exactly 7 days before the latest closed minute (09 Nov, 18:16 UTC): data gap or not enough history",
+    );
   });
 
   it("shows no Sample markers tied to real plan/evidence data when real data is active", async () => {

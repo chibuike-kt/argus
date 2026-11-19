@@ -41,8 +41,15 @@ func fullStats(id int64) marketdata.Stats {
 			Close:    10050,
 			OpenTime: clock.NewEventTime(time.Date(2026, 11, 16, 9, 30, 0, 0, time.UTC)),
 		},
-		Change24h: &marketdata.Change{Abs: -125, Pct: pct(-123)},
-		Volume24h: &vol,
+		Live: &marketdata.LiveFigures{
+			LastPrice:         10075,
+			AsOf:              clock.NewEventTime(time.Date(2026, 11, 16, 9, 31, 0, 0, time.UTC)),
+			LastTickAt:        clock.NewIngestionTime(time.Date(2026, 11, 16, 9, 31, 12, 0, time.UTC)),
+			Change24h:         &marketdata.Change{Abs: -125, Pct: pct(-123)},
+			ReferenceOpenTime: clock.NewEventTime(time.Date(2026, 11, 15, 9, 30, 0, 0, time.UTC)),
+			Volume24h:         &vol,
+			VolumeMinutes:     1440,
+		},
 		Performance: map[string]*marketdata.Percent{
 			"1D": pct(-123), "1W": nil, "1M": nil, "3M": nil, "6M": nil, "1Y": nil,
 		},
@@ -74,6 +81,15 @@ func TestListInstrumentStats_RendersAtInstrumentScales(t *testing.T) {
 	if *row.LastClose != "100.50" || *row.Change24h != "-1.25" || *row.Change24hPct != "-1.23" || *row.Volume24h != "1.5000" {
 		t.Fatalf("row = last %v chg %v pct %v vol %v", *row.LastClose, *row.Change24h, *row.Change24hPct, *row.Volume24h)
 	}
+	// D3: the live price is the forming close, not the last closed one.
+	if *row.LastPrice != "100.75" || *row.LastPriceClosed || *row.Volume24hMinutes != 1440 {
+		t.Fatalf("live = price %v closed %v minutes %v", *row.LastPrice, *row.LastPriceClosed, *row.Volume24hMinutes)
+	}
+	if !row.AsOf.Equal(time.Date(2026, 11, 16, 9, 31, 0, 0, time.UTC)) ||
+		!row.LastTickAt.Equal(time.Date(2026, 11, 16, 9, 31, 12, 0, time.UTC)) ||
+		!row.Change24hReferenceOpenTime.Equal(time.Date(2026, 11, 15, 9, 30, 0, 0, time.UTC)) {
+		t.Fatalf("times = as_of %v last_tick_at %v ref %v", row.AsOf, row.LastTickAt, row.Change24hReferenceOpenTime)
+	}
 	if !row.LastClosedOpenTime.Equal(time.Date(2026, 11, 16, 9, 30, 0, 0, time.UTC)) {
 		t.Fatalf("last_closed_open_time = %v", row.LastClosedOpenTime)
 	}
@@ -98,7 +114,8 @@ func TestListInstrumentStats_AbsentIsExplicitNull(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := rec.Body.String()
-	for _, key := range []string{`"last_close":null`, `"last_closed_open_time":null`, `"change_24h":null`, `"change_24h_pct":null`, `"volume_24h":null`, `"1D":null`, `"1Y":null`} {
+	for _, key := range []string{`"last_close":null`, `"last_closed_open_time":null`, `"change_24h":null`, `"change_24h_pct":null`, `"volume_24h":null`,
+		`"last_price":null`, `"last_price_closed":null`, `"as_of":null`, `"last_tick_at":null`, `"change_24h_reference_open_time":null`, `"volume_24h_minutes":null`, `"1D":null`, `"1Y":null`} {
 		if !strings.Contains(body, key) {
 			t.Errorf("body missing %s: %s", key, body)
 		}
