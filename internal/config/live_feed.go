@@ -83,4 +83,17 @@ type LiveFeed struct {
 	// a handful of these messages per genuine user action), tight enough
 	// to catch a flood quickly.
 	MaxSubscribeMessagesPerSecond float64 `env:"ARGUS_LIVE_MAX_SUBSCRIBE_MESSAGES_PER_SECOND" envDefault:"10"` // [U]
+
+	// StatsMinInterval is the shortest gap between two `stats` messages
+	// for one instrument (product overhaul brief, Phase 3: "at most once
+	// per second per instrument when the price changed [U]"). Bursts in
+	// between coalesce to the latest value. [U] -- the brief's own
+	// placeholder, not a measured value. Placeholder 1s.
+	StatsMinInterval time.Duration `env:"ARGUS_LIVE_STATS_MIN_INTERVAL" envDefault:"1s"` // [U]
+
+	// MaxStatsInstrumentsPerConnection bounds one `subscribe_stats`
+	// message's instrument list (the brief: "up to 50 ids"), matching the
+	// watchlist's own 50-instrument maximum and GET /instruments/stats'
+	// cap. [U]. Placeholder 50.
+	MaxStatsInstrumentsPerConnection int `env:"ARGUS_LIVE_MAX_STATS_INSTRUMENTS_PER_CONNECTION" envDefault:"50"` // [U]
 }

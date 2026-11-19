@@ -179,6 +179,8 @@ func (h *wsHandler) readLoop(ctx context.Context, wsConn *websocket.Conn, conn *
 		switch env.Type {
 		case hub.TypeSubscribe, hub.TypeUnsubscribe:
 			h.handleSubscribeMessage(ctx, conn, sink, env)
+		case hub.TypeSubscribeStats, hub.TypeUnsubscribeStats:
+			h.handleStatsMessage(ctx, conn, sink, env)
 		default:
 			// Any other type (snapshot, candle, ...) is server->client
 			// only; silently ignored from a client, rather than
@@ -227,12 +229,63 @@ func (h *wsHandler) handleSubscribeMessage(ctx context.Context, conn *hub.Connec
 	}
 }
 
+// statsSubscribeRequest is the `subscribe_stats` payload: the whole set
+// of instruments this connection wants live stats for (replacing any
+// earlier set; empty ends them all).
+type statsSubscribeRequest struct {
+	InstrumentIDs []int64 `json:"instrument_ids"`
+}
+
+// handleStatsMessage handles `subscribe_stats` and `unsubscribe_stats`
+// under the same per-connection message rate limit as subscribe and
+// unsubscribe (a flood closes the connection).
+func (h *wsHandler) handleStatsMessage(ctx context.Context, conn *hub.Connection, sink *wsSink, env hub.Envelope) {
+	if !conn.CheckSubscribeRate() {
+		conn.Close(hub.CloseSubscribeFlood, "subscribe/unsubscribe rate exceeded")
+		return
+	}
+	if env.Type == hub.TypeUnsubscribeStats {
+		h.hub.UnsubscribeStats(conn)
+		return
+	}
+
+	var req statsSubscribeRequest
+	if err := json.Unmarshal(env.Payload, &req); err != nil {
+		sendSubError(ctx, sink, hub.StatsSubAll, "invalid_argument", "malformed subscribe_stats payload")
+		return
+	}
+	rejected, err := h.hub.SubscribeStats(ctx, conn, req.InstrumentIDs)
+	switch {
+	case errors.Is(err, hub.ErrTooManyStatsInstruments):
+		sendSubError(ctx, sink, hub.StatsSubAll, "too_many_subscriptions", "too many instruments in subscribe_stats")
+		return
+	case errors.Is(err, hub.ErrStatsUnavailable):
+		sendSubError(ctx, sink, hub.StatsSubAll, "stats_unavailable", "live stats are not available")
+		return
+	case err != nil:
+		h.logger.Error("ws: subscribe_stats", "error", err)
+		sendSubError(ctx, sink, hub.StatsSubAll, "internal_error", "could not subscribe to stats")
+		return
+	}
+	// The same code for an unknown and a disabled id, so ids cannot be
+	// enumerated by probing.
+	for _, id := range rejected {
+		sendSubError(ctx, sink, hub.StatsSub(id), hub.ErrorCodeNotSubscribable, "instrument not subscribable")
+	}
+}
+
 func sendError(ctx context.Context, sink *wsSink, code, message string) {
+	sendSubError(ctx, sink, "", code, message)
+}
+
+// sendSubError sends an `error` addressed to sub ("" for a connection-
+// level error that concerns no single subscription).
+func sendSubError(ctx context.Context, sink *wsSink, sub, code, message string) {
 	payload, err := json.Marshal(hub.ErrorPayload{Code: code, Message: message})
 	if err != nil {
 		return
 	}
-	sendEnvelope(ctx, sink, hub.Envelope{V: 1, Type: hub.TypeError, ID: hub.NewEventID(), TS: time.Now().UTC(), Payload: payload})
+	sendEnvelope(ctx, sink, hub.Envelope{V: 1, Type: hub.TypeError, ID: hub.NewEventID(), TS: time.Now().UTC(), Sub: sub, Payload: payload})
 }
 
 func sendEnvelope(ctx context.Context, sink *wsSink, env hub.Envelope) {

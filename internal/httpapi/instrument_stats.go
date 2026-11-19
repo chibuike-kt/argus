@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/chibuike-kt/argus/internal/hub"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/quant"
@@ -78,23 +79,29 @@ func (h *apiHandler) ListInstrumentStats(ctx context.Context, request ListInstru
 }
 
 // toAPIInstrumentStats renders st at the instrument's own scales. A nil
-// domain value becomes a JSON null, never "0".
+// domain value becomes a JSON null, never "0". The live figures (D3) go
+// through hub.NewStatsPayload, the same renderer the `stats` WebSocket
+// message uses, so the first load and every live update can never
+// disagree on a figure's text.
 func toAPIInstrumentStats(st marketdata.Stats, priceScale, qtyScale quant.Scale) InstrumentStats {
-	out := InstrumentStats{InstrumentId: st.InstrumentID}
+	live := hub.NewStatsPayload(st.InstrumentID, st.Live, priceScale, qtyScale)
+	out := InstrumentStats{
+		InstrumentId:               st.InstrumentID,
+		LastPrice:                  live.LastPrice,
+		LastPriceClosed:            live.LastPriceClosed,
+		AsOf:                       live.AsOf,
+		LastTickAt:                 live.LastTickAt,
+		Change24h:                  live.Change24h,
+		Change24hPct:               live.Change24hPct,
+		Change24hReferenceOpenTime: live.Change24hReferenceOpenTime,
+		Volume24h:                  live.Volume24h,
+		Volume24hMinutes:           live.Volume24hMinutes,
+	}
 	if st.Latest != nil {
 		lc := st.Latest.Close.String(priceScale)
 		out.LastClose = &lc
 		t := st.Latest.OpenTime.Time().UTC()
 		out.LastClosedOpenTime = &t
-	}
-	if st.Change24h != nil {
-		abs := st.Change24h.Abs.String(priceScale)
-		out.Change24h = &abs
-		out.Change24hPct = percentPtr(st.Change24h.Pct)
-	}
-	if st.Volume24h != nil {
-		v := st.Volume24h.String(qtyScale)
-		out.Volume24h = &v
 	}
 	out.Performance = InstrumentPerformance{
 		N1D: percentPtr(st.Performance["1D"]),

@@ -84,6 +84,9 @@ func main() {
 
 	candlesStore := marketdata.NewStore(db, clk)
 	liveHub := hub.New(hub.NewRedisSubscriber(rdb), candlesStore, instrumentsStore, clk, cfg.Live, logger)
+	// The live `stats` stream (Phase 3) reads through the same Stats GET
+	// /instruments/stats serves.
+	liveHub.EnableStats(candlesStore)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Logger:       logger,

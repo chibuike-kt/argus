@@ -44,12 +44,27 @@ func PerformancePeriods() []Period {
 	return out
 }
 
-// change24hOffset is rule 1's reference offset (identical to the 1D
-// period; kept separate so the two rules stay independently readable).
-const change24hOffset = 24 * time.Hour
+// D3 (product overhaul brief, approved by the owner 16 November 2026)
+// amends rules 1 and 2 of the panel brief: the live price is the forming
+// candle's close; the 24h change compares it to the close of the closed
+// candle whose open time is forming.open_time - 24h - 1 minute (the price
+// at exactly 24h before the current minute began); the 24h volume is the
+// base volume over the 1440 candles ending at the forming one.
+//
+// When no forming candle is newer than the latest closed one (between a
+// minute's close and the next minute's first tick, or a feed that has
+// stopped), the anchor is that closed candle and the reference is the
+// closed candle exactly 24h before it: the original rule 1, which is the
+// same "price exactly 24h earlier" for a price taken at that candle's own
+// close. The volume window has the same shape either way: the 1440
+// minutes ending at (and including) the anchor.
+const (
+	formingReferenceOffset = 24*time.Hour + time.Minute
+	closedReferenceOffset  = 24 * time.Hour
+)
 
-// volume24hWindow is rule 2's window: the 1440 closed 1-minute candles
-// ending at (and including) the latest closed one.
+// volume24hWindow is the 24h volume window: the 1440 1-minute candles
+// ending at (and including) the anchor.
 const volume24hWindow = 24 * time.Hour
 
 // volume24hCandles is how many 1-minute candles volume24hWindow holds;
@@ -140,22 +155,101 @@ type Change struct {
 	Pct *Percent
 }
 
+// LiveBase is everything D3 needs for one anchor minute except the
+// anchor's own close and volume: the change reference and the closed
+// minutes of the volume window before the anchor. The hub keeps one per
+// instrument and applies each forming tick of the same minute to it
+// (Apply), so a tick costs no query; the REST endpoint applies the
+// anchor row it just read. Both go through Apply, so the first load and
+// every live update use the same arithmetic.
+type LiveBase struct {
+	AnchorOpenTime clock.EventTime
+	// AnchorClosed is true when the anchor is a closed candle (no
+	// forming row newer than it).
+	AnchorClosed bool
+	// ReferenceOpenTime is the exact minute the change reference was
+	// looked up at, found or not.
+	ReferenceOpenTime clock.EventTime
+	ReferenceFound    bool
+	ReferenceClose    quant.Price
+	// PriorCount and PriorVolume are the count and base volume sum of
+	// the current, closed candles in the volume window strictly before
+	// the anchor (at most volume24hCandles - 1).
+	PriorCount  int64
+	PriorVolume quant.Qty
+}
+
+// LiveFigures are the live side-panel figures (D3). Change24h and
+// Volume24h are nil when absent: the input they need does not exist,
+// and the caller must show it as absent, never as zero.
+type LiveFigures struct {
+	// LastPrice is the anchor's close: the forming candle's latest
+	// close, or the latest closed candle's close when nothing is forming.
+	LastPrice quant.Price
+	// AsOf is the exchange event time the price belongs to: the anchor
+	// candle's open time. The provider's candle feed carries no
+	// per-trade timestamp, so this is minute-grained.
+	AsOf clock.EventTime
+	// AnchorClosed is true when LastPrice is a closed candle's close.
+	AnchorClosed bool
+	// LastTickAt is when ARGUS stored the anchor's latest value (the
+	// row's ingested_at): an ingestion time, not an exchange time.
+	LastTickAt clock.IngestionTime
+	Change24h  *Change
+	// ReferenceOpenTime is the minute Change24h is measured against.
+	ReferenceOpenTime clock.EventTime
+	// Volume24h is present only when all volume24hCandles minutes exist.
+	Volume24h *quant.Qty
+	// VolumeMinutes is how many of the volume24hCandles minutes exist
+	// (the anchor included), so an absent Volume24h can say why.
+	VolumeMinutes int64
+}
+
+// Apply computes the live figures for the anchor whose own close and
+// volume are price and volume, last stored at lastTickAt. It does no I/O.
+func (b LiveBase) Apply(price quant.Price, volume quant.Qty, lastTickAt clock.IngestionTime) (LiveFigures, error) {
+	f := LiveFigures{
+		LastPrice:         price,
+		AsOf:              b.AnchorOpenTime,
+		AnchorClosed:      b.AnchorClosed,
+		LastTickAt:        lastTickAt,
+		ReferenceOpenTime: b.ReferenceOpenTime,
+		VolumeMinutes:     b.PriorCount + 1,
+	}
+	if b.ReferenceFound {
+		c := Change{Abs: PriceChange(int64(price) - int64(b.ReferenceClose))}
+		if pct, ok := percentChange(price, b.ReferenceClose); ok {
+			c.Pct = &pct
+		}
+		f.Change24h = &c
+	}
+	if f.VolumeMinutes == volume24hCandles {
+		v, err := b.PriorVolume.Add(volume)
+		if err != nil {
+			return LiveFigures{}, fmt.Errorf("marketdata: 24h volume at %s: %w", b.AnchorOpenTime, err)
+		}
+		f.Volume24h = &v
+	}
+	return f, nil
+}
+
 // Stats is one instrument's side-panel figures, every one derived from
-// stored current (non-superseded), closed 1-minute candles. A nil
-// pointer means absent (rules 1, 2, 4): the input it needs does not
-// exist, and the caller must show it as absent, never as zero.
+// stored current (non-superseded) 1-minute candles. A nil pointer means
+// absent: the input it needs does not exist, and the caller must show it
+// as absent, never as zero.
 type Stats struct {
 	InstrumentID int64
-	// Latest is nil when the instrument has no closed candle at all;
-	// every other field is then absent too.
+	// Latest is the latest closed candle (the performance anchor and
+	// "finalized through"); nil when no candle is closed yet.
 	Latest *LatestClose
-	// Change24h is rule 1.
-	Change24h *Change
-	// Volume24h is rule 2: base asset volume over the full 1440-candle
-	// window, nil unless every one of those candles exists.
-	Volume24h *quant.Qty
-	// Performance is rule 4, keyed by Period.Key, one entry for every
-	// period in PerformancePeriods (nil value: absent).
+	// Live is D3's figures; nil when the instrument has no current
+	// candle at all (and then Base is nil too).
+	Live *LiveFigures
+	// Base is what Live was computed from, for the hub's per-tick path.
+	Base *LiveBase
+	// Performance is rule 4 (unchanged by D3: anchored to the latest
+	// closed candle), keyed by Period.Key, one entry for every period in
+	// PerformancePeriods (nil value: absent).
 	Performance map[string]*Percent
 }
 
@@ -169,26 +263,36 @@ type LatestClose struct {
 // statsInputs is what GetCandleStatsInputs returns, decoupled from the
 // sqlc row type so computeStats is a pure function over plain values.
 type statsInputs struct {
+	base            LiveBase
+	anchorClose     quant.Price
+	anchorVolume    quant.Qty
+	anchorTickAt    clock.IngestionTime
+	latestFound     bool
 	latestOpenTime  time.Time
 	latestClose     quant.Price
-	volumeCount     int64
-	volumeSum       quant.Qty
 	referenceFound  []bool
 	referenceCloses []quant.Price
 }
 
-// statsOffsets is the reference offsets sent to the query, in a fixed
-// order: index 0 is change24hOffset, then one per performance period.
+// statsOffsets is the performance reference offsets sent to the query,
+// one per performance period, in order.
 func statsOffsets() []time.Duration {
-	out := make([]time.Duration, 0, 1+len(performancePeriods))
-	out = append(out, change24hOffset)
+	out := make([]time.Duration, 0, len(performancePeriods))
 	for _, p := range performancePeriods {
 		out = append(out, p.Offset)
 	}
 	return out
 }
 
-// computeStats applies rules 1, 2 and 4 to in. It does no I/O.
+func emptyPerformance() map[string]*Percent {
+	perf := make(map[string]*Percent, len(performancePeriods))
+	for _, p := range performancePeriods {
+		perf[p.Key] = nil
+	}
+	return perf
+}
+
+// computeStats applies D3 and rule 4 to in. It does no I/O.
 func computeStats(instrumentID int64, in statsInputs) (Stats, error) {
 	offsets := statsOffsets()
 	if len(in.referenceFound) != len(offsets) || len(in.referenceCloses) != len(offsets) {
@@ -196,42 +300,36 @@ func computeStats(instrumentID int64, in statsInputs) (Stats, error) {
 			instrumentID, len(offsets), len(in.referenceFound), len(in.referenceCloses))
 	}
 
+	live, err := in.base.Apply(in.anchorClose, in.anchorVolume, in.anchorTickAt)
+	if err != nil {
+		return Stats{}, fmt.Errorf("marketdata: stats instrument=%d: %w", instrumentID, err)
+	}
+	base := in.base
 	s := Stats{
 		InstrumentID: instrumentID,
-		Latest:       &LatestClose{Close: in.latestClose, OpenTime: clock.NewEventTime(in.latestOpenTime)},
-		Performance:  make(map[string]*Percent, len(performancePeriods)),
+		Live:         &live,
+		Base:         &base,
+		Performance:  emptyPerformance(),
 	}
-
-	if in.referenceFound[0] {
-		ref := in.referenceCloses[0]
-		c := Change{Abs: PriceChange(int64(in.latestClose) - int64(ref))}
-		if pct, ok := percentChange(in.latestClose, ref); ok {
-			c.Pct = &pct
-		}
-		s.Change24h = &c
+	if !in.latestFound {
+		return s, nil
 	}
-
-	if in.volumeCount == volume24hCandles {
-		v := in.volumeSum
-		s.Volume24h = &v
-	}
-
+	s.Latest = &LatestClose{Close: in.latestClose, OpenTime: clock.NewEventTime(in.latestOpenTime)}
 	for i, p := range performancePeriods {
-		s.Performance[p.Key] = nil
-		if !in.referenceFound[i+1] {
+		if !in.referenceFound[i] {
 			continue
 		}
-		if pct, ok := percentChange(in.latestClose, in.referenceCloses[i+1]); ok {
+		if pct, ok := percentChange(in.latestClose, in.referenceCloses[i]); ok {
 			s.Performance[p.Key] = &pct
 		}
 	}
 	return s, nil
 }
 
-// Stats returns instrumentID's side-panel figures (real-panel-data
-// brief rules 1, 2, 4) from one SQL statement (GetCandleStatsInputs).
-// An instrument with no closed candle yet is not an error: it returns
-// Stats with Latest nil and every figure absent.
+// Stats returns instrumentID's side-panel figures (D3 and rule 4) from
+// one SQL statement (GetCandleStatsInputs). An instrument with no
+// current candle yet is not an error: it returns Stats with Live, Latest
+// and every figure absent.
 func (s *Store) Stats(ctx context.Context, instrumentID int64) (Stats, error) {
 	offsets := statsOffsets()
 	secs := make([]int64, len(offsets))
@@ -240,16 +338,14 @@ func (s *Store) Stats(ctx context.Context, instrumentID int64) (Stats, error) {
 	}
 
 	row, err := s.q.GetCandleStatsInputs(ctx, store.GetCandleStatsInputsParams{
-		InstrumentID:        instrumentID,
-		OffsetsSeconds:      secs,
-		VolumeWindowSeconds: int64(volume24hWindow / time.Second),
+		InstrumentID:                  instrumentID,
+		OffsetsSeconds:                secs,
+		VolumeWindowSeconds:           int64(volume24hWindow / time.Second),
+		FormingReferenceOffsetSeconds: int64(formingReferenceOffset / time.Second),
+		ClosedReferenceOffsetSeconds:  int64(closedReferenceOffset / time.Second),
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		perf := make(map[string]*Percent, len(performancePeriods))
-		for _, p := range performancePeriods {
-			perf[p.Key] = nil
-		}
-		return Stats{InstrumentID: instrumentID, Performance: perf}, nil
+		return Stats{InstrumentID: instrumentID, Performance: emptyPerformance()}, nil
 	}
 	if err != nil {
 		return Stats{}, fmt.Errorf("marketdata: stats instrument=%d: %w", instrumentID, err)
@@ -260,10 +356,21 @@ func (s *Store) Stats(ctx context.Context, instrumentID int64) (Stats, error) {
 		closes[i] = quant.Price(c)
 	}
 	return computeStats(instrumentID, statsInputs{
+		base: LiveBase{
+			AnchorOpenTime:    clock.NewEventTime(row.AnchorOpenTime),
+			AnchorClosed:      row.AnchorIsClosed,
+			ReferenceOpenTime: clock.NewEventTime(row.ChangeReferenceOpenTime),
+			ReferenceFound:    row.ChangeReferenceFound,
+			ReferenceClose:    quant.Price(row.ChangeReferenceClose),
+			PriorCount:        row.VolumeWindowCount,
+			PriorVolume:       quant.Qty(row.VolumeWindowSum),
+		},
+		anchorClose:     quant.Price(row.AnchorClose),
+		anchorVolume:    quant.Qty(row.AnchorVolume),
+		anchorTickAt:    clock.NewIngestionTime(row.AnchorIngestedAt),
+		latestFound:     row.LatestFound,
 		latestOpenTime:  row.LatestOpenTime,
 		latestClose:     quant.Price(row.LatestClose),
-		volumeCount:     row.VolumeWindowCount,
-		volumeSum:       quant.Qty(row.VolumeWindowSum),
 		referenceFound:  row.ReferenceFound,
 		referenceCloses: closes,
 	})

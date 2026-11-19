@@ -1,9 +1,11 @@
 package marketdata
 
 import (
+	"math"
 	"testing"
 	"time"
 
+	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/quant"
 )
 
@@ -92,66 +94,92 @@ func TestPerformancePeriods_ApprovedTable(t *testing.T) {
 	}
 }
 
-// inputsWith builds statsInputs with every reference absent; callers
-// switch on the ones a case needs. Index 0 is the 24h change reference,
-// 1..6 the performance periods in PerformancePeriods order.
-func inputsWith(latest quant.Price) statsInputs {
-	n := 1 + len(performancePeriods)
+// inputsWith builds statsInputs for a forming anchor with every
+// reference absent and an empty volume window; callers switch on what a
+// case needs. referenceFound/Closes are the performance periods in
+// PerformancePeriods order.
+func inputsWith(anchorClose quant.Price) statsInputs {
+	n := len(performancePeriods)
+	anchor := time.Date(2026, 11, 16, 12, 1, 0, 0, time.UTC)
 	return statsInputs{
-		latestOpenTime:  time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC),
-		latestClose:     latest,
+		base: LiveBase{
+			AnchorOpenTime:    clock.NewEventTime(anchor),
+			ReferenceOpenTime: clock.NewEventTime(anchor.Add(-formingReferenceOffset)),
+		},
+		anchorClose:     anchorClose,
+		anchorTickAt:    clock.NewIngestionTime(anchor.Add(17 * time.Second)),
+		latestFound:     true,
+		latestOpenTime:  anchor.Add(-time.Minute),
+		latestClose:     10000,
 		referenceFound:  make([]bool, n),
 		referenceCloses: make([]quant.Price, n),
 	}
 }
 
 func TestComputeStats_FullHistory(t *testing.T) {
-	in := inputsWith(10050)                                   // 100.50
-	in.referenceFound[0], in.referenceCloses[0] = true, 10000 // 24h ago 100.00
-	in.referenceFound[1], in.referenceCloses[1] = true, 10000 // 1D
-	in.referenceFound[2], in.referenceCloses[2] = true, 12000 // 1W 120.00
-	in.volumeCount, in.volumeSum = 1440, 987654
+	in := inputsWith(10050) // forming close 100.50
+	in.base.ReferenceFound, in.base.ReferenceClose = true, 10000
+	in.latestClose = 10040                                    // latest closed 100.40
+	in.referenceFound[0], in.referenceCloses[0] = true, 10000 // 1D 100.00
+	in.referenceFound[1], in.referenceCloses[1] = true, 12000 // 1W 120.00
+	in.base.PriorCount, in.base.PriorVolume = 1439, 987000
+	in.anchorVolume = 654
 
 	s, err := computeStats(7, in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Latest == nil || s.Latest.Close != 10050 {
-		t.Fatalf("Latest = %+v", s.Latest)
+	if s.Live == nil || s.Live.LastPrice != 10050 {
+		t.Fatalf("Live = %+v, want last price 10050 (the forming close)", s.Live)
 	}
-	if s.Change24h == nil {
+	if s.Latest == nil || s.Latest.Close != 10040 {
+		t.Fatalf("Latest = %+v, want the closed 10040", s.Latest)
+	}
+	// D3: forming 100.50 - reference 100.00 = +0.50, +0.50%.
+	if s.Live.Change24h == nil {
 		t.Fatal("Change24h absent, want present")
 	}
-	// 100.50 - 100.00 = +0.50, +0.50%.
-	if got := s.Change24h.Abs.String(2); got != "0.50" {
+	if got := s.Live.Change24h.Abs.String(2); got != "0.50" {
 		t.Errorf("change abs = %q, want 0.50", got)
 	}
-	if s.Change24h.Pct == nil || s.Change24h.Pct.String() != "0.50" {
-		t.Errorf("change pct = %v, want 0.50", s.Change24h.Pct)
+	if s.Live.Change24h.Pct == nil || s.Live.Change24h.Pct.String() != "0.50" {
+		t.Errorf("change pct = %v, want 0.50", s.Live.Change24h.Pct)
 	}
-	if s.Volume24h == nil || *s.Volume24h != 987654 {
-		t.Errorf("Volume24h = %v, want 987654", s.Volume24h)
+	// D3: 1439 closed minutes before the anchor plus the forming one.
+	if s.Live.VolumeMinutes != 1440 || s.Live.Volume24h == nil || *s.Live.Volume24h != 987654 {
+		t.Errorf("Volume24h = %v over %d minutes, want 987654 over 1440", s.Live.Volume24h, s.Live.VolumeMinutes)
 	}
-	// 1W: (100.50 - 120.00)/120.00 = -16.25% exactly.
-	if p := s.Performance["1W"]; p == nil || p.String() != "-16.25" {
-		t.Errorf("1W = %v, want -16.25", p)
+	// Rule 4 is still anchored to the latest CLOSED candle:
+	// 1D (100.40 - 100.00)/100.00 = +0.40%; 1W (100.40 - 120.00)/120.00
+	// = -16.333...% -> -16.33.
+	if p := s.Performance["1D"]; p == nil || p.String() != "0.40" {
+		t.Errorf("1D = %v, want 0.40", p)
+	}
+	if p := s.Performance["1W"]; p == nil || p.String() != "-16.33" {
+		t.Errorf("1W = %v, want -16.33", p)
 	}
 	for _, k := range []string{"1M", "3M", "6M", "1Y"} {
 		if v, ok := s.Performance[k]; !ok || v != nil {
 			t.Errorf("Performance[%s] = %v (present key %v), want present key with nil (absent)", k, v, ok)
 		}
 	}
+	if !s.Live.AsOf.Time().Equal(in.base.AnchorOpenTime.Time()) || !s.Live.LastTickAt.Time().Equal(in.anchorTickAt.Time()) {
+		t.Errorf("as_of %v last tick %v, want the anchor's open time and ingestion time", s.Live.AsOf, s.Live.LastTickAt)
+	}
 }
 
 func TestComputeStats_MissingReferenceIsAbsent(t *testing.T) {
 	in := inputsWith(10050)
-	in.volumeCount, in.volumeSum = 1440, 5
+	in.base.PriorCount, in.base.PriorVolume = 1439, 5
 	s, err := computeStats(1, in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Change24h != nil {
-		t.Errorf("Change24h = %+v, want absent", s.Change24h)
+	if s.Live.Change24h != nil {
+		t.Errorf("Change24h = %+v, want absent", s.Live.Change24h)
+	}
+	if !s.Live.ReferenceOpenTime.Time().Equal(in.base.ReferenceOpenTime.Time()) {
+		t.Errorf("ReferenceOpenTime = %v, want the minute that was looked up", s.Live.ReferenceOpenTime)
 	}
 	if s.Performance["1D"] != nil {
 		t.Errorf("1D = %v, want absent", s.Performance["1D"])
@@ -160,13 +188,16 @@ func TestComputeStats_MissingReferenceIsAbsent(t *testing.T) {
 
 func TestComputeStats_ShortVolumeWindowIsAbsent(t *testing.T) {
 	in := inputsWith(10050)
-	in.volumeCount, in.volumeSum = 1439, 5
+	in.base.PriorCount, in.base.PriorVolume = 1438, 5
 	s, err := computeStats(1, in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Volume24h != nil {
-		t.Errorf("Volume24h = %v with 1439 candles, want absent", *s.Volume24h)
+	if s.Live.Volume24h != nil {
+		t.Errorf("Volume24h = %v with 1439 candles, want absent", *s.Live.Volume24h)
+	}
+	if s.Live.VolumeMinutes != 1439 {
+		t.Errorf("VolumeMinutes = %d, want 1439", s.Live.VolumeMinutes)
 	}
 }
 
@@ -174,13 +205,32 @@ func TestComputeStats_ZeroVolumeFullWindowIsPresentZero(t *testing.T) {
 	// A full window whose candles all have zero volume is a real zero,
 	// not absent.
 	in := inputsWith(10050)
-	in.volumeCount, in.volumeSum = 1440, 0
+	in.base.PriorCount = 1439
 	s, err := computeStats(1, in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Volume24h == nil || *s.Volume24h != 0 {
-		t.Errorf("Volume24h = %v, want present 0", s.Volume24h)
+	if s.Live.Volume24h == nil || *s.Live.Volume24h != 0 {
+		t.Errorf("Volume24h = %v, want present 0", s.Live.Volume24h)
+	}
+}
+
+func TestComputeStats_NoClosedCandleYet(t *testing.T) {
+	// Only a forming candle exists: the live price is present, the
+	// closed-anchored figures are absent.
+	in := inputsWith(10050)
+	in.latestFound = false
+	s, err := computeStats(1, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Live == nil || s.Live.LastPrice != 10050 || s.Latest != nil {
+		t.Fatalf("Live = %+v Latest = %+v, want live present and latest absent", s.Live, s.Latest)
+	}
+	for k, v := range s.Performance {
+		if v != nil {
+			t.Errorf("Performance[%s] = %v, want absent", k, v)
+		}
 	}
 }
 
@@ -189,5 +239,49 @@ func TestComputeStats_MismatchedArraysIsError(t *testing.T) {
 	in.referenceFound = in.referenceFound[:2]
 	if _, err := computeStats(1, in); err == nil {
 		t.Fatal("want error for mismatched reference arrays")
+	}
+}
+
+// TestLiveBaseApply_Golden is the per-tick path the hub uses: hand worked
+// values, one base, several forming ticks of the same minute.
+func TestLiveBaseApply_Golden(t *testing.T) {
+	base := LiveBase{
+		AnchorOpenTime: clock.NewEventTime(time.Date(2026, 11, 16, 12, 1, 0, 0, time.UTC)),
+		ReferenceFound: true,
+		ReferenceClose: 8000000, // 80000.00 at scale 2
+		PriorCount:     1439,
+		PriorVolume:    1_000_000, // 1.000000 at qty scale 6
+	}
+	tests := []struct {
+		close           quant.Price
+		volume          quant.Qty
+		wantAbs, wantPc string
+		wantVol         quant.Qty
+	}{
+		// 80120.00 - 80000.00 = +120.00; 120/80000 = 0.15%.
+		{8012000, 2500, "120.00", "0.15", 1_002_500},
+		// 79960.00 - 80000.00 = -40.00; -40/80000 = -0.05%.
+		{7996000, 4000, "-40.00", "-0.05", 1_004_000},
+		// 80001.20: +1.20 / 80000 = 0.0015% -> 0.00 (half-even, 0.15 hundredths rounds down).
+		{8000120, 4000, "1.20", "0.00", 1_004_000},
+	}
+	for _, tc := range tests {
+		f, err := base.Apply(tc.close, tc.volume, clock.NewIngestionTime(time.Now()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Change24h == nil || f.Change24h.Abs.String(2) != tc.wantAbs || f.Change24h.Pct.String() != tc.wantPc {
+			t.Errorf("close %d: change = %+v, want %s / %s%%", tc.close, f.Change24h, tc.wantAbs, tc.wantPc)
+		}
+		if f.Volume24h == nil || *f.Volume24h != tc.wantVol {
+			t.Errorf("close %d: volume = %v, want %d", tc.close, f.Volume24h, tc.wantVol)
+		}
+	}
+}
+
+func TestLiveBaseApply_VolumeOverflowIsError(t *testing.T) {
+	base := LiveBase{PriorCount: 1439, PriorVolume: quant.Qty(math.MaxInt64)}
+	if _, err := base.Apply(1, 1, clock.IngestionTime{}); err == nil {
+		t.Fatal("want an overflow error, never a wrapped sum")
 	}
 }

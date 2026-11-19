@@ -105,6 +105,13 @@ type Hub struct {
 
 	connsByUser map[int64]int
 	connsByIP   map[string]int
+
+	// Live stats (stats.go). statsReader is nil until EnableStats.
+	// statsConns maps instrumentID -> the connections streaming its
+	// stats; statsState holds the instrument's shared figures.
+	statsReader StatsReader
+	statsConns  map[int64]map[*Connection]struct{}
+	statsState  map[int64]*instrumentStats
 }
 
 // New wires a Hub. clk/cfg/logger must not be nil; cfg is read fresh on
@@ -125,6 +132,8 @@ func New(subscriber Subscriber, candles AggregateReader, insts InstrumentChecker
 		redisRefCount:   make(map[int64]int),
 		connsByUser:     make(map[int64]int),
 		connsByIP:       make(map[string]int),
+		statsConns:      make(map[int64]map[*Connection]struct{}),
+		statsState:      make(map[int64]*instrumentStats),
 	}
 }
 
@@ -184,6 +193,10 @@ func (h *Hub) Unregister(c *Connection) {
 	c.mu.Unlock()
 	for _, k := range keys {
 		h.removeSubscriptionLocked(c, k)
+	}
+	for _, id := range c.statsIDs() {
+		c.removeStatsID(id)
+		h.removeStatsLocked(c, id)
 	}
 }
 
@@ -431,6 +444,7 @@ func (h *Hub) startRedisSubscriptionLocked(instrumentID int64) {
 					h.logger.Warn("hub: candle stream sequence loss, resyncing",
 						"instrument_id", instrumentID, "last_seq", lastSeq, "got_seq", ev.Seq)
 					h.handleCandleStreamLoss(instrumentID)
+					h.markStatsRebase(instrumentID)
 					lastSeq = ev.Seq
 					// The resync above reads current state from the
 					// database, which already reflects ev's own
@@ -442,6 +456,7 @@ func (h *Hub) startRedisSubscriptionLocked(instrumentID int64) {
 				}
 				lastSeq = ev.Seq
 				h.routeEvent(context.Background(), ev)
+				h.onStatsEvent(ev)
 			}
 		}
 	}()
