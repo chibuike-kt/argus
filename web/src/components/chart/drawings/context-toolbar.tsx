@@ -3,7 +3,7 @@ import { Copy, Trash, GearSix, Minus } from "@phosphor-icons/react";
 import { cn } from "@/lib/cn";
 import type { Drawing, LineStyle } from "./types";
 
-const PALETTE = ["#6d7bff", "#f0616d", "#2ebd85", "#f5b461", "#ffffff", "#9aa1ab"];
+export const PALETTE = ["#6d7bff", "#f0616d", "#2ebd85", "#f5b461", "#ffffff", "#9aa1ab"];
 const WIDTHS = [1, 1.5, 2, 3];
 
 export interface ContextToolbarProps {

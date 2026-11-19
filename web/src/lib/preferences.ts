@@ -39,6 +39,9 @@ export interface Prefs {
   right_panel_width?: number;
   tool_rail_collapsed?: boolean;
   other_setups_open?: boolean;
+  // ARGUS's own chart layers (setup zone and plan lines): hidden when
+  // false. Absent means shown.
+  analysis_layers_visible?: boolean;
   watchlist_groups_collapsed?: Record<string, boolean>;
   drawing_tools?: DrawingToolsPref;
   chart_views?: Record<string, ChartViewPref>;
@@ -115,6 +118,7 @@ export function sanitizePrefs(raw: unknown): Prefs {
     out.right_panel_width = r.right_panel_width as number;
   if (isBool(r.tool_rail_collapsed)) out.tool_rail_collapsed = r.tool_rail_collapsed;
   if (isBool(r.other_setups_open)) out.other_setups_open = r.other_setups_open;
+  if (isBool(r.analysis_layers_visible)) out.analysis_layers_visible = r.analysis_layers_visible;
   if (r.watchlist_groups_collapsed && typeof r.watchlist_groups_collapsed === "object") {
     const g: Record<string, boolean> = {};
     for (const [k, v] of Object.entries(r.watchlist_groups_collapsed as object))

@@ -1,5 +1,8 @@
 import { type ReactNode } from "react";
-import { Plus, Columns, DotsThree, CaretDown, CircleNotch } from "@phosphor-icons/react";
+import { Plus, Columns, DotsThree, CaretDown, CircleNotch, Trash } from "@phosphor-icons/react";
+import { useSearchParams } from "react-router-dom";
+import { getWatchlistStore, useWatchlistStore } from "@/lib/watchlist-store";
+import { useAnalysisWorkspace } from "./analysis-workspace";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { useInstruments, useWatchlist } from "@/api/hooks";
 import { LiveFigure } from "@/components/ui/live-figure";
@@ -26,64 +29,143 @@ function IconBtn({ children }: { children: ReactNode }) {
 // (thousands separators only, never a number conversion). Last is the
 // shared <LivePrice>; Chg and Chg% are coloured by their sign. A dash carries its reason on
 // hover, and the row's hover names the feed state in plain words.
+//
+// The trash button (fix/chart-interaction, item 3) shows on row hover or
+// keyboard focus and removes the row at once, with an undo toast.
 function Row({
   symbol,
   entry,
   snapshot,
   now,
+  onRemove,
 }: {
   symbol: string;
   entry: LiveStatsEntry | undefined;
   snapshot: LiveStatsSnapshot;
   now: number;
+  onRemove: () => void;
 }) {
   const f = entry?.figures ?? null;
   const tone = toneClass(f?.change_24h);
   const feed = feedLine(entry, snapshot, now);
+  const name = symbol.replace(".P", "");
   return (
-    <button
-      data-testid={`watchlist-row-${symbol}`}
-      title={`${symbol.replace(".P", "")}: ${feed.text}`}
-      className={cn(
-        "focus-ring w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/5",
-        COLS,
-      )}
-    >
-      <span className="flex items-center gap-2 overflow-hidden">
-        <CoinIcon symbol={symbol} size={20} />
-        <span className="truncate text-[13px] font-medium">{symbol.replace(".P", "")}</span>
-      </span>
-      <span className={cn("truncate text-right text-[13px]", feed.quiet && "opacity-70")}>
-        <LivePrice
-          testId={`watchlist-last-${symbol}`}
-          value={f?.last_price ?? null}
-          text={f?.last_price != null ? formatDecimal(f.last_price) : null}
-          reason={liveReason("last_price", entry, snapshot)}
-          resetKey={symbol}
-        />
-      </span>
-      <span className="truncate text-right text-[12px]">
-        <LiveFigure
-          testId={`watchlist-chg-${symbol}`}
-          tone="sign"
-          signTone={tone}
-          text={f?.change_24h != null ? formatDecimal(f.change_24h, { signed: true }) : null}
-          reason={liveReason("change_24h", entry, snapshot)}
-          motion={entry?.motion.change_24h}
-        />
-      </span>
-      <span className="truncate text-right text-[12px]">
-        <LiveFigure
-          testId={`watchlist-chgpct-${symbol}`}
-          tone="sign"
-          signTone={tone}
-          text={f?.change_24h_pct != null ? formatPercent(f.change_24h_pct) : null}
-          reason={liveReason("change_24h_pct", entry, snapshot)}
-          motion={entry?.motion.change_24h_pct}
-        />
-      </span>
-    </button>
+    <div className="group relative">
+      <button
+        data-testid={`watchlist-row-${symbol}`}
+        title={`${name}: ${feed.text}`}
+        className={cn(
+          "focus-ring w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/5",
+          COLS,
+        )}
+      >
+        <span className="flex items-center gap-2 overflow-hidden">
+          <CoinIcon symbol={symbol} size={20} />
+          <span className="truncate text-[13px] font-medium">{symbol.replace(".P", "")}</span>
+        </span>
+        <span className={cn("truncate text-right text-[13px]", feed.quiet && "opacity-70")}>
+          <LivePrice
+            testId={`watchlist-last-${symbol}`}
+            value={f?.last_price ?? null}
+            text={f?.last_price != null ? formatDecimal(f.last_price) : null}
+            reason={liveReason("last_price", entry, snapshot)}
+            resetKey={symbol}
+          />
+        </span>
+        <span className="truncate text-right text-[12px]">
+          <LiveFigure
+            testId={`watchlist-chg-${symbol}`}
+            tone="sign"
+            signTone={tone}
+            text={f?.change_24h != null ? formatDecimal(f.change_24h, { signed: true }) : null}
+            reason={liveReason("change_24h", entry, snapshot)}
+            motion={entry?.motion.change_24h}
+          />
+        </span>
+        <span className="truncate text-right text-[12px]">
+          <LiveFigure
+            testId={`watchlist-chgpct-${symbol}`}
+            tone="sign"
+            signTone={tone}
+            text={f?.change_24h_pct != null ? formatPercent(f.change_24h_pct) : null}
+            reason={liveReason("change_24h_pct", entry, snapshot)}
+            motion={entry?.motion.change_24h_pct}
+          />
+        </span>
+      </button>
+      <button
+        type="button"
+        data-testid={`watchlist-remove-${symbol}`}
+        aria-label={`Remove ${name} from the watchlist`}
+        title={`Remove ${name} from the watchlist`}
+        onClick={onRemove}
+        className="focus-ring absolute right-1 top-1/2 grid size-6 -translate-y-1/2 place-items-center rounded-md bg-surface text-fg-subtle opacity-0 shadow-sm transition-opacity hover:bg-down/15 hover:text-down focus-visible:opacity-100 group-hover:opacity-100"
+      >
+        <Trash className="size-3.5" />
+      </button>
+    </div>
   );
+}
+
+// RemovalToasts: one undo toast per removal in its undo window, and the
+// message when the server refused one (the row is back by then).
+function RemovalToasts({ names }: { names: Map<number, string> }) {
+  const wl = useWatchlistStore();
+  const store = getWatchlistStore();
+  if (wl.pending.length === 0 && !wl.failure) return null;
+  return (
+    <div
+      className="shrink-0 space-y-1.5 border-t border-line p-2"
+      aria-live="polite"
+      data-testid="watchlist-toasts"
+    >
+      {wl.pending.map((id) => (
+        <div
+          key={id}
+          className="flex items-center justify-between gap-2 rounded-lg bg-white/[0.06] px-2.5 py-1.5 text-[12px] text-fg-muted"
+          data-testid={`watchlist-undo-toast-${id}`}
+        >
+          <span>Removed {names.get(id) ?? "instrument"} from the watchlist</span>
+          <button
+            type="button"
+            className="focus-ring rounded px-1.5 py-0.5 font-medium text-fg hover:bg-white/10"
+            onClick={() => store.undo(id)}
+          >
+            Undo
+          </button>
+        </div>
+      ))}
+      {wl.failure && (
+        <div
+          role="alert"
+          className="flex items-center justify-between gap-2 rounded-lg bg-down/10 px-2.5 py-1.5 text-[12px] text-down"
+          data-testid="watchlist-remove-failed"
+        >
+          <span>
+            Could not remove {names.get(wl.failure.id) ?? "the instrument"}: {wl.failure.message}.
+            It is back on the list.
+          </span>
+          <button
+            type="button"
+            className="focus-ring rounded px-1.5 py-0.5 font-medium hover:bg-white/10"
+            onClick={() => store.dismissFailure()}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// nextAfterRemoval picks the chart instrument after the selected one is
+// removed from the watchlist: the row that takes its place (the next
+// one), else the one above it, else none (the chart stays where it is --
+// the instrument is still enabled and viewable, just not watched).
+export function nextAfterRemoval(visible: readonly number[], removed: number): number | undefined {
+  const i = visible.indexOf(removed);
+  if (i < 0) return undefined;
+  return visible[i + 1] ?? visible[i - 1];
 }
 
 // A group's collapsed state is a preference (D1), keyed by its title.
@@ -108,8 +190,11 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
 }
 
 export function Watchlist() {
-  const { data: instruments, loading: instrumentsLoading, error: instrumentsError } =
-    useInstruments();
+  const {
+    data: instruments,
+    loading: instrumentsLoading,
+    error: instrumentsError,
+  } = useInstruments();
   // The signed-in user's own saved instrument ids, in their saved
   // order (web light auth redesign brief, Part 3) -- this panel no
   // longer shows every registered instrument, only the ones onboarding
@@ -132,6 +217,20 @@ export function Watchlist() {
   // new array with the same ids each render changes nothing.)
   const snapshot = useLiveStats(watched.map((i) => i.id));
   const now = useNow(1000);
+  const { instrument: selected } = useAnalysisWorkspace();
+  const [, setSearchParams] = useSearchParams();
+  const names = new Map((instruments ?? []).map((i) => [i.id, i.native_symbol.replace(".P", "")]));
+
+  function remove(id: number) {
+    if (selected?.id === id) {
+      const next = nextAfterRemoval(
+        watched.map((i) => i.id),
+        id,
+      );
+      if (next !== undefined) setSearchParams({ instrumentId: String(next) });
+    }
+    getWatchlistStore().remove(id);
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -185,6 +284,7 @@ export function Watchlist() {
                 entry={snapshot.entries.get(inst.id)}
                 snapshot={snapshot}
                 now={now}
+                onRemove={() => remove(inst.id)}
               />
             ))}
           {!loading && !error && watched.length === 0 && (
@@ -194,6 +294,7 @@ export function Watchlist() {
           )}
         </Group>
       </div>
+      <RemovalToasts names={names} />
     </div>
   );
 }

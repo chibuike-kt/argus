@@ -13,6 +13,8 @@ import {
   type Time,
 } from "lightweight-charts";
 import { GearSix, CircleNotch } from "@phosphor-icons/react";
+import { usePreferences } from "@/lib/preferences";
+import type { ApiSetup } from "@/api/types";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { compareDecimal, formatDecimal, formatPercent, toneClass } from "@/lib/decimal-display";
 import { cn } from "@/lib/cn";
@@ -30,8 +32,10 @@ import { fromSavedView, loadChartView, saveChartView, toSavedView } from "./char
 import { defaultVisibleRange } from "./default-view";
 import { RANGES, describeShown, rangeStartSec, type RangeKey } from "./range-buttons";
 import { INTERVAL_SECONDS, withGapWhitespace } from "./gap-whitespace";
-import { SystemAxisLabelsPrimitive, SystemPositionPrimitive, SystemRectanglePrimitive } from "./system-axis-labels";
+import { LastPriceLabelPrimitive, SystemAxisLabelsPrimitive, SystemPositionPrimitive, SystemZonePrimitive } from "./system-axis-labels";
+import { systemZoneFor, zoneEndWords, zoneStartWords, poiWords, type SystemZone } from "./system-zone";
 import { cloneDrawing } from "./drawings/types";
+import { setSeriesTimeAxis } from "./drawings/time-axis";
 import {
   primitiveFor,
   updatePrimitive,
@@ -57,6 +61,11 @@ const C = {
 // ARGUS's own voice, distinct from the market's green/red, and never part
 // of the user drawing store or its hit testing.
 const SYSTEM_COLOR = "#6d7bff";
+
+// Wide enough for the longest label ARGUS puts on the price axis
+// ("+12 levels" at 11px) whatever the instrument's price length. Display
+// value.
+const PRICE_AXIS_MIN_WIDTH_PX = 76;
 
 // A visible-range change counts as the trader's (and is saved) only within
 // this long after a wheel, drag or touch on the chart. Display value.
@@ -165,6 +174,86 @@ function LegendChange() {
   );
 }
 
+export interface AnalysisLayer {
+  label: string;
+  visible: boolean;
+}
+
+const POI_WORDS: Record<string, string> = { order_block: "order block", qmr: "QMR zone" };
+
+// analysisLabel says what the system layer is, in one line, from the
+// setup's own recorded fields (no generated prose).
+export function analysisLabel(setup: ApiSetup): string {
+  const poi = POI_WORDS[setup.poi_type] ?? setup.poi_type.replace(/_/g, " ");
+  return `ARGUS analysis · setup #${setup.id} · ${setup.direction} ${poi} and plan · ${setup.timeframe} · ${setup.state}`;
+}
+
+// AnalysisLayerChip labels ARGUS's own layer and toggles it. It is the
+// only control for that layer: drawing tools (select, delete, the
+// eraser) never touch it.
+function AnalysisLayerChip({ layer }: { layer: AnalysisLayer }) {
+  if (!layer.visible) return null;
+  return (
+    <span
+      className="flex items-center gap-1 rounded-md border border-[#6d7bff]/40 bg-[#6d7bff]/10 px-1.5 py-0.5 text-[11px] text-fg-muted"
+      data-testid="analysis-layer"
+      title="ARGUS's own analysis, drawn from the selected setup. Not a drawing: hide it with Setups in the chart controls; it cannot be deleted. Click the zone for details."
+    >
+      <span className="size-1.5 rounded-full bg-[#6d7bff]" aria-hidden />
+      {layer.label}
+    </span>
+  );
+}
+
+// ZonePopover says what ARGUS's zone is, from its stored fields, and that
+// it is not a drawing.
+export function ZonePopover({ zone, x, y, onClose }: { zone: SystemZone; x: number; y: number; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      role="dialog"
+      aria-label={`Setup #${zone.setupId} ${poiWords(zone.poiType)}`}
+      data-testid="zone-popover"
+      className="glass-strong absolute z-30 w-72 rounded-lg p-3 text-[12px] text-fg-muted shadow-lg"
+      style={{ left: x, top: y }}
+    >
+      <div className="mb-1 flex items-center justify-between">
+        <span className="font-semibold text-fg">
+          Setup #{zone.setupId} · {zone.direction} {poiWords(zone.poiType)}
+        </span>
+        <button type="button" onClick={onClose} className="focus-ring rounded px-1 text-fg-subtle hover:text-fg" aria-label="Close">
+          ×
+        </button>
+      </div>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+        <dt className="text-fg-subtle">Timeframe</dt>
+        <dd data-testid="zone-timeframe">
+          {zone.timeframe}
+          {zone.foreignTimeframe && " (detected there; shown on this chart)"}
+        </dd>
+        <dt className="text-fg-subtle">State</dt>
+        <dd data-testid="zone-state">{zone.state}</dd>
+        <dt className="text-fg-subtle">Zone high</dt>
+        <dd className="tnum" data-testid="zone-high">{zone.highText}</dd>
+        <dt className="text-fg-subtle">Zone low</dt>
+        <dd className="tnum" data-testid="zone-low">{zone.lowText}</dd>
+        <dt className="text-fg-subtle">Drawn</dt>
+        <dd data-testid="zone-span">
+          {zoneStartWords(zone)}, {zoneEndWords(zone)}
+        </dd>
+      </dl>
+      <p className="mt-2 text-[11px] text-fg-subtle">
+        ARGUS analysis, not a drawing: it cannot be deleted. Hide every setup layer with Setups in the chart controls. A zone thinner
+        than a few pixels is drawn at a minimum height; the values above are the stored ones.
+      </p>
+    </div>
+  );
+}
+
 export function ChartSurface({ className }: { className?: string }) {
   const {
     setup,
@@ -200,8 +289,21 @@ export function ChartSurface({ className }: { className?: string }) {
       })),
     [candles],
   );
-  const overlay = useMemo(() => (setup ? toPlanOverlay(setup) : undefined), [setup]);
-  const poiZoneProp = useMemo(() => (overlay ? { low: overlay.poiLow, high: overlay.poiHigh } : undefined), [overlay]);
+  // ARGUS's own layers (fix/chart-interaction, item 1): the selected
+  // setup's zone and plan are system output, not user drawings. They are
+  // labelled on the chart and can be hidden (a saved preference), never
+  // deleted like a drawing.
+  const analysisVisible = usePreferences().analysis_layers_visible !== false;
+  const overlay = useMemo(() => (setup && analysisVisible ? toPlanOverlay(setup) : undefined), [setup, analysisVisible]);
+  const analysisLayer = useMemo<AnalysisLayer | undefined>(
+    () => (setup ? { label: analysisLabel(setup), visible: analysisVisible } : undefined),
+    [setup, analysisVisible],
+  );
+  const { events, timeframe: chartTimeframe } = useAnalysisWorkspace();
+  const systemZoneProp = useMemo(
+    () => (setup && analysisVisible ? systemZoneFor(setup, events ?? [], chartTimeframe ?? setup.timeframe) : undefined),
+    [setup, analysisVisible, events, chartTimeframe],
+  );
   const planProp = useMemo(
     () => (overlay ? { entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime } : undefined),
     [overlay],
@@ -286,9 +388,10 @@ export function ChartSurface({ className }: { className?: string }) {
       candles={chartCandles}
       loading={candlesLoading}
       loadError={candlesError?.message}
-      poiZone={poiZoneProp}
+      systemZone={systemZoneProp}
       plan={planProp}
       formationOutsideWindow={formationOutsideWindow}
+      analysisLayer={analysisLayer}
       forming={forming}
       connectionState={connectionState}
       status={status}
@@ -321,9 +424,14 @@ export interface ChartSurfaceInnerProps {
   // updates/the badge in that case, just with no system annotations
   // drawn (applyCandleData below detaches whatever was attached and
   // draws nothing new).
-  poiZone?: ChartPoiZone;
+  // ARGUS's own zone (system-zone.ts); undefined when no setup is
+  // selected or the Setups layer is hidden.
+  systemZone?: SystemZone;
   plan?: ChartPlanOverlay;
   formationOutsideWindow: boolean;
+  // The selected setup's layer chip (label and shown/hidden); undefined
+  // when no setup is selected (nothing of ARGUS's is drawn).
+  analysisLayer?: AnalysisLayer;
   // Part 2D: the latest candle/candle_closed tick, applied via
   // series.update() by its own effect below -- never through the
   // candles prop above (rule 3). null when there is nothing live yet
@@ -439,16 +547,16 @@ export function ChartSurfaceInner({
   candles,
   loading,
   loadError,
-  poiZone,
+  systemZone,
   plan,
   formationOutsideWindow,
+  analysisLayer,
   forming,
   connectionState,
   status,
   fatalReason,
 }: ChartSurfaceInnerProps) {
   const hasCandles = candles.length > 0;
-  const lastTime = hasCandles ? unix(candles[candles.length - 1].openTime) : (0 as Time);
   // Missing candles inside the loaded range become whitespace points
   // (time only, no price) so a hole shows as a hole instead of the time
   // axis silently jumping -- display only (withGapWhitespace). timeframe
@@ -475,7 +583,12 @@ export function ChartSurfaceInner({
   // placed. These two are recreated (never mutated in place: neither
   // primitive type exposes an update() the way user-drawing primitives
   // do via updatePrimitive) whenever candles or the plan itself changes.
-  const systemPrimitivesRef = useRef<{ poi: SystemRectanglePrimitive | null; plan: SystemPositionPrimitive | null }>({
+  // The zone's identity for the data path: its values, not its object
+  // (a new but equal zone object must not reload the chart).
+  const zoneKey = systemZone
+    ? [systemZone.setupId, systemZone.startSec, systemZone.endSec, systemZone.low, systemZone.high, systemZone.label, systemZone.planFromSec, systemZone.planToSec].join(":")
+    : "";
+  const systemPrimitivesRef = useRef<{ poi: SystemZonePrimitive | null; plan: SystemPositionPrimitive | null }>({
     poi: null,
     plan: null,
   });
@@ -507,6 +620,8 @@ export function ChartSurfaceInner({
   // The range buttons' own notice ("Showing 3.5 days, the most history
   // stored"), and the range still waiting for older history.
   const [rangeNotice, setRangeNotice] = useState<string | null>(null);
+  // The zone popover (a click on ARGUS's zone), in host pixels.
+  const [zonePopover, setZonePopover] = useState<{ x: number; y: number } | null>(null);
   const [activeRange, setActiveRange] = useState<RangeKey | null>(null);
   const rangeRequestRef = useRef(0);
   // A range waiting for paged-in history to reach the chart: applied by
@@ -655,6 +770,7 @@ export function ChartSurfaceInner({
       series.setData([]);
       dataLengthRef.current = 0;
       dataTimesRef.current = [];
+      setSeriesTimeAxis(series, { times: [], intervalSec: INTERVAL_SECONDS[timeframe] ?? 60 });
       systemAxisLabelsRef.current?.setLevels([]);
       const prev = systemPrimitivesRef.current;
       if (prev.poi) series.detachPrimitive(prev.poi);
@@ -673,6 +789,10 @@ export function ChartSurfaceInner({
     series.setData(data);
     dataLengthRef.current = data.length;
     dataTimesRef.current = data.map((d) => d.time as number);
+    // The drawings' time <-> x mapping past either end of the data
+    // (drawings/time-axis.ts): the series' own data times, whitespace
+    // included, and this timeframe's bar length.
+    setSeriesTimeAxis(series, { times: dataTimesRef.current, intervalSec: INTERVAL_SECONDS[timeframe] ?? 60 });
     lastAppliedOpenTimeRef.current = candles[candles.length - 1].openTime;
 
     const prev = systemPrimitivesRef.current;
@@ -687,23 +807,23 @@ export function ChartSurfaceInner({
     // updates/the badge above are entirely unaffected by this being
     // absent (the bug this whole file's own brief fixes: a setup used
     // to be required just to render the chart at all).
-    if (plan && poiZone) {
-      // Anchored at the POI's own real formation candle (plan.fromTime),
-      // not a fixture array index. If that candle fell outside the fetched
-      // window (the chart's own candle request is bounded, the setup's
-      // formation candle might predate it), fall back to the first visible
-      // candle rather than throwing.
-      const fromIndex = Math.max(0, candles.findIndex((c) => c.openTime === plan.fromTime));
-      const poi = new SystemRectanglePrimitive({
-        p1: { time: unix(candles[fromIndex].openTime), price: poiZone.high },
-        p2: { time: lastTime, price: poiZone.low },
-        style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
-        label: "Order block",
+    if (plan && systemZone) {
+      // ARGUS's own zone and plan, drawn by the rule in system-zone.ts:
+      // from the formation candle to the setup's mitigation or
+      // invalidation (or its last stored state), never to the right edge
+      // by default, never from the chart's first bar as a fallback.
+      const poi = new SystemZonePrimitive({
+        startSec: systemZone.startSec,
+        endSec: systemZone.endSec,
+        low: systemZone.low,
+        high: systemZone.high,
+        label: systemZone.label,
+        color: SYSTEM_COLOR,
       });
       const planPrimitive = new SystemPositionPrimitive({
         kind: "position-long",
-        time: unix(candles[fromIndex].openTime),
-        rightTime: lastTime,
+        time: systemZone.planFromSec as Time,
+        rightTime: systemZone.planToSec as Time,
         entry: plan.entry,
         stop: plan.stop,
         targets: plan.targets,
@@ -713,8 +833,8 @@ export function ChartSurfaceInner({
       series.attachPrimitive(planPrimitive);
       systemPrimitivesRef.current = { poi, plan: planPrimitive };
       systemAxisLabelsRef.current?.setLevels([
-        { key: "ob-high", price: poiZone.high, color: SYSTEM_COLOR },
-        { key: "ob-low", price: poiZone.low, color: SYSTEM_COLOR },
+        { key: "ob-high", price: systemZone.high, color: SYSTEM_COLOR },
+        { key: "ob-low", price: systemZone.low, color: SYSTEM_COLOR },
         { key: "entry", price: plan.entry, color: SYSTEM_COLOR },
         { key: "stop", price: plan.stop, color: C.down },
         ...plan.targets.map((t, i) => ({ key: `target-${i}`, price: t, color: C.up })),
@@ -794,7 +914,10 @@ export function ChartSurfaceInner({
         vertLine: { color: "rgba(255,255,255,0.25)", width: 1, labelBackgroundColor: C.label },
         horzLine: { color: "rgba(255,255,255,0.25)", width: 1, labelBackgroundColor: C.label },
       },
-      rightPriceScale: { borderColor: C.axis, scaleMargins: { top: 0.12, bottom: 0.12 } },
+      // minimumWidth: the library sizes the axis from the series' own
+      // price labels only, so on an instrument with short prices (SOL
+      // "72.71") ARGUS's "+N levels" label was cut off ("els").
+      rightPriceScale: { borderColor: C.axis, scaleMargins: { top: 0.12, bottom: 0.12 }, minimumWidth: PRICE_AXIS_MIN_WIDTH_PX },
       timeScale: { borderColor: C.axis, timeVisible: true, secondsVisible: false, rightOffset: 6 },
     });
     chartRef.current = chart;
@@ -838,8 +961,16 @@ export function ChartSurfaceInner({
       wickDownColor: C.down,
       priceLineVisible: true,
       priceLineColor: "rgba(255,255,255,0.3)",
+      // The last price label is LastPriceLabelPrimitive (shared contrast rule).
+      lastValueVisible: false,
     });
     seriesRef.current = series;
+    const lastPriceLabel = new LastPriceLabelPrimitive(() => {
+      if (!lastAppliedOpenTimeRef.current) return null;
+      const b = lastBarRef.current;
+      return { price: b.close, color: b.close >= b.open ? C.up : C.down };
+    });
+    series.attachPrimitive(lastPriceLabel);
 
     // Restore wherever the trader last left the view (per instrument +
     // timeframe); only fall back to the default fit (and the explicit
@@ -965,7 +1096,7 @@ export function ChartSurfaceInner({
     // real triggers this effect needs. poiZone/plan are now optional
     // (no setup): the `?.` reads below produce undefined deps in that
     // case, still a valid, stable dependency value React can compare.
-  }, [candles, poiZone?.low, poiZone?.high, plan?.entry, plan?.stop, plan?.fromTime, plan?.targets]);
+  }, [candles, zoneKey, plan?.entry, plan?.stop, plan?.fromTime, plan?.targets]);
 
   // live-tick path (Part 2D): a candle/candle_closed message, applied
   // with series.update() -- its own path, never through the candles
@@ -1013,6 +1144,17 @@ export function ChartSurfaceInner({
       close: formatMoney(forming.candle.close),
     };
     series.update({ time: unix(forming.candle.open_time), ...bar });
+    if (action === "append") {
+      // A new bar: it extends the logical index, so the drawings' time axis
+      // must too (a drawing placed in the future stays at its time).
+      const t = unix(forming.candle.open_time) as number;
+      const times = dataTimesRef.current;
+      if (times.length === 0 || t > times[times.length - 1]) {
+        dataTimesRef.current = [...times, t];
+        dataLengthRef.current = dataTimesRef.current.length;
+        setSeriesTimeAxis(series, { times: dataTimesRef.current, intervalSec: INTERVAL_SECONDS[timeframe] ?? 60 });
+      }
+    }
 
     appliedLiveKeyRef.current = nextKey;
     lastAppliedOpenTimeRef.current = forming.candle.open_time;
@@ -1031,6 +1173,26 @@ export function ChartSurfaceInner({
     // Hovering the live bar itself keeps it moving too.
     setLegend((l) => (!l.hovering || hoveredTimeRef.current === t ? { bar: text, hovering: l.hovering } : l));
   }, [forming]);
+
+  // A click on ARGUS's zone (not on a user drawing) opens its popover.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const onClick = (e: MouseEvent) => {
+      const r = host.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      const rect = systemPrimitivesRef.current.poi?.lastRect;
+      const slop = 3;
+      const onZone =
+        rect && x >= rect.left - slop && x <= rect.left + rect.width + slop && y >= rect.top - slop && y <= rect.top + rect.height + slop;
+      if (onZone && !store.selectedId) setZonePopover({ x: Math.min(x, r.width - 300), y: y + 12 });
+      else setZonePopover(null);
+    };
+    host.addEventListener("click", onClick);
+    return () => host.removeEventListener("click", onClick);
+  }, [store]);
+  useEffect(() => setZonePopover(null), [zoneKey]);
 
   // Range buttons (Phase 3): set the visible range to the last 1 day, 5
   // days, ... ending at the newest bar. When the held history is shorter,
@@ -1234,6 +1396,10 @@ export function ChartSurfaceInner({
           />
         )}
 
+        {zonePopover && systemZone && (
+          <ZonePopover zone={systemZone} x={zonePopover.x} y={zonePopover.y} onClose={() => setZonePopover(null)} />
+        )}
+
         <div className="pointer-events-none absolute left-3 top-2.5 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
           <div className="flex items-center gap-1.5">
             <CoinIcon symbol={symbol} size={18} />
@@ -1243,6 +1409,7 @@ export function ChartSurfaceInner({
           </div>
           <LegendChange />
           <LiveStatusBadge connectionState={connectionState} status={status} fatalReason={fatalReason} />
+          {analysisLayer && <AnalysisLayerChip layer={analysisLayer} />}
           {formationOutsideWindow && (
             <span className="rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
               Setup formed before this window

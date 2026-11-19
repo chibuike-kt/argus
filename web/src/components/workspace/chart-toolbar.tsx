@@ -13,7 +13,10 @@ import {
   Check,
   ArrowLeft,
   MagnifyingGlass,
+  Eye,
+  EyeSlash,
 } from "@phosphor-icons/react";
+import { preferences, usePreferences } from "@/lib/preferences";
 import { IconButton } from "@/components/ui/icon-button";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -38,6 +41,32 @@ function ToolbarBtn({ icon, label, text }: { icon: ReactNode; label: string; tex
     >
       {icon}
       {text && <span className="hidden lg:inline">{text}</span>}
+    </button>
+  );
+}
+
+// SetupsToggle (fix/chart-interaction, item 1) shows or hides every one
+// of ARGUS's own chart layers (the selected setup's zone, its plan lines
+// and their price-axis labels). A saved preference. Hiding is the only
+// way to remove them from view: they are system analysis, never
+// deletable like a user drawing.
+function SetupsToggle() {
+  const visible = usePreferences().analysis_layers_visible !== false;
+  return (
+    <button
+      type="button"
+      data-testid="setups-toggle"
+      aria-pressed={visible}
+      aria-label={visible ? "Hide setup layers" : "Show setup layers"}
+      title={visible ? "Hide ARGUS's setup zone and plan on the chart" : "Show ARGUS's setup zone and plan on the chart"}
+      onClick={() => preferences.set("analysis_layers_visible", !visible)}
+      className={cn(
+        "focus-ring inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] font-medium transition-colors hover:bg-white/5 hover:text-fg [&_svg]:size-4",
+        visible ? "text-fg-muted" : "text-fg-subtle",
+      )}
+    >
+      {visible ? <Eye /> : <EyeSlash />}
+      <span className={cn("hidden lg:inline", !visible && "line-through")}>Setups</span>
     </button>
   );
 }
@@ -197,6 +226,7 @@ export function ChartToolbar() {
       <ToolbarBtn icon={<ChartBar />} label="Chart type" />
       <ToolbarBtn icon={<SlidersHorizontal />} label="Indicators" text="Indicators" />
       <ToolbarBtn icon={<Bell />} label="Alert" text="Alert" />
+      <SetupsToggle />
 
       <div className="ml-auto flex items-center gap-1.5">
         <button

@@ -1,6 +1,7 @@
 import type { IChartApi, ISeriesApi, Logical, SeriesType, Time } from "lightweight-charts";
 import type { Candle } from "@/types/domain";
 import type { DPoint } from "./types";
+import { clampLogical, logicalToTime, seriesTimeAxis, timeToLogical } from "./time-axis";
 
 // The minimal chart/series surface the drawing engine needs for coordinate
 // conversion. A thin alias so geometry/controller code depends on behaviour,
@@ -18,11 +19,73 @@ export interface Px {
 // Chart space -> pixel space. Null when the point is currently off-scale
 // (e.g. price scale not yet sized) -- callers skip drawing/hit-testing it
 // rather than guessing a coordinate.
-export function toPixel({ chart, series }: ChartAccessors, p: DPoint): Px | null {
-  const x = chart.timeScale().timeToCoordinate(p.time);
-  const y = series.priceToCoordinate(p.price);
+export function toPixel(acc: ChartAccessors, p: DPoint): Px | null {
+  const x = timeToX(acc, p.time);
+  const y = acc.series.priceToCoordinate(p.price);
   if (x == null || y == null) return null;
   return { x, y };
+}
+
+function secondsOf(t: Time): number {
+  return typeof t === "number" ? t : Math.floor(Date.parse(t as unknown as string) / 1000);
+}
+
+// timeToX is a time's x on the chart, including the empty space before
+// the first and after the last bar (time-axis.ts). Falls back to the
+// library's own timeToCoordinate (bars only) when the series has no
+// registered axis yet.
+export function timeToX({ chart, series }: ChartAccessors, time: Time): number | null {
+  const axis = seriesTimeAxis(series);
+  if (axis && axis.times.length > 0) {
+    const logical = timeToLogical(axis, secondsOf(time));
+    if (logical !== null) {
+      const x = logicalToX(chart, logical);
+      if (x !== null) return x;
+    }
+  }
+  return chart.timeScale().timeToCoordinate(time);
+}
+
+// logicalToX resolves a fractional logical index to an x. The library's
+// own logicalToCoordinate returns 0 for any non-integer index
+// (TimeScale.indexToCoordinate: "!isInteger(index) -> 0", read in
+// lightweight-charts 5.2.1), so it is called for the two integer indexes
+// either side and interpolated -- integer indexes resolve beyond the data
+// too, which is what keeps the empty space usable.
+export function logicalToX(chart: IChartApi, logical: number): number | null {
+  const ts = chart.timeScale();
+  const i = Math.floor(logical);
+  const x0 = ts.logicalToCoordinate(i as unknown as Logical);
+  if (x0 === null) return null;
+  const frac = logical - i;
+  if (frac === 0) return x0;
+  const x1 = ts.logicalToCoordinate((i + 1) as unknown as Logical);
+  if (x1 === null) return null;
+  return x0 + frac * (x1 - x0);
+}
+
+// xToLogical is the fractional logical index at x. The library's own
+// coordinateToLogical rounds up to a whole bar (Math.ceil of its float
+// index, lightweight-charts 5.2.1), which snapped every drawing point to a
+// bar. The time scale is linear in the logical index, so two integer
+// positions give it exactly.
+export function xToLogical(chart: IChartApi, x: number): number | null {
+  const ts = chart.timeScale();
+  const x0 = ts.logicalToCoordinate(0 as unknown as Logical);
+  const x1 = ts.logicalToCoordinate(1 as unknown as Logical);
+  if (x0 === null || x1 === null || x1 === x0) return null;
+  return (x - x0) / (x1 - x0);
+}
+
+// xToTimeSeconds is timeToX's inverse: the time at an x, smooth (never
+// snapped to a bar), extending past the data on both sides up to
+// MAX_BEYOND_BARS bars. null when the series has no registered axis.
+export function xToTimeSeconds({ chart, series }: ChartAccessors, x: number): number | null {
+  const axis = seriesTimeAxis(series);
+  if (!axis || axis.times.length === 0) return null;
+  const logical = xToLogical(chart, x);
+  if (logical === null) return null;
+  return logicalToTime(axis, clampLogical(axis, logical));
 }
 
 export function distance(a: Px, b: Px): number {
@@ -106,7 +169,7 @@ export function timeSecondsToSmoothCoordinate(
   const t1 = times[base + 1];
   const frac = t1 === t0 ? 0 : (seconds - t0) / (t1 - t0);
   const logical = base + frac;
-  return acc.chart.timeScale().logicalToCoordinate(logical as unknown as Logical);
+  return logicalToX(acc.chart, logical);
 }
 
 // --- Magnet: snap a candidate point to the nearest candle's O/H/L/C ---
