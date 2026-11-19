@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { getWatchlistStore } from "@/lib/watchlist-store";
 import { Navigate, useNavigate } from "react-router-dom";
 import { CircleNotch } from "@phosphor-icons/react";
 import { AuthShell } from "@/components/light/auth-shell";
@@ -125,6 +126,8 @@ export function Onboarding() {
     setSubmitting(true);
     try {
       await authApi.updateWatchlist(Array.from(selected));
+      // The page's shared watchlist copy re-reads the list just saved.
+      void getWatchlistStore().load();
       const updated = await authApi.completeOnboarding();
       applyUser(updated);
       navigate("/setups", { replace: true });

@@ -59,6 +59,13 @@ type Querier interface {
 	// this hole's minutes are now filled" check.
 	CountClosedCandlesInRange(ctx context.Context, arg CountClosedCandlesInRangeParams) (int64, error)
 	CountWatchlistItems(ctx context.Context, userID int64) (int64, error)
+	// DeleteWatchlistItem removes one instrument from userID's own watchlist
+	// (an item-level remove, so two tabs never clobber each other the way a
+	// whole-list replace can). The user_id predicate is the ownership check:
+	// a row of another user can never match. The remaining rows keep their
+	// positions; a gap is harmless because the list is read ORDER BY
+	// position. Zero rows affected means it was not on the list (idempotent).
+	DeleteWatchlistItem(ctx context.Context, arg DeleteWatchlistItemParams) (int64, error)
 	DeleteWatchlistItems(ctx context.Context, userID int64) error
 	// EarliestCurrentSwingAfter finds the swing immediately following a
 	// given pivot_time -- the shape test's up-leg endpoint (spec section 9:

@@ -7,6 +7,7 @@ import type {
   Time,
 } from "lightweight-charts";
 import { PositionPrimitive, RectanglePrimitive } from "./drawings/primitives";
+import { labelColors } from "@/lib/label-contrast";
 
 // ARGUS's own annotations (order block high/low, entry, stop, targets) all
 // label the price axis. Drawn as separate native price lines they pile on
@@ -127,19 +128,23 @@ export class SystemAxisLabelsPrimitive implements ISeriesPrimitive<Time> {
     const anchorY = anchor === null ? null : series.priceToCoordinate(anchor);
     const capped = capAxisLabels(labels, anchorY);
     const fmt = series.priceFormatter();
-    const views: ISeriesPrimitiveAxisView[] = capped.shown.map((l) => ({
-      coordinate: () => l.y,
-      text: () => fmt.format(l.price),
-      textColor: () => "#fff",
-      backColor: () => l.color,
-    }));
+    const views: ISeriesPrimitiveAxisView[] = capped.shown.map((l) => {
+      const c = labelColors(l.color);
+      return {
+        coordinate: () => l.y,
+        text: () => fmt.format(l.price),
+        textColor: () => c.text,
+        backColor: () => c.back,
+      };
+    });
     if (capped.groupY !== null) {
       const y = capped.groupY;
+      const c = labelColors(this.groupColor);
       views.push({
         coordinate: () => y,
         text: () => `+${capped.hidden.length} levels`,
-        textColor: () => "#fff",
-        backColor: () => this.groupColor,
+        textColor: () => c.text,
+        backColor: () => c.back,
       });
     }
     return views;
@@ -160,3 +165,117 @@ export class SystemPositionPrimitive extends PositionPrimitive {
     return [];
   }
 }
+
+// [U] display values: the smallest a system zone is drawn, so a zone a
+// few cents tall (a 1m order block on an hourly chart) never disappears.
+// Its real high and low are in the zone's popover; nothing stored changes.
+export const MIN_ZONE_HEIGHT_PX = 4;
+export const MIN_ZONE_WIDTH_PX = 6;
+
+export interface ZoneRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+// SystemZonePrimitive draws ARGUS's setup zone from its start to its end
+// time (system-zone.ts), at least MIN_ZONE_* in size, with its label. It
+// keeps the rectangle it last drew so a click on it can open the zone's
+// popover. Not a user drawing: no handles, never in the drawing store.
+export class SystemZonePrimitive extends RectanglePrimitive {
+  lastRect: ZoneRect | null = null;
+
+  constructor(private z: { startSec: number; endSec: number; low: number; high: number; label: string; color: string }) {
+    super({
+      p1: { time: z.startSec as Time, price: z.high },
+      p2: { time: z.endSec as Time, price: z.low },
+      style: { color: z.color, lineWidth: 1, lineStyle: "solid" },
+      label: z.label,
+    });
+  }
+
+  protected priceLineSpecs() {
+    return [];
+  }
+
+  paneViews() {
+    return [
+      {
+        renderer: () => ({
+          draw: (target: Parameters<ReturnType<ReturnType<RectanglePrimitive["paneViews"]>[number]["renderer"]>["draw"]>[0]) => {
+            const x1 = this.x(this.z.startSec as Time);
+            const x2 = this.x(this.z.endSec as Time);
+            const y1 = this.y(this.z.high);
+            const y2 = this.y(this.z.low);
+            if (x1 == null || x2 == null || y1 == null || y2 == null) {
+              this.lastRect = null;
+              return;
+            }
+            target.useMediaCoordinateSpace(({ context: ctx }) => {
+              let left = Math.min(x1, x2);
+              let w = Math.abs(x2 - x1);
+              if (w < MIN_ZONE_WIDTH_PX) {
+                left -= (MIN_ZONE_WIDTH_PX - w) / 2;
+                w = MIN_ZONE_WIDTH_PX;
+              }
+              let top = Math.min(y1, y2);
+              let h = Math.abs(y2 - y1);
+              if (h < MIN_ZONE_HEIGHT_PX) {
+                top -= (MIN_ZONE_HEIGHT_PX - h) / 2;
+                h = MIN_ZONE_HEIGHT_PX;
+              }
+              this.lastRect = { left, top, width: w, height: h };
+              ctx.fillStyle = `${this.z.color}33`;
+              ctx.fillRect(left, top, w, h);
+              ctx.strokeStyle = `${this.z.color}aa`;
+              ctx.lineWidth = 1;
+              ctx.strokeRect(left + 0.5, top + 0.5, w - 1, h - 1);
+              ctx.font = "600 10px Onest, sans-serif";
+              ctx.fillStyle = "#c9cdff";
+              ctx.textBaseline = "bottom";
+              ctx.fillText(this.z.label.toUpperCase(), left + 2, top - 2);
+            });
+          },
+        }),
+      },
+    ];
+  }
+}
+
+// LastPriceLabelPrimitive is the last price label on the price axis, in
+// the last bar's own up or down colour, with its text colour from the
+// shared contrast rule (lib/label-contrast.ts) -- the library's own
+// last-value label picks its text by a different rule (a light green
+// label got white text at about 2.4:1), so the series' own label is off
+// and this one is drawn instead.
+export class LastPriceLabelPrimitive implements ISeriesPrimitive<Time> {
+  private series?: ISeriesApi<SeriesType, Time>;
+  private requestUpdate?: () => void;
+
+  constructor(private last: () => { price: number; color: string } | null) {}
+
+  attached(param: SeriesAttachedParameter<Time, SeriesType>) {
+    this.series = param.series;
+    this.requestUpdate = param.requestUpdate;
+  }
+  detached() {
+    this.series = undefined;
+    this.requestUpdate = undefined;
+  }
+  repaint() {
+    this.requestUpdate?.();
+  }
+
+  priceAxisViews(): readonly ISeriesPrimitiveAxisView[] {
+    const series = this.series;
+    const last = this.last();
+    if (!series || !last) return [];
+    const y = series.priceToCoordinate(last.price);
+    if (y === null) return [];
+    const c = labelColors(last.color);
+    const text = series.priceFormatter().format(last.price);
+    return [{ coordinate: () => y, text: () => text, textColor: () => c.text, backColor: () => c.back }];
+  }
+}
+

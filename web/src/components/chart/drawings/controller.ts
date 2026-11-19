@@ -13,6 +13,7 @@ import {
 } from "./types";
 import {
   coordinateToSmoothTimeSeconds,
+  xToTimeSeconds,
   distance,
   snapToCandle,
   type ChartAccessors,
@@ -52,6 +53,47 @@ interface DragSession {
   origin: DPoint; // chart-space point under the pointer at drag start
   original: Drawing; // snapshot to diff against, and to restore on Esc
   historyPushed: boolean;
+}
+
+// The chart area's cursor (fix/chart-interaction, item 2). One rule,
+// in one place:
+//   - a drawing tool selected: that tool's cursor (text for the text tool,
+//     crosshair for lines, shapes and the eraser);
+//   - panning (a drag that started on empty chart space): grabbing;
+//   - dragging a drawing: its handle's resize cursor, or move for the body;
+//   - hovering the selected drawing's handle: the matching resize cursor
+//     (a free endpoint, which moves in both axes, gets move);
+//   - hovering a drawing's body: move;
+//   - anything else on the chart: crosshair, never the pointer hand (that
+//     is for buttons and links only).
+export type CursorState =
+  | { tool: string; panning: boolean; drag: { mode: "move" | "handle"; handleId?: string } | null; hover: { kind: "handle"; handleId: string; resize: boolean } | { kind: "body" } | null };
+
+const HANDLE_RESIZE_CURSOR: Record<string, string> = {
+  tl: "nwse-resize",
+  br: "nwse-resize",
+  tr: "nesw-resize",
+  bl: "nesw-resize",
+  top: "ns-resize",
+  bottom: "ns-resize",
+  left: "ew-resize",
+  right: "ew-resize",
+};
+
+export function handleCursor(handleId: string | undefined, resize: boolean): string {
+  if (!resize || !handleId) return "move";
+  return HANDLE_RESIZE_CURSOR[handleId] ?? "move";
+}
+
+export function chartCursor(st: CursorState): string {
+  const kind = TOOL_TO_KIND[st.tool];
+  if (kind === "text") return "text";
+  if (kind || st.tool === "eraser") return "crosshair";
+  if (st.drag) return st.drag.mode === "handle" ? handleCursor(st.drag.handleId, true) : "move";
+  if (st.panning) return "grabbing";
+  if (st.hover?.kind === "handle") return handleCursor(st.hover.handleId, st.hover.resize);
+  if (st.hover?.kind === "body") return "move";
+  return "crosshair";
 }
 
 /**
@@ -140,7 +182,27 @@ export class DrawingController {
     const kind = TOOL_TO_KIND[this.tool];
     const drawMode = Boolean(kind) || this.tool === "eraser";
     this.chart.applyOptions({ handleScroll: !drawMode, handleScale: !drawMode });
-    this.host.style.cursor = drawMode ? "crosshair" : "";
+    this.hover = null;
+    this.applyCursor();
+  }
+
+  // hover is what the pointer is over in cursor mode (updateHoverCursor);
+  // panning is a drag that started on empty chart space.
+  private hover: CursorState["hover"] = null;
+  private panning = false;
+
+  private applyCursor() {
+    this.host.style.cursor = chartCursor({
+      tool: this.tool,
+      panning: this.panning,
+      drag: this.drag ? { mode: this.drag.mode, handleId: this.drag.handle?.id } : null,
+      hover: this.hover,
+    });
+  }
+
+  // cursorNow exposes the current cursor (tests).
+  cursorNow(): string {
+    return this.host.style.cursor;
   }
 
   attach() {
@@ -204,7 +266,11 @@ export class DrawingController {
     // nearest bar, which is what made dragging step bar by bar. Falls back
     // to the library's own (bar-snapped) resolution only when there are
     // too few candles to interpolate at all.
-    const smoothSeconds = coordinateToSmoothTimeSeconds(this.acc, px.x, this.candles);
+    // Through the logical index (time-axis.ts): smooth, and real times in
+    // the empty space past either end of the data too, up to
+    // MAX_BEYOND_BARS bars. The old candle-pair interpolation is the
+    // fallback when the chart has not registered its axis.
+    const smoothSeconds = xToTimeSeconds(this.acc, px.x) ?? coordinateToSmoothTimeSeconds(this.acc, px.x, this.candles);
     let time: Time;
     if (smoothSeconds != null) {
       time = smoothSeconds as unknown as Time;
@@ -342,6 +408,8 @@ export class DrawingController {
       // the native horizontal pan instead of fighting it.
       this.series.priceScale().setAutoScale(false);
       this.verticalPan = { lastY: px.y };
+      this.panning = true;
+      this.applyCursor();
       this.host.setPointerCapture(e.pointerId);
     }
   };
@@ -368,6 +436,7 @@ export class DrawingController {
     // two coordinate shifts cancel out horizontally -- the drawing visibly
     // moves with price but appears stuck in time.
     this.chart.applyOptions({ handleScroll: false, handleScale: false });
+    this.applyCursor();
   }
 
   private onPointerMove = (e: PointerEvent) => {
@@ -440,11 +509,16 @@ export class DrawingController {
       if (this.host.hasPointerCapture(e.pointerId)) this.host.releasePointerCapture(e.pointerId);
       this.drag = null;
       this.applyCursorAndPan(); // restores pan/zoom now the drag is over
+      this.updateHoverCursor(px); // still over the drawing: move, not crosshair
     }
 
     if (this.verticalPan) {
       if (this.host.hasPointerCapture(e.pointerId)) this.host.releasePointerCapture(e.pointerId);
       this.verticalPan = null;
+    }
+    if (this.panning) {
+      this.panning = false;
+      this.updateHoverCursor(px);
     }
   };
 
@@ -507,16 +581,17 @@ export class DrawingController {
   }
 
   private updateHoverCursor(px: Px) {
-    const selected = this.store.selectedId ? this.store.get(this.store.selectedId) : undefined;
-    if (selected) {
-      const r = hitTest(selected, this.acc, px, this.paneWidth());
+    this.hover = null;
+    if (!this.hidden && !this.locked && !TOOL_TO_KIND[this.tool] && this.tool !== "eraser") {
+      const selected = this.store.selectedId ? this.store.get(this.store.selectedId) : undefined;
+      const r = selected ? hitTest(selected, this.acc, px, this.paneWidth()) : null;
       if (r?.kind === "handle") {
-        this.host.style.cursor = r.handle.cursor === "resize" ? "nwse-resize" : "move";
-        return;
+        this.hover = { kind: "handle", handleId: r.handle.id, resize: r.handle.cursor === "resize" };
+      } else if (this.hitTestTop(px)) {
+        this.hover = { kind: "body" };
       }
     }
-    const hit = this.hitTestTop(px);
-    this.host.style.cursor = hit ? "move" : "";
+    this.applyCursor();
   }
 }
 

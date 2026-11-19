@@ -8,12 +8,14 @@ import type {
   SeriesAttachedParameter,
 } from "lightweight-charts";
 import { seriesCandles } from "./series-candles";
+import { labelColors } from "@/lib/label-contrast";
 import {
   barsBetween,
   forwardSpan,
   timeSeconds,
   timeSecondsToSmoothCoordinate,
   type ChartAccessors,
+  timeToX,
 } from "./geometry";
 import { extendPoint, getHandles, type Handle } from "./hit-test";
 import {
@@ -146,8 +148,12 @@ abstract class BasePrimitive implements ISeriesPrimitive<Time> {
     this.series = undefined;
     this.requestUpdate = undefined;
   }
+  // x maps a time to the chart, including the empty space past either
+  // end of the data (time-axis.ts): a drawing point beyond the last
+  // candle still has an x, so the drawing never vanishes there.
   protected x(time: Time): number | null {
-    return this.chart?.timeScale().timeToCoordinate(time) ?? null;
+    const acc = this.accessors();
+    return acc ? timeToX(acc, time) : null;
   }
   protected y(price: number): number | null {
     return this.series?.priceToCoordinate(price) ?? null;
@@ -167,14 +173,20 @@ abstract class BasePrimitive implements ISeriesPrimitive<Time> {
     if (!this.series) return;
     this.clearAxisPriceLines();
     this.axisPriceLines = this.priceLineSpecs().map((s) =>
-      this.series!.createPriceLine({
-        price: s.price,
-        lineVisible: false,
-        axisLabelVisible: true,
-        color: s.color,
-        axisLabelColor: s.color,
-        axisLabelTextColor: "#fff",
-      }),
+      {
+        // Readable on any drawing colour (lib/label-contrast.ts): black
+        // text on light colours, white on dark, and an edge that does not
+        // vanish into the chart.
+        const { back, text } = labelColors(s.color);
+        return this.series!.createPriceLine({
+          price: s.price,
+          lineVisible: false,
+          axisLabelVisible: true,
+          color: s.color,
+          axisLabelColor: back,
+          axisLabelTextColor: text,
+        });
+      },
     );
   }
   private clearAxisPriceLines() {

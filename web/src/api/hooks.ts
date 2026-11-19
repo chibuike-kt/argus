@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getWatchlist } from "./auth";
+import { useWatchlistStore } from "@/lib/watchlist-store";
 import { ApiClientError } from "./client";
 import { listInstrumentCandles, listInstruments, type ListCandlesParams } from "./instruments";
 import { getSetup, listSetupEvents, listSetups, type ListSetupsParams } from "./setups";
@@ -95,11 +95,13 @@ export function useSetupsAcrossInstruments(
 // in their saved order (web light auth redesign brief, Part 3's own
 // terminal integration: the Watchlist panel shows this, not every
 // registered instrument).
+//
+// Backed by the page's one watchlist store (lib/watchlist-store.ts), so
+// the panel and the workspace see a removal at the same moment. Items in
+// their undo window are already left out.
 export function useWatchlist(): AsyncState<number[]> {
-  return useAsyncResource(
-    async (signal) => (await getWatchlist({ signal })).map((item) => item.instrument_id),
-    [],
-  );
+  const s = useWatchlistStore();
+  return { data: s.ids, loading: s.ids === undefined && s.error === undefined, error: s.ids === undefined ? s.error : undefined };
 }
 
 export function useSetup(id: number | undefined): AsyncState<ApiSetup> {

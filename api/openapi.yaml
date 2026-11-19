@@ -764,6 +764,38 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /watchlist/items/{instrument_id}:
+    delete:
+      operationId: removeWatchlistItem
+      summary: >
+        Removes one instrument from the authenticated user's own
+        watchlist (D4, product overhaul brief: item-level endpoints, so
+        two tabs never clobber each other the way a whole-list PUT can).
+        Idempotent: removing an instrument that is not on the list is not
+        an error. Ownership comes only from the session. Returns the
+        remaining list, in order.
+      parameters:
+        - name: instrument_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: OK, the remaining watchlist
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WatchlistItem"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   parameters:
     DrawingsInstrumentId:

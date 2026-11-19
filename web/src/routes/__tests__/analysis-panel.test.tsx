@@ -8,6 +8,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnalysisWorkspaceProvider } from "@/components/workspace/analysis-workspace";
 import { RightPanel } from "@/components/workspace/right-panel";
 import { resetLiveStatsForTests } from "@/lib/live-stats";
+import { resetWatchlistStoreForTests } from "@/lib/watchlist-store";
 import type { ApiInstrument, ApiInstrumentStats, ApiSetup, ApiSetupEvent } from "@/api/types";
 
 // This exercises /analysis's data-driven right panel (bias gauge, plan
@@ -175,12 +176,25 @@ function installFetchMock(opts: {
   // workspace's own request for the selected instrument is normally the
   // first; the Watchlist tab's request for the whole list comes later).
   statsDelayMs?: number | ((callIndex: number) => number);
+  // Extra instruments (and watchlist) for the removal tests; DELETE
+  // /watchlist/items/{id} answers deleteStatus and is recorded in deletes.
+  extraInstruments?: ApiInstrument[];
+  deleteStatus?: number;
+  deletes?: number[];
 }) {
   let statsCalls = 0;
   global.fetch = vi.fn((input: string | URL | Request) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/api/v1/instruments") {
-      return Promise.resolve(jsonResponse([instrument]));
+      return Promise.resolve(jsonResponse([instrument, ...(opts.extraInstruments ?? [])]));
+    }
+    const del = /^\/api\/v1\/watchlist\/items\/(\d+)$/.exec(url.pathname);
+    if (del) {
+      opts.deletes?.push(Number(del[1]));
+      const st = opts.deleteStatus ?? 200;
+      return Promise.resolve(
+        st === 200 ? jsonResponse([]) : jsonResponse({ error: { code: "internal", message: "database unavailable" } }, st),
+      );
     }
     const setupMatch = /^\/api\/v1\/setups\/(\d+)$/.exec(url.pathname);
     if (setupMatch) {
@@ -202,10 +216,13 @@ function installFetchMock(opts: {
       return Promise.resolve(jsonResponse(Object.values(opts.setupsById)));
     }
     if (url.pathname === "/api/v1/watchlist") {
-      return Promise.resolve(jsonResponse([{ instrument_id: 1, position: 0 }]));
+      const ids = [1, ...(opts.extraInstruments ?? []).map((i) => i.id)];
+      return Promise.resolve(jsonResponse(ids.map((instrument_id, position) => ({ instrument_id, position }))));
     }
     if (url.pathname === "/api/v1/instruments/stats") {
-      const body = jsonResponse([opts.stats ?? realStats]);
+      const asked = (url.searchParams.get("ids") ?? "").split(",").map(Number);
+      const rows = [opts.stats ?? realStats, ...(opts.extraInstruments ?? []).map((i) => ({ ...(opts.stats ?? realStats), instrument_id: i.id }))];
+      const body = jsonResponse(rows.filter((r) => asked.includes(r.instrument_id)));
       const callIndex = statsCalls++;
       const d = opts.statsDelayMs ?? STATS_DELAY_MS;
       const delay = typeof d === "function" ? d(callIndex) : d;
@@ -239,6 +256,7 @@ describe("/analysis right panel", () => {
     // preference store so one test's tab click does not carry into the next.
     preferences.detach();
     resetLiveStatsForTests();
+    resetWatchlistStoreForTests();
   });
 
   it("shows a loading state before the setup resolves", () => {
@@ -434,5 +452,72 @@ describe("/analysis right panel", () => {
     expect(screen.queryByText(/Data verified/)).toBeNull();
     expect(screen.queryByText(/Liquidity swept/)).toBeNull();
     expect(screen.queryByText(/Structure read/)).toBeNull();
+  });
+});
+
+// fix/chart-interaction, item 3: the watchlist trash button.
+describe("watchlist removal", () => {
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    preferences.detach();
+    resetLiveStatsForTests();
+    resetWatchlistStoreForTests();
+  });
+
+  const eth: ApiInstrument = { ...instrument, id: 2, native_symbol: "ETH-PERP", base_asset: "ETH" };
+
+  async function openWatchlist() {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+    await user.click(await screen.findByRole("tab", { name: "Watchlist" }));
+    await screen.findByTestId("watchlist-row-ETH-PERP");
+    return user;
+  }
+
+  it("the trash button removes the row at once, offers undo, and sends DELETE only after the undo window", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const deletes: number[] = [];
+    installFetchMock({ setupsById: {}, extraInstruments: [eth], deletes });
+    renderAnalysisRightPanel("/analysis?instrumentId=1");
+    const user = await openWatchlist();
+
+    const trash = screen.getByRole("button", { name: "Remove ETH-PERP from the watchlist" });
+    await user.click(trash);
+    expect(screen.queryByTestId("watchlist-row-ETH-PERP")).toBeNull();
+    expect(screen.getByTestId("watchlist-undo-toast-2")).toHaveTextContent("Removed ETH-PERP from the watchlist");
+    expect(deletes).toEqual([]);
+
+    await user.click(within(screen.getByTestId("watchlist-undo-toast-2")).getByRole("button", { name: "Undo" }));
+    expect(await screen.findByTestId("watchlist-row-ETH-PERP")).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(deletes).toEqual([]); // undone: nothing was sent
+
+    await user.click(screen.getByRole("button", { name: "Remove ETH-PERP from the watchlist" }));
+    await vi.advanceTimersByTimeAsync(5_100);
+    expect(deletes).toEqual([2]);
+    expect(screen.queryByTestId("watchlist-row-ETH-PERP")).toBeNull();
+    expect(screen.queryByTestId("watchlist-undo-toast-2")).toBeNull();
+  });
+
+  it("a server failure puts the row back with a message", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installFetchMock({ setupsById: {}, extraInstruments: [eth], deleteStatus: 500, deletes: [] });
+    renderAnalysisRightPanel("/analysis?instrumentId=1");
+    const user = await openWatchlist();
+    await user.click(screen.getByRole("button", { name: "Remove ETH-PERP from the watchlist" }));
+    await vi.advanceTimersByTimeAsync(5_100);
+    expect(await screen.findByTestId("watchlist-row-ETH-PERP")).toBeInTheDocument();
+    expect(screen.getByTestId("watchlist-remove-failed")).toHaveTextContent("Could not remove ETH-PERP: database unavailable. It is back on the list.");
+  });
+
+  it("removing the selected instrument selects the next one", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installFetchMock({ setupsById: {}, extraInstruments: [eth], deletes: [] });
+    renderAnalysisRightPanel("/analysis?instrumentId=1");
+    const user = await openWatchlist();
+    expect(screen.getByTestId("symbol-detail")).toHaveTextContent("BTC-PERP");
+    await user.click(screen.getByRole("button", { name: "Remove BTC-PERP from the watchlist" }));
+    await waitFor(() => expect(screen.getByTestId("symbol-detail")).toHaveTextContent("ETH-PERP"));
   });
 });

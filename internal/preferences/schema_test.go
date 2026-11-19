@@ -8,7 +8,7 @@ import (
 
 func TestValidatePreferences_AcceptsTheFullSchemaAndNormalizes(t *testing.T) {
 	in := `{"selected_instrument_id":4,"timeframe":"4h","right_panel_tab":"watchlist","right_panel_width":340,
-	"tool_rail_collapsed":true,"other_setups_open":false,"watchlist_groups_collapsed":{"Crypto":true},
+	"tool_rail_collapsed":true,"other_setups_open":false,"analysis_layers_visible":false,"watchlist_groups_collapsed":{"Crypto":true},
 	"drawing_tools":{"magnet":true,"stay_in_drawing_mode":false,"locked":false,"hidden":true},
 	"chart_views":{"4:1m":{"from_time":1763300000,"to_time":1763307140,"bars_visible":125,"bar_spacing":6.25,"right_offset":5,"pinned_to_latest":true}}}`
 	out, err := ValidatePreferences([]byte(in))
