@@ -63,6 +63,11 @@ type Document struct {
 	ToolRailCollapsed *bool `json:"tool_rail_collapsed,omitempty"`
 	// OtherSetupsOpen is the "other setups" strip's open state.
 	OtherSetupsOpen *bool `json:"other_setups_open,omitempty"`
+	// AnalysisLayersVisible shows or hides ARGUS's own chart layers (the
+	// selected setup's order block or QMR zone and its plan lines). They
+	// are system output, never a user drawing, so they can be hidden but
+	// not deleted. Absent means shown.
+	AnalysisLayersVisible *bool `json:"analysis_layers_visible,omitempty"`
 	// WatchlistGroupsCollapsed is per watchlist group name.
 	WatchlistGroupsCollapsed map[string]bool `json:"watchlist_groups_collapsed,omitempty"`
 	// DrawingTools are the drawing toolbar's toggles.

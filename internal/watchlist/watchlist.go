@@ -79,6 +79,18 @@ func (s *Store) List(ctx context.Context, userID int64) ([]Item, error) {
 	return items, nil
 }
 
+// Remove takes instrumentID off userID's own watchlist. Removing an
+// instrument that is not on it is not an error (idempotent): removed is
+// false then. Ownership is the userID predicate itself -- the caller
+// passes the session's user, never a client-supplied id.
+func (s *Store) Remove(ctx context.Context, userID, instrumentID int64) (removed bool, err error) {
+	n, err := s.q.DeleteWatchlistItem(ctx, store.DeleteWatchlistItemParams{UserID: userID, InstrumentID: instrumentID})
+	if err != nil {
+		return false, fmt.Errorf("watchlist: remove instrument %d: %w", instrumentID, err)
+	}
+	return n > 0, nil
+}
+
 // Count returns how many items are in userID's own watchlist --
 // internal/identity/service.Service's own CompleteOnboarding check
 // ("at least one watchlist item") is the reason this exists as its
