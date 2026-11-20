@@ -65,6 +65,11 @@ type TradePlan struct {
 
 	POI              POI
 	ProtectedSwingID int64
+
+	// Evidence is the chain of what this plan was built from (evidence.go,
+	// Phase 6.1), set whenever a POI is present; nil for PlanNone. It is
+	// recorded with the setup's detected event; it never changes the plan.
+	Evidence *PlanEvidence
 }
 
 // priceDistance returns the absolute difference between a and b.
@@ -109,7 +114,7 @@ func collectOpposingSwingLevels(ctx context.Context, s *Store, instrumentID int6
 	}
 }
 
-// resolveTargets resolves section 14's targets: confirmed opposing
+// resolveTargetsTraced resolves section 14's targets: confirmed opposing
 // swings (section 1) plus the current transactional-liquidity level
 // (section 10) -- kept as an explicit second source per spec section
 // 14, though in practice it is already one of the confirmed opposing
@@ -117,7 +122,14 @@ func collectOpposingSwingLevels(ctx context.Context, s *Store, instrumentID int6
 // collapses any overlap. Levels strictly beyond entry in the trade
 // direction are sorted nearest-first, collapsed when within minTick of
 // the nearer level already kept, and capped at three.
-func resolveTargets(ctx context.Context, store *Store, state StateSnapshot, direction Direction, entry quant.Price, asOf time.Time, minTick quant.Price) ([]quant.Price, error) {
+//
+// Each level keeps the swing it came from (the evidence chain's target
+// sources). The sort is stable with the swing id as a tie-break, so which
+// of two equal levels survives deduplication -- and so which swing a
+// target is credited to -- is deterministic; the levels themselves are
+// unchanged (equal-distance levels on the same side of entry are equal
+// prices, merged by the dedupe either way).
+func resolveTargetsTraced(ctx context.Context, store *Store, state StateSnapshot, direction Direction, entry quant.Price, asOf time.Time, minTick quant.Price) ([]targetSource, error) {
 	var swingType SwingType
 	switch direction {
 	case DirectionBullish:
@@ -125,43 +137,44 @@ func resolveTargets(ctx context.Context, store *Store, state StateSnapshot, dire
 	case DirectionBearish:
 		swingType = SwingLow
 	}
-
 	swings, err := collectOpposingSwingLevels(ctx, store, state.InstrumentID, state.Timeframe, swingType, asOf)
 	if err != nil {
 		return nil, err
 	}
-	levels := make([]quant.Price, 0, len(swings)+1)
+	levels := make([]targetSource, 0, len(swings)+1)
 	for _, sw := range swings {
-		levels = append(levels, sw.Price)
+		levels = append(levels, targetSource{Price: sw.Price, Swing: sw, Source: "opposing_swing"})
 	}
 	txLiq, ok, err := ResolveTransactionalLiquidity(ctx, store, state, asOf)
 	if err != nil {
 		return nil, err
 	}
 	if ok {
-		levels = append(levels, txLiq.Price)
+		levels = append(levels, targetSource{Price: txLiq.Price, Swing: txLiq, Source: "transactional_liquidity"})
 	}
-
-	beyond := make([]quant.Price, 0, len(levels))
+	beyond := make([]targetSource, 0, len(levels))
 	for _, lvl := range levels {
 		switch direction {
 		case DirectionBullish:
-			if lvl > entry {
+			if lvl.Price > entry {
 				beyond = append(beyond, lvl)
 			}
 		case DirectionBearish:
-			if lvl < entry {
+			if lvl.Price < entry {
 				beyond = append(beyond, lvl)
 			}
 		}
 	}
-	sort.Slice(beyond, func(i, j int) bool {
-		return priceDistance(beyond[i], entry) < priceDistance(beyond[j], entry)
+	sort.SliceStable(beyond, func(i, j int) bool {
+		di, dj := priceDistance(beyond[i].Price, entry), priceDistance(beyond[j].Price, entry)
+		if di != dj {
+			return di < dj
+		}
+		return beyond[i].Swing.ID < beyond[j].Swing.ID
 	})
-
-	deduped := make([]quant.Price, 0, len(beyond))
+	deduped := make([]targetSource, 0, len(beyond))
 	for _, lvl := range beyond {
-		if len(deduped) > 0 && priceDistance(lvl, deduped[len(deduped)-1]) <= minTick {
+		if len(deduped) > 0 && priceDistance(lvl.Price, deduped[len(deduped)-1].Price) <= minTick {
 			continue
 		}
 		deduped = append(deduped, lvl)
@@ -246,13 +259,13 @@ func resolvePlanStatus(ctx context.Context, candles CandleSource, state StateSna
 // undefined.
 //
 // Point-in-time: ResolvePOI (and everything it depends on) and
-// resolveTargets/resolvePlanStatus each bound their own candle and
+// resolveTargetsTraced/resolvePlanStatus each bound their own candle and
 // swing reads by asOf; ResolveTradePlan adds no further reads of its
 // own beyond the protected-anchor lookup, which is itself a snapshot
 // of the live state passed in (already the caller's asOf-correct
 // state).
 func ResolveTradePlan(ctx context.Context, store *Store, candles CandleSource, state StateSnapshot, asOf time.Time, interval time.Duration, minLegSpan int, minTick quant.Price) (TradePlan, bool, error) {
-	poi, err := ResolvePOI(ctx, store, candles, state, asOf, interval, minLegSpan)
+	poi, trace, err := resolvePOITraced(ctx, store, candles, state, asOf, interval, minLegSpan)
 	if err != nil {
 		return TradePlan{}, false, err
 	}
@@ -298,13 +311,13 @@ func ResolveTradePlan(ctx context.Context, store *Store, candles CandleSource, s
 		return TradePlan{}, false, nil
 	}
 
-	levels, err := resolveTargets(ctx, store, state, poi.Direction, entry, asOf, minTick)
+	sources, err := resolveTargetsTraced(ctx, store, state, poi.Direction, entry, asOf, minTick)
 	if err != nil {
 		return TradePlan{}, false, err
 	}
-	targets := make([]Target, len(levels))
-	for i, lvl := range levels {
-		targets[i] = Target{Level: lvl, RR: computeRR(poi.Direction, lvl, entry, stop)}
+	targets := make([]Target, len(sources))
+	for i, src := range sources {
+		targets[i] = Target{Level: src.Price, RR: computeRR(poi.Direction, src.Price, entry, stop)}
 	}
 
 	status, err := resolvePlanStatus(ctx, candles, state, poi, entry, stop, asOf)
@@ -312,8 +325,13 @@ func ResolveTradePlan(ctx context.Context, store *Store, candles CandleSource, s
 		return TradePlan{}, false, err
 	}
 
+	evidence, err := buildEvidence(ctx, store, state, asOf, poi, trace, anchor, entry, stop, targets, sources)
+	if err != nil {
+		return TradePlan{}, false, err
+	}
+
 	return TradePlan{
 		Status: status, Direction: poi.Direction, Entry: entry, Stop: stop, Targets: targets,
-		POI: poi, ProtectedSwingID: anchor.ID,
+		POI: poi, ProtectedSwingID: anchor.ID, Evidence: evidence,
 	}, true, nil
 }

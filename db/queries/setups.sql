@@ -16,9 +16,9 @@ SELECT * FROM setups WHERE id = $1;
 INSERT INTO setups (
     instrument_id, timeframe, poi_type, poi_source_candle_id, direction,
     strategy_version, state, poi_source_candle_revision, plan_snapshot,
-    evaluation_time, algorithm_version, updated_at
+    evaluation_time, algorithm_version, updated_at, found_mode
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 RETURNING *;
 
 -- UpdateSetup is setups' one and only write path once a row exists:
@@ -41,9 +41,9 @@ RETURNING *;
 -- name: InsertSetupEvent :one
 INSERT INTO setup_events (
     setup_id, event_type, plan_snapshot, poi_source_candle_id,
-    poi_source_candle_revision, evaluation_time, algorithm_version
+    poi_source_candle_revision, evaluation_time, algorithm_version, evidence
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
 
 -- ListSetupsByInstrument lists every setup for (instrument_id,
@@ -95,3 +95,43 @@ ORDER BY s.id;
 SELECT * FROM setup_events
 WHERE setup_id = $1
 ORDER BY id ASC;
+
+-- ListSetupLifecycle summarises each setup's own event history for the
+-- chart (Phase 6): when it was detected, triggered and invalidated (the
+-- events' evaluation times, so a zone ends at its real invalidation, or
+-- is still active), and whether any of its events recorded evidence. One
+-- statement for the whole list, never one per setup. A time is NULL when
+-- that event never happened (its has_* flag is false; the time column
+-- then holds the epoch and must not be read).
+-- name: ListSetupLifecycle :many
+SELECT
+    e.setup_id,
+    bool_or(e.event_type = 'detected')::boolean AS has_detected,
+    coalesce(min(e.evaluation_time) FILTER (WHERE e.event_type = 'detected'), 'epoch'::timestamptz)::timestamptz AS detected_at,
+    bool_or(e.event_type = 'triggered')::boolean AS has_triggered,
+    coalesce(min(e.evaluation_time) FILTER (WHERE e.event_type = 'triggered'), 'epoch'::timestamptz)::timestamptz AS triggered_at,
+    bool_or(e.event_type = 'invalidated')::boolean AS has_invalidated,
+    coalesce(min(e.evaluation_time) FILTER (WHERE e.event_type = 'invalidated'), 'epoch'::timestamptz)::timestamptz AS invalidated_at,
+    bool_or(e.evidence <> 'null'::jsonb)::boolean AS evidence_recorded
+FROM setup_events e
+WHERE e.setup_id = ANY(sqlc.arg(setup_ids)::bigint[])
+GROUP BY e.setup_id;
+
+-- GetLatestSetupEvidence returns the newest evidence a setup's events
+-- recorded (the detected event's, or a later amendment's after a candle
+-- correction). No row: no evidence was recorded for this setup.
+-- name: GetLatestSetupEvidence :one
+SELECT id, event_type, evaluation_time, evidence
+FROM setup_events
+WHERE setup_id = $1 AND evidence <> 'null'::jsonb
+ORDER BY id DESC
+LIMIT 1;
+
+-- ListLatestSetupEvidence is GetLatestSetupEvidence for many setups at
+-- once (GET /setups?include_evidence=true): each setup's newest recorded
+-- evidence, one statement. A setup with none recorded is absent.
+-- name: ListLatestSetupEvidence :many
+SELECT DISTINCT ON (setup_id) setup_id, id, event_type, evaluation_time, evidence
+FROM setup_events
+WHERE setup_id = ANY(sqlc.arg(setup_ids)::bigint[]) AND evidence <> 'null'::jsonb
+ORDER BY setup_id, id DESC;

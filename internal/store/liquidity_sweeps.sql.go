@@ -77,6 +77,34 @@ func (q *Queries) GetCurrentSweepByTrigger(ctx context.Context, arg GetCurrentSw
 	return i, err
 }
 
+const getSweepByID = `-- name: GetSweepByID :one
+SELECT id, instrument_id, timeframe, side, swept_swing_id, trigger_open_time, trigger_candle_id, penetration_extreme, reclaim_close, evaluation_time, algorithm_version, superseded_at, superseded_by, created_at FROM liquidity_sweeps WHERE id = $1
+`
+
+// GetSweepByID reads one sweep row by id (the evidence chain's sweep:
+// the one a sweep-validated break points at through sweep_event_id).
+func (q *Queries) GetSweepByID(ctx context.Context, id int64) (LiquiditySweep, error) {
+	row := q.db.QueryRowContext(ctx, getSweepByID, id)
+	var i LiquiditySweep
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.Timeframe,
+		&i.Side,
+		&i.SweptSwingID,
+		&i.TriggerOpenTime,
+		&i.TriggerCandleID,
+		&i.PenetrationExtreme,
+		&i.ReclaimClose,
+		&i.EvaluationTime,
+		&i.AlgorithmVersion,
+		&i.SupersededAt,
+		&i.SupersededBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertSweep = `-- name: InsertSweep :one
 INSERT INTO liquidity_sweeps (
     instrument_id, timeframe, side, swept_swing_id, trigger_open_time, trigger_candle_id,

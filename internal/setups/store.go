@@ -3,6 +3,7 @@ package setups
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -70,6 +71,7 @@ type newSetup struct {
 	Plan                    PlanSnapshot
 	EvaluationTime          time.Time
 	AlgorithmVersion        string
+	FoundMode               FoundMode
 }
 
 // Insert creates the row for a brand-new identity (spec section 15.1).
@@ -93,6 +95,7 @@ func (s *Store) Insert(ctx context.Context, n newSetup, now time.Time) (Setup, e
 		EvaluationTime:          n.EvaluationTime,
 		AlgorithmVersion:        n.AlgorithmVersion,
 		UpdatedAt:               now,
+		FoundMode:               string(foundModeOrUnknown(n.FoundMode)),
 	})
 	if err != nil {
 		return Setup{}, fmt.Errorf("setups: insert: %w", err)
@@ -147,6 +150,15 @@ type newSetupEvent struct {
 	POISourceCandleRevision int32
 	EvaluationTime          time.Time
 	AlgorithmVersion        string
+	// Evidence is the chain to record with this event; nil records none.
+	Evidence json.RawMessage
+}
+
+func foundModeOrUnknown(m FoundMode) FoundMode {
+	if m == "" {
+		return FoundUnknown
+	}
+	return m
 }
 
 // InsertEvent appends a new setup_events row. There is no supersede or
@@ -165,6 +177,7 @@ func (s *Store) InsertEvent(ctx context.Context, n newSetupEvent) (SetupEvent, e
 		PoiSourceCandleRevision: n.POISourceCandleRevision,
 		EvaluationTime:          n.EvaluationTime,
 		AlgorithmVersion:        n.AlgorithmVersion,
+		Evidence:                evidenceOrNull(n.Evidence),
 	})
 	if err != nil {
 		return SetupEvent{}, fmt.Errorf("setups: insert event: %w", err)
@@ -283,6 +296,7 @@ func (s *Store) ListNonTerminalForBreachCheck(ctx context.Context, instrumentID 
 			AlgorithmVersion:        row.AlgorithmVersion,
 			CreatedAt:               row.CreatedAt,
 			UpdatedAt:               row.UpdatedAt,
+			FoundMode:               row.FoundMode,
 		})
 		if err != nil {
 			return nil, err
@@ -317,6 +331,11 @@ func fromSetupRow(row store.Setup) (Setup, error) {
 		CreatedAt:               row.CreatedAt,
 		UpdatedAt:               row.UpdatedAt,
 	}
+	mode, err := parseFoundMode(row.FoundMode)
+	if err != nil {
+		return Setup{}, fmt.Errorf("setups: setup row %d: %w", row.ID, err)
+	}
+	su.FoundMode = mode
 	if row.LastEventID.Valid {
 		id := row.LastEventID.Int64
 		su.LastEventID = &id
@@ -343,5 +362,99 @@ func fromSetupEventRow(row store.SetupEvent) (SetupEvent, error) {
 		EvaluationTime:          row.EvaluationTime,
 		AlgorithmVersion:        row.AlgorithmVersion,
 		CreatedAt:               row.CreatedAt,
+		Evidence:                recordedEvidence(row.Evidence),
 	}, nil
+}
+
+// recordedEvidence is the stored evidence, or nil for "not recorded"
+// (the JSON null default).
+func recordedEvidence(e json.RawMessage) json.RawMessage {
+	if len(e) == 0 || string(e) == "null" {
+		return nil
+	}
+	return e
+}
+
+func evidenceOrNull(e json.RawMessage) json.RawMessage {
+	if len(e) == 0 {
+		return evidenceJSONNull
+	}
+	return e
+}
+
+// LatestEvidence returns setupID's newest recorded evidence and the event
+// that carried it; ok is false when none was recorded (every setup
+// created before Phase 6.1).
+func (s *Store) LatestEvidence(ctx context.Context, setupID int64) (evidence json.RawMessage, eventType string, at time.Time, ok bool, err error) {
+	row, err := s.q.GetLatestSetupEvidence(ctx, setupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", time.Time{}, false, nil
+	}
+	if err != nil {
+		return nil, "", time.Time{}, false, fmt.Errorf("setups: latest evidence %d: %w", setupID, err)
+	}
+	return row.Evidence, row.EventType, row.EvaluationTime.UTC(), true, nil
+}
+
+// Lifecycle is when a setup was detected, triggered and invalidated (its
+// events' evaluation times; nil when that never happened) and whether
+// any of its events recorded evidence.
+type Lifecycle struct {
+	DetectedAt       *time.Time
+	TriggeredAt      *time.Time
+	InvalidatedAt    *time.Time
+	EvidenceRecorded bool
+}
+
+// LifecycleByID summarises setupIDs' event histories in one statement.
+// A setup with no events is absent from the map.
+func (s *Store) LifecycleByID(ctx context.Context, setupIDs []int64) (map[int64]Lifecycle, error) {
+	out := make(map[int64]Lifecycle, len(setupIDs))
+	if len(setupIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.q.ListSetupLifecycle(ctx, setupIDs)
+	if err != nil {
+		return nil, fmt.Errorf("setups: lifecycle: %w", err)
+	}
+	at := func(has bool, t time.Time) *time.Time {
+		if !has {
+			return nil
+		}
+		u := t.UTC()
+		return &u
+	}
+	for _, r := range rows {
+		out[r.SetupID] = Lifecycle{
+			DetectedAt:       at(r.HasDetected, r.DetectedAt),
+			TriggeredAt:      at(r.HasTriggered, r.TriggeredAt),
+			InvalidatedAt:    at(r.HasInvalidated, r.InvalidatedAt),
+			EvidenceRecorded: r.EvidenceRecorded,
+		}
+	}
+	return out, nil
+}
+
+// RecordedEvidence is one setup's newest recorded evidence.
+type RecordedEvidence struct {
+	Evidence  json.RawMessage
+	EventType string
+	At        time.Time
+}
+
+// LatestEvidenceByID is LatestEvidence for many setups in one statement;
+// a setup with none recorded is absent from the map.
+func (s *Store) LatestEvidenceByID(ctx context.Context, setupIDs []int64) (map[int64]RecordedEvidence, error) {
+	out := make(map[int64]RecordedEvidence, len(setupIDs))
+	if len(setupIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.q.ListLatestSetupEvidence(ctx, setupIDs)
+	if err != nil {
+		return nil, fmt.Errorf("setups: latest evidence: %w", err)
+	}
+	for _, r := range rows {
+		out[r.SetupID] = RecordedEvidence{Evidence: r.Evidence, EventType: r.EventType, At: r.EvaluationTime.UTC()}
+	}
+	return out, nil
 }

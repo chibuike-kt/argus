@@ -156,8 +156,10 @@ func NewRouter(d Deps) http.Handler {
 			// /ping, which this replaces (it was hand-rolled before any
 			// feature module had a generated route to mount alongside it).
 			candleStore := marketdata.NewStore(d.DB, clock.Real{})
+			setupStore := setups.NewStore(d.DB)
 			api := &apiHandler{
-				store:        setups.NewStore(d.DB),
+				store:        setupStore,
+				evidence:     setupStore,
 				instruments:  instruments.NewStore(d.DB),
 				candles:      candleStore,
 				stats:        candleStore,

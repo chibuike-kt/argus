@@ -168,6 +168,7 @@ type Setup struct {
 	AlgorithmVersion        string          `json:"algorithm_version"`
 	CreatedAt               time.Time       `json:"created_at"`
 	UpdatedAt               time.Time       `json:"updated_at"`
+	FoundMode               string          `json:"found_mode"`
 }
 
 type SetupEvent struct {
@@ -180,6 +181,7 @@ type SetupEvent struct {
 	EvaluationTime          time.Time       `json:"evaluation_time"`
 	AlgorithmVersion        string          `json:"algorithm_version"`
 	CreatedAt               time.Time       `json:"created_at"`
+	Evidence                json.RawMessage `json:"evidence"`
 }
 
 type SignupVerification struct {

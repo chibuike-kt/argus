@@ -63,6 +63,12 @@ type OrderBlock struct {
 	// this.
 	Low  quant.Price
 	High quant.Price
+
+	// breakEvent is the sweep-validated break row BreakEventID names --
+	// the one the impulse window was anchored to -- kept for the
+	// evidence chain (evidence.go), so it records the break this code
+	// actually used rather than looking one up again.
+	breakEvent StructureEvent
 }
 
 // ResolveOrderBlock resolves the active structure's order block (spec
@@ -138,25 +144,25 @@ func ResolveOrderBlock(ctx context.Context, store *Store, candles CandleSource, 
 		switch state.Direction {
 		case DirectionBullish:
 			if c.Close < c.Open {
-				return newOrderBlock(state.Direction, event.ID, anchor.ID, c), true, nil
+				return newOrderBlock(state.Direction, event, anchor.ID, c), true, nil
 			}
 		case DirectionBearish:
 			if c.Close > c.Open {
-				return newOrderBlock(state.Direction, event.ID, anchor.ID, c), true, nil
+				return newOrderBlock(state.Direction, event, anchor.ID, c), true, nil
 			}
 		}
 	}
 
 	return OrderBlock{
 		Status: OrderBlockAbsent, Direction: state.Direction,
-		BreakEventID: event.ID, ProtectedSwingID: anchor.ID,
+		BreakEventID: event.ID, ProtectedSwingID: anchor.ID, breakEvent: event,
 	}, true, nil
 }
 
-func newOrderBlock(direction Direction, breakEventID, protectedSwingID int64, c CandleInput) OrderBlock {
+func newOrderBlock(direction Direction, breakEvent StructureEvent, protectedSwingID int64, c CandleInput) OrderBlock {
 	return OrderBlock{
 		Status: OrderBlockPresent, Direction: direction,
-		BreakEventID: breakEventID, ProtectedSwingID: protectedSwingID,
+		BreakEventID: breakEvent.ID, ProtectedSwingID: protectedSwingID, breakEvent: breakEvent,
 		SourceCandleID: c.ID, SourceRevision: c.Revision, SourceOpenTime: c.OpenTime,
 		Low: quant.Price(c.Low), High: quant.Price(c.High),
 	}

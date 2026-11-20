@@ -490,6 +490,19 @@ func (s *Store) GetCurrentSweepByTrigger(ctx context.Context, instrumentID int64
 	return fromSweepRow(row)
 }
 
+// GetSweepByID reads one sweep by id -- the evidence chain's sweep, the
+// one a sweep-validated break names through SweepEventID.
+func (s *Store) GetSweepByID(ctx context.Context, id int64) (Sweep, error) {
+	row, err := s.q.GetSweepByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Sweep{}, ErrSweepNotFound
+		}
+		return Sweep{}, fmt.Errorf("analysis: get sweep %d: %w", id, err)
+	}
+	return fromSweepRow(row)
+}
+
 // InsertSweep inserts a new liquidity sweep where none currently exists
 // for its (trigger open time, side).
 func (s *Store) InsertSweep(ctx context.Context, n NewSweep) (Sweep, error) {

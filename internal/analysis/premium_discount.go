@@ -84,15 +84,7 @@ func (r Range) Classify(price quant.Price) Zone {
 // returns (ok == true) already satisfies High > Low, so Equilibrium
 // and Classify never need to re-check it.
 func ResolveActiveRange(ctx context.Context, store *Store, state StateSnapshot) (Range, bool, error) {
-	var lowID, highID *int64
-	switch state.Direction {
-	case DirectionBullish:
-		lowID, highID = state.ProtectedLowSwingID, state.ReferenceSwingHighID
-	case DirectionBearish:
-		lowID, highID = state.ReferenceSwingLowID, state.ProtectedHighSwingID
-	default: // DirectionUndetermined
-		return Range{}, false, nil
-	}
+	lowID, highID := activeRangeAnchors(state)
 	if lowID == nil || highID == nil {
 		return Range{}, false, nil
 	}
@@ -110,6 +102,21 @@ func ResolveActiveRange(ctx context.Context, store *Store, state StateSnapshot) 
 		return Range{}, false, nil
 	}
 	return Range{Low: low.Price, High: high.Price}, true, nil
+}
+
+// activeRangeAnchors names the two swings ResolveActiveRange reads: the
+// trend-side protected anchor and the opposing reference swing (nil when
+// absent or the direction is undetermined). Shared with the evidence
+// chain, so it records exactly the swings the range was built from.
+func activeRangeAnchors(state StateSnapshot) (lowID, highID *int64) {
+	switch state.Direction {
+	case DirectionBullish:
+		return state.ProtectedLowSwingID, state.ReferenceSwingHighID
+	case DirectionBearish:
+		return state.ReferenceSwingLowID, state.ProtectedHighSwingID
+	default: // DirectionUndetermined
+		return nil, nil
+	}
 }
 
 // InDiscount reports whether price is in the discount zone of the
