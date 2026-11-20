@@ -217,34 +217,63 @@ func zoneInDiscount(r Range, direction Direction, low, high quant.Price) bool {
 // no further candle reads of its own, so it inherits their discipline
 // rather than needing its own.
 func ResolvePOI(ctx context.Context, store *Store, candles CandleSource, state StateSnapshot, asOf time.Time, interval time.Duration, minLegSpan int) (POI, error) {
+	poi, _, err := resolvePOITraced(ctx, store, candles, state, asOf, interval, minLegSpan)
+	return poi, err
+}
+
+// poiTrace is what ResolvePOI's selection actually used and decided, for
+// the evidence chain (evidence.go): the same values, from the same
+// calls, never looked up again separately. Only the fields a step that
+// was reached set are meaningful.
+type poiTrace struct {
+	orderBlock      OrderBlock
+	structural      StructuralLiquidity
+	activeRange     Range
+	rangeOK         bool
+	rangeLowID      *int64
+	rangeHighID     *int64
+	inDiscount      bool
+	aboveStructural bool
+	qmrChecked      bool
+	qmr             qmrState
+}
+
+// resolvePOITraced is ResolvePOI plus the trace of what it used.
+func resolvePOITraced(ctx context.Context, store *Store, candles CandleSource, state StateSnapshot, asOf time.Time, interval time.Duration, minLegSpan int) (POI, poiTrace, error) {
+	var tr poiTrace
 	none := POI{Type: POINone, Direction: state.Direction}
 
 	ob, obOK, err := ResolveOrderBlock(ctx, store, candles, state, asOf)
 	if err != nil {
-		return POI{}, err
+		return POI{}, tr, err
 	}
+	tr.orderBlock = ob
 	if !obOK || ob.Status != OrderBlockPresent {
-		return none, nil
+		return none, tr, nil
 	}
 
 	structLiq, slOK, err := ResolveStructuralLiquidity(ctx, store, candles, state, asOf, interval, minLegSpan)
 	if err != nil {
-		return POI{}, err
+		return POI{}, tr, err
 	}
+	tr.structural = structLiq
 	structuralPresent := slOK && structLiq.Status == StructuralPresent
 	if !structuralPresent {
 		// No structural liquidity: the inducement case. Neither the
 		// QMR's "above structural liquidity" check nor the order
 		// block's structural-present requirement can be satisfied, so
 		// there is no POI regardless of the order block or any QMR.
-		return none, nil
+		return none, tr, nil
 	}
 
 	activeRange, rangeOK, err := ResolveActiveRange(ctx, store, state)
 	if err != nil {
-		return POI{}, err
+		return POI{}, tr, err
 	}
+	tr.activeRange, tr.rangeOK = activeRange, rangeOK
+	tr.rangeLowID, tr.rangeHighID = activeRangeAnchors(state)
 	inDiscount := rangeOK && zoneInDiscount(activeRange, state.Direction, ob.Low, ob.High)
+	tr.inDiscount = inDiscount
 
 	if inDiscount {
 		aboveStructural := false
@@ -254,11 +283,13 @@ func ResolvePOI(ctx context.Context, store *Store, candles CandleSource, state S
 		case DirectionBearish:
 			aboveStructural = ob.High < structLiq.Swing.Price
 		}
+		tr.aboveStructural = aboveStructural
 		if aboveStructural {
 			qmr, err := resolveQMR(ctx, candles, state, ob, asOf)
 			if err != nil {
-				return POI{}, err
+				return POI{}, tr, err
 			}
+			tr.qmrChecked, tr.qmr = true, qmr
 			if qmr.Failed && !qmr.Spent {
 				return POI{
 					Type: POIQMR, Direction: state.Direction,
@@ -267,7 +298,7 @@ func ResolvePOI(ctx context.Context, store *Store, candles CandleSource, state S
 					QMRFailCandleID: qmr.FailCandleID, QMRFailCandleRevision: qmr.FailCandleRev,
 					StructuralSwingID: structLiq.Swing.ID,
 					InDiscount:        true,
-				}, nil
+				}, tr, nil
 			}
 		}
 	}
@@ -279,8 +310,8 @@ func ResolvePOI(ctx context.Context, store *Store, candles CandleSource, state S
 			OrderBlockCandleID: ob.SourceCandleID, OrderBlockCandleRevision: ob.SourceRevision, OrderBlockOpenTime: ob.SourceOpenTime,
 			StructuralSwingID: structLiq.Swing.ID,
 			InDiscount:        true,
-		}, nil
+		}, tr, nil
 	}
 
-	return none, nil
+	return none, tr, nil
 }

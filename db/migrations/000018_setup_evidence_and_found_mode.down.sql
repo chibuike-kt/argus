@@ -1,0 +1,2 @@
+ALTER TABLE setup_events DROP COLUMN IF EXISTS evidence;
+ALTER TABLE setups DROP COLUMN IF EXISTS found_mode;

@@ -150,6 +150,10 @@ type Querier interface {
 	// needing to know what "now" means for this instrument's series.
 	GetLatestClosedCandle(ctx context.Context, instrumentID int64) (Candle, error)
 	GetLatestQuote(ctx context.Context, instrumentID int64) (LatestQuote, error)
+	// GetLatestSetupEvidence returns the newest evidence a setup's events
+	// recorded (the detected event's, or a later amendment's after a candle
+	// correction). No row: no evidence was recorded for this setup.
+	GetLatestSetupEvidence(ctx context.Context, setupID int64) (GetLatestSetupEvidenceRow, error)
 	GetProcessingCursor(ctx context.Context, arg GetProcessingCursorParams) (ProcessingCursor, error)
 	// GetSessionByIDForUser is DELETE /auth/sessions/{id}'s own existence +
 	// ownership check, before revoking: sql.ErrNoRows here means exactly
@@ -174,6 +178,9 @@ type Querier interface {
 	// the ticket, so a rejected password never burns it.
 	GetSignupVerificationByTicket(ctx context.Context, ticketHash sql.NullString) (SignupVerification, error)
 	GetStructureState(ctx context.Context, arg GetStructureStateParams) (StructureState, error)
+	// GetSweepByID reads one sweep row by id (the evidence chain's sweep:
+	// the one a sweep-validated break points at through sweep_event_id).
+	GetSweepByID(ctx context.Context, id int64) (LiquiditySweep, error)
 	// GetSwingByID looks up a swing directly by id, regardless of whether it
 	// is current or superseded -- used to resolve a structure_state
 	// reference pointer (which names a specific row, not a position) back
@@ -391,6 +398,10 @@ type Querier interface {
 	// RightBars+1 intervals), and such a swing must never be treated as
 	// "the most recent confirmed swing" as of a historical asOf.
 	ListLatestCurrentSwingsConfirmedBefore(ctx context.Context, arg ListLatestCurrentSwingsConfirmedBeforeParams) ([]ConfirmedSwing, error)
+	// ListLatestSetupEvidence is GetLatestSetupEvidence for many setups at
+	// once (GET /setups?include_evidence=true): each setup's newest recorded
+	// evidence, one statement. A setup with none recorded is absent.
+	ListLatestSetupEvidence(ctx context.Context, setupIds []int64) ([]ListLatestSetupEvidenceRow, error)
 	// ListMissingCandleRanges is the integrity scan's one statement: every
 	// minute in [from_time, to_time) with no current, closed 1-minute candle,
 	// grouped into consecutive ranges [gap_start, gap_end), starting at the
@@ -420,6 +431,14 @@ type Querier interface {
 	// per-instrument list queries.
 	ListNonTerminalSetupsForBreachCheck(ctx context.Context, arg ListNonTerminalSetupsForBreachCheckParams) ([]ListNonTerminalSetupsForBreachCheckRow, error)
 	ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([]CandleGap, error)
+	// ListSetupLifecycle summarises each setup's own event history for the
+	// chart (Phase 6): when it was detected, triggered and invalidated (the
+	// events' evaluation times, so a zone ends at its real invalidation, or
+	// is still active), and whether any of its events recorded evidence. One
+	// statement for the whole list, never one per setup. A time is NULL when
+	// that event never happened (its has_* flag is false; the time column
+	// then holds the epoch and must not be read).
+	ListSetupLifecycle(ctx context.Context, setupIds []int64) ([]ListSetupLifecycleRow, error)
 	// ListSetupsByInstrument lists every setup for (instrument_id,
 	// timeframe), most recently updated first -- cmd/argus-worker's own
 	// read path (processInstrument has no reason to filter or cap this;

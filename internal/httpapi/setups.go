@@ -75,6 +75,7 @@ var _ setupsStore = (*setups.Store)(nil)
 // one generated router can be mounted with one implementation.
 type apiHandler struct {
 	store        setupsStore
+	evidence     setupEvidenceStore // nil: no lifecycle or evidence fields (tests that do not need them)
 	instruments  instrumentsStore
 	candles      candlesStore
 	stats        instrumentStatsStore
@@ -137,6 +138,11 @@ func (h *apiHandler) ListSetups(ctx context.Context, request ListSetupsRequestOb
 	for _, row := range rows {
 		out = append(out, toAPISetup(row, inst.PriceScale))
 	}
+	withEvidence := request.Params.IncludeEvidence != nil && *request.Params.IncludeEvidence
+	if err := h.enrichSetups(ctx, rows, out, inst.PriceScale, withEvidence); err != nil {
+		h.logger.Error("httpapi: enrich setups", "instrument_id", request.Params.InstrumentId, "error", err)
+		return nil, fmt.Errorf("enrich setups: %w", err)
+	}
 	return out, nil
 }
 
@@ -156,7 +162,12 @@ func (h *apiHandler) GetSetup(ctx context.Context, request GetSetupRequestObject
 		return nil, fmt.Errorf("get instrument %d: %w", row.InstrumentID, err)
 	}
 
-	return GetSetup200JSONResponse(toAPISetup(row, inst.PriceScale)), nil
+	out := []Setup{toAPISetup(row, inst.PriceScale)}
+	if err := h.enrichSetups(ctx, []setups.Setup{row}, out, inst.PriceScale, false); err != nil {
+		h.logger.Error("httpapi: enrich setup", "setup_id", request.Id, "error", err)
+		return nil, fmt.Errorf("enrich setup %d: %w", request.Id, err)
+	}
+	return GetSetup200JSONResponse(out[0]), nil
 }
 
 func (h *apiHandler) ListSetupEvents(ctx context.Context, request ListSetupEventsRequestObject) (ListSetupEventsResponseObject, error) {

@@ -295,7 +295,37 @@ type Setup struct {
 	AlgorithmVersion        string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
+	// FoundMode is how the setup was found (Phase 6.1): live, replay,
+	// or unknown for every setup created before it was recorded.
+	FoundMode FoundMode
 }
+
+// FoundMode says whether a setup was found live -- the candle that
+// created it was the newest closed candle when the worker processed it --
+// or in replay, while the worker was still catching up on older candles.
+// Recorded once, at creation (setups.found_mode); FoundUnknown is every
+// setup created before this was recorded. Metadata about when the
+// decision was made, never part of the decision or its evidence.
+type FoundMode string
+
+// The three found modes.
+const (
+	FoundLive    FoundMode = "live"
+	FoundReplay  FoundMode = "replay"
+	FoundUnknown FoundMode = "unknown"
+)
+
+func parseFoundMode(s string) (FoundMode, error) {
+	switch FoundMode(s) {
+	case FoundLive, FoundReplay, FoundUnknown:
+		return FoundMode(s), nil
+	}
+	return "", fmt.Errorf("setups: unknown found mode %q", s)
+}
+
+// evidenceJSONNull is the stored value of "no evidence recorded"
+// (setup_events.evidence, migration 000018).
+var evidenceJSONNull = json.RawMessage("null")
 
 // SetupEvent is the domain view of a setup_events row: one immutable
 // entry in a setup's history (spec section 15.4).
@@ -309,4 +339,8 @@ type SetupEvent struct {
 	EvaluationTime          time.Time
 	AlgorithmVersion        string
 	CreatedAt               time.Time
+	// Evidence is the chain recorded with this event (Phase 6.1), as
+	// stored; nil when none was recorded (every event before it was, and
+	// every event type that carries none).
+	Evidence json.RawMessage
 }

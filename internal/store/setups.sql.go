@@ -10,10 +10,42 @@ import (
 	"database/sql"
 	"encoding/json"
 	"time"
+
+	"github.com/lib/pq"
 )
 
+const getLatestSetupEvidence = `-- name: GetLatestSetupEvidence :one
+SELECT id, event_type, evaluation_time, evidence
+FROM setup_events
+WHERE setup_id = $1 AND evidence <> 'null'::jsonb
+ORDER BY id DESC
+LIMIT 1
+`
+
+type GetLatestSetupEvidenceRow struct {
+	ID             int64           `json:"id"`
+	EventType      string          `json:"event_type"`
+	EvaluationTime time.Time       `json:"evaluation_time"`
+	Evidence       json.RawMessage `json:"evidence"`
+}
+
+// GetLatestSetupEvidence returns the newest evidence a setup's events
+// recorded (the detected event's, or a later amendment's after a candle
+// correction). No row: no evidence was recorded for this setup.
+func (q *Queries) GetLatestSetupEvidence(ctx context.Context, setupID int64) (GetLatestSetupEvidenceRow, error) {
+	row := q.db.QueryRowContext(ctx, getLatestSetupEvidence, setupID)
+	var i GetLatestSetupEvidenceRow
+	err := row.Scan(
+		&i.ID,
+		&i.EventType,
+		&i.EvaluationTime,
+		&i.Evidence,
+	)
+	return i, err
+}
+
 const getSetupByID = `-- name: GetSetupByID :one
-SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at FROM setups WHERE id = $1
+SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at, found_mode FROM setups WHERE id = $1
 `
 
 func (q *Queries) GetSetupByID(ctx context.Context, id int64) (Setup, error) {
@@ -35,12 +67,13 @@ func (q *Queries) GetSetupByID(ctx context.Context, id int64) (Setup, error) {
 		&i.AlgorithmVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.FoundMode,
 	)
 	return i, err
 }
 
 const getSetupByIdentity = `-- name: GetSetupByIdentity :one
-SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at FROM setups
+SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at, found_mode FROM setups
 WHERE instrument_id = $1 AND timeframe = $2 AND poi_type = $3
   AND poi_source_candle_id = $4 AND direction = $5 AND strategy_version = $6
 `
@@ -80,6 +113,7 @@ func (q *Queries) GetSetupByIdentity(ctx context.Context, arg GetSetupByIdentity
 		&i.AlgorithmVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.FoundMode,
 	)
 	return i, err
 }
@@ -88,10 +122,10 @@ const insertSetup = `-- name: InsertSetup :one
 INSERT INTO setups (
     instrument_id, timeframe, poi_type, poi_source_candle_id, direction,
     strategy_version, state, poi_source_candle_revision, plan_snapshot,
-    evaluation_time, algorithm_version, updated_at
+    evaluation_time, algorithm_version, updated_at, found_mode
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-RETURNING id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+RETURNING id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at, found_mode
 `
 
 type InsertSetupParams struct {
@@ -107,6 +141,7 @@ type InsertSetupParams struct {
 	EvaluationTime          time.Time       `json:"evaluation_time"`
 	AlgorithmVersion        string          `json:"algorithm_version"`
 	UpdatedAt               time.Time       `json:"updated_at"`
+	FoundMode               string          `json:"found_mode"`
 }
 
 // InsertSetup creates the row for a brand-new identity (spec section
@@ -129,6 +164,7 @@ func (q *Queries) InsertSetup(ctx context.Context, arg InsertSetupParams) (Setup
 		arg.EvaluationTime,
 		arg.AlgorithmVersion,
 		arg.UpdatedAt,
+		arg.FoundMode,
 	)
 	var i Setup
 	err := row.Scan(
@@ -147,6 +183,7 @@ func (q *Queries) InsertSetup(ctx context.Context, arg InsertSetupParams) (Setup
 		&i.AlgorithmVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.FoundMode,
 	)
 	return i, err
 }
@@ -154,10 +191,10 @@ func (q *Queries) InsertSetup(ctx context.Context, arg InsertSetupParams) (Setup
 const insertSetupEvent = `-- name: InsertSetupEvent :one
 INSERT INTO setup_events (
     setup_id, event_type, plan_snapshot, poi_source_candle_id,
-    poi_source_candle_revision, evaluation_time, algorithm_version
+    poi_source_candle_revision, evaluation_time, algorithm_version, evidence
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, setup_id, event_type, plan_snapshot, poi_source_candle_id, poi_source_candle_revision, evaluation_time, algorithm_version, created_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, setup_id, event_type, plan_snapshot, poi_source_candle_id, poi_source_candle_revision, evaluation_time, algorithm_version, created_at, evidence
 `
 
 type InsertSetupEventParams struct {
@@ -168,6 +205,7 @@ type InsertSetupEventParams struct {
 	PoiSourceCandleRevision int32           `json:"poi_source_candle_revision"`
 	EvaluationTime          time.Time       `json:"evaluation_time"`
 	AlgorithmVersion        string          `json:"algorithm_version"`
+	Evidence                json.RawMessage `json:"evidence"`
 }
 
 func (q *Queries) InsertSetupEvent(ctx context.Context, arg InsertSetupEventParams) (SetupEvent, error) {
@@ -179,6 +217,7 @@ func (q *Queries) InsertSetupEvent(ctx context.Context, arg InsertSetupEventPara
 		arg.PoiSourceCandleRevision,
 		arg.EvaluationTime,
 		arg.AlgorithmVersion,
+		arg.Evidence,
 	)
 	var i SetupEvent
 	err := row.Scan(
@@ -191,12 +230,13 @@ func (q *Queries) InsertSetupEvent(ctx context.Context, arg InsertSetupEventPara
 		&i.EvaluationTime,
 		&i.AlgorithmVersion,
 		&i.CreatedAt,
+		&i.Evidence,
 	)
 	return i, err
 }
 
 const listEventsForSetup = `-- name: ListEventsForSetup :many
-SELECT id, setup_id, event_type, plan_snapshot, poi_source_candle_id, poi_source_candle_revision, evaluation_time, algorithm_version, created_at FROM setup_events
+SELECT id, setup_id, event_type, plan_snapshot, poi_source_candle_id, poi_source_candle_revision, evaluation_time, algorithm_version, created_at, evidence FROM setup_events
 WHERE setup_id = $1
 ORDER BY id ASC
 `
@@ -223,6 +263,54 @@ func (q *Queries) ListEventsForSetup(ctx context.Context, setupID int64) ([]Setu
 			&i.EvaluationTime,
 			&i.AlgorithmVersion,
 			&i.CreatedAt,
+			&i.Evidence,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLatestSetupEvidence = `-- name: ListLatestSetupEvidence :many
+SELECT DISTINCT ON (setup_id) setup_id, id, event_type, evaluation_time, evidence
+FROM setup_events
+WHERE setup_id = ANY($1::bigint[]) AND evidence <> 'null'::jsonb
+ORDER BY setup_id, id DESC
+`
+
+type ListLatestSetupEvidenceRow struct {
+	SetupID        int64           `json:"setup_id"`
+	ID             int64           `json:"id"`
+	EventType      string          `json:"event_type"`
+	EvaluationTime time.Time       `json:"evaluation_time"`
+	Evidence       json.RawMessage `json:"evidence"`
+}
+
+// ListLatestSetupEvidence is GetLatestSetupEvidence for many setups at
+// once (GET /setups?include_evidence=true): each setup's newest recorded
+// evidence, one statement. A setup with none recorded is absent.
+func (q *Queries) ListLatestSetupEvidence(ctx context.Context, setupIds []int64) ([]ListLatestSetupEvidenceRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLatestSetupEvidence, pq.Array(setupIds))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLatestSetupEvidenceRow{}
+	for rows.Next() {
+		var i ListLatestSetupEvidenceRow
+		if err := rows.Scan(
+			&i.SetupID,
+			&i.ID,
+			&i.EventType,
+			&i.EvaluationTime,
+			&i.Evidence,
 		); err != nil {
 			return nil, err
 		}
@@ -238,7 +326,7 @@ func (q *Queries) ListEventsForSetup(ctx context.Context, setupID int64) ([]Setu
 }
 
 const listNonTerminalSetupsForBreachCheck = `-- name: ListNonTerminalSetupsForBreachCheck :many
-SELECT s.id, s.instrument_id, s.timeframe, s.poi_type, s.poi_source_candle_id, s.direction, s.strategy_version, s.state, s.poi_source_candle_revision, s.plan_snapshot, s.last_event_id, s.evaluation_time, s.algorithm_version, s.created_at, s.updated_at, c.open_time AS poi_open_time
+SELECT s.id, s.instrument_id, s.timeframe, s.poi_type, s.poi_source_candle_id, s.direction, s.strategy_version, s.state, s.poi_source_candle_revision, s.plan_snapshot, s.last_event_id, s.evaluation_time, s.algorithm_version, s.created_at, s.updated_at, s.found_mode, c.open_time AS poi_open_time
 FROM setups s
 JOIN candles c ON c.id = s.poi_source_candle_id
 WHERE s.instrument_id = $1 AND s.timeframe = $2
@@ -267,6 +355,7 @@ type ListNonTerminalSetupsForBreachCheckRow struct {
 	AlgorithmVersion        string          `json:"algorithm_version"`
 	CreatedAt               time.Time       `json:"created_at"`
 	UpdatedAt               time.Time       `json:"updated_at"`
+	FoundMode               string          `json:"found_mode"`
 	PoiOpenTime             time.Time       `json:"poi_open_time"`
 }
 
@@ -304,6 +393,7 @@ func (q *Queries) ListNonTerminalSetupsForBreachCheck(ctx context.Context, arg L
 			&i.AlgorithmVersion,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.FoundMode,
 			&i.PoiOpenTime,
 		); err != nil {
 			return nil, err
@@ -319,8 +409,73 @@ func (q *Queries) ListNonTerminalSetupsForBreachCheck(ctx context.Context, arg L
 	return items, nil
 }
 
+const listSetupLifecycle = `-- name: ListSetupLifecycle :many
+SELECT
+    e.setup_id,
+    bool_or(e.event_type = 'detected')::boolean AS has_detected,
+    coalesce(min(e.evaluation_time) FILTER (WHERE e.event_type = 'detected'), 'epoch'::timestamptz)::timestamptz AS detected_at,
+    bool_or(e.event_type = 'triggered')::boolean AS has_triggered,
+    coalesce(min(e.evaluation_time) FILTER (WHERE e.event_type = 'triggered'), 'epoch'::timestamptz)::timestamptz AS triggered_at,
+    bool_or(e.event_type = 'invalidated')::boolean AS has_invalidated,
+    coalesce(min(e.evaluation_time) FILTER (WHERE e.event_type = 'invalidated'), 'epoch'::timestamptz)::timestamptz AS invalidated_at,
+    bool_or(e.evidence <> 'null'::jsonb)::boolean AS evidence_recorded
+FROM setup_events e
+WHERE e.setup_id = ANY($1::bigint[])
+GROUP BY e.setup_id
+`
+
+type ListSetupLifecycleRow struct {
+	SetupID          int64     `json:"setup_id"`
+	HasDetected      bool      `json:"has_detected"`
+	DetectedAt       time.Time `json:"detected_at"`
+	HasTriggered     bool      `json:"has_triggered"`
+	TriggeredAt      time.Time `json:"triggered_at"`
+	HasInvalidated   bool      `json:"has_invalidated"`
+	InvalidatedAt    time.Time `json:"invalidated_at"`
+	EvidenceRecorded bool      `json:"evidence_recorded"`
+}
+
+// ListSetupLifecycle summarises each setup's own event history for the
+// chart (Phase 6): when it was detected, triggered and invalidated (the
+// events' evaluation times, so a zone ends at its real invalidation, or
+// is still active), and whether any of its events recorded evidence. One
+// statement for the whole list, never one per setup. A time is NULL when
+// that event never happened (its has_* flag is false; the time column
+// then holds the epoch and must not be read).
+func (q *Queries) ListSetupLifecycle(ctx context.Context, setupIds []int64) ([]ListSetupLifecycleRow, error) {
+	rows, err := q.db.QueryContext(ctx, listSetupLifecycle, pq.Array(setupIds))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSetupLifecycleRow{}
+	for rows.Next() {
+		var i ListSetupLifecycleRow
+		if err := rows.Scan(
+			&i.SetupID,
+			&i.HasDetected,
+			&i.DetectedAt,
+			&i.HasTriggered,
+			&i.TriggeredAt,
+			&i.HasInvalidated,
+			&i.InvalidatedAt,
+			&i.EvidenceRecorded,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSetupsByInstrument = `-- name: ListSetupsByInstrument :many
-SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at FROM setups
+SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at, found_mode FROM setups
 WHERE instrument_id = $1 AND timeframe = $2
 ORDER BY updated_at DESC
 `
@@ -360,6 +515,7 @@ func (q *Queries) ListSetupsByInstrument(ctx context.Context, arg ListSetupsByIn
 			&i.AlgorithmVersion,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.FoundMode,
 		); err != nil {
 			return nil, err
 		}
@@ -375,7 +531,7 @@ func (q *Queries) ListSetupsByInstrument(ctx context.Context, arg ListSetupsByIn
 }
 
 const listSetupsByInstrumentFiltered = `-- name: ListSetupsByInstrumentFiltered :many
-SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at FROM setups
+SELECT id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at, found_mode FROM setups
 WHERE instrument_id = $1 AND timeframe = $2
   AND ($4::text IS NULL OR state = $4::text)
 ORDER BY updated_at DESC
@@ -427,6 +583,7 @@ func (q *Queries) ListSetupsByInstrumentFiltered(ctx context.Context, arg ListSe
 			&i.AlgorithmVersion,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.FoundMode,
 		); err != nil {
 			return nil, err
 		}
@@ -451,7 +608,7 @@ UPDATE setups SET
     algorithm_version = $7,
     updated_at = $8
 WHERE id = $1
-RETURNING id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at
+RETURNING id, instrument_id, timeframe, poi_type, poi_source_candle_id, direction, strategy_version, state, poi_source_candle_revision, plan_snapshot, last_event_id, evaluation_time, algorithm_version, created_at, updated_at, found_mode
 `
 
 type UpdateSetupParams struct {
@@ -498,6 +655,7 @@ func (q *Queries) UpdateSetup(ctx context.Context, arg UpdateSetupParams) (Setup
 		&i.AlgorithmVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.FoundMode,
 	)
 	return i, err
 }

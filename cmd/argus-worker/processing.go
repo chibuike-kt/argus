@@ -285,7 +285,15 @@ func (p *processor) processInstrument(ctx context.Context, inst instruments.Inst
 		if p.testFailBeforeReconcile != nil && p.testFailBeforeReconcile(c.CloseTime) {
 			return result, fmt.Errorf("processing: simulated crash after engine, before reconcile, at %s", c.CloseTime)
 		}
-		wrote, err := p.reconcileSetup(ctx, inst, c.CloseTime)
+		// Found live when this is the newest closed candle there was when
+		// the tick started (latest); otherwise the worker is catching up
+		// on older candles and anything found is replay (Phase 6.1,
+		// setups.found_mode). No time threshold: a fact about this tick.
+		mode := setups.FoundReplay
+		if c.OpenTime.Equal(latest.OpenTime) {
+			mode = setups.FoundLive
+		}
+		wrote, err := p.reconcileSetup(ctx, inst, c.CloseTime, mode)
 		if err != nil {
 			return result, fmt.Errorf("reconcile setup open_time=%s: %w", c.OpenTime, err)
 		}
@@ -363,7 +371,7 @@ func (p *processor) loadCursor(ctx context.Context, instrumentID int64) (time.Ti
 // call (false for a no-op reconciliation, same as setups.Reconcile's
 // own nil-event return) -- run's own tick-summary line counts this,
 // per Part D.
-func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrument, asOf time.Time) (wrote bool, err error) {
+func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrument, asOf time.Time, mode setups.FoundMode) (wrote bool, err error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("begin tx: %w", err)
@@ -393,7 +401,7 @@ func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrum
 	}
 
 	now := p.clk.Now()
-	setup, event, err := setups.Reconcile(ctx, txSetupsStore, inst.ID, timeframe, plan, algorithmVersion, asOf, now)
+	setup, event, err := setups.ReconcileWithMode(ctx, txSetupsStore, inst.ID, timeframe, plan, algorithmVersion, asOf, now, mode)
 	if err != nil {
 		return false, fmt.Errorf("reconcile: %w", err)
 	}
@@ -411,6 +419,7 @@ func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrum
 			"state", setup.State.String(),
 			"direction", setup.Direction,
 			"poi_type", setup.POIType,
+			"found_mode", string(setup.FoundMode),
 		)
 	}
 	return event != nil, nil

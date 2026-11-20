@@ -611,7 +611,7 @@ func TestIntegration_TradePlan_Targets_DedupedAndCapped(t *testing.T) {
 	}
 }
 
-// TestIntegration_TradePlan_EmptyTargets exercises resolveTargets
+// TestIntegration_TradePlan_EmptyTargets exercises resolveTargetsTraced
 // directly (same package, white-box): when entry sits above every
 // confirmed opposing swing, there is no structural target. This is
 // tested in isolation rather than through the full POI pipeline,
@@ -633,9 +633,9 @@ func TestIntegration_TradePlan_EmptyTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetState: %v", err)
 	}
-	levels, err := resolveTargets(context.Background(), store, state, DirectionBullish, 200, et(30), 1)
+	levels, err := resolveTargetsTraced(context.Background(), store, state, DirectionBullish, 200, et(30), 1)
 	if err != nil {
-		t.Fatalf("resolveTargets: %v", err)
+		t.Fatalf("resolveTargetsTraced: %v", err)
 	}
 	if len(levels) != 0 {
 		t.Fatalf("levels = %v, want empty: H1 (125) does not lie beyond entry (200)", levels)

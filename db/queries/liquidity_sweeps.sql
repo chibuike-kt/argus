@@ -27,3 +27,8 @@ WHERE id = $1 AND superseded_at IS NULL;
 UPDATE liquidity_sweeps
 SET superseded_by = $2
 WHERE id = $1 AND superseded_at IS NOT NULL AND superseded_by IS NULL;
+
+-- GetSweepByID reads one sweep row by id (the evidence chain's sweep:
+-- the one a sweep-validated break points at through sweep_event_id).
+-- name: GetSweepByID :one
+SELECT * FROM liquidity_sweeps WHERE id = $1;

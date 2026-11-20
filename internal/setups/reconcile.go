@@ -2,6 +2,7 @@ package setups
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -45,8 +46,25 @@ import (
 // previous step's identity itself and compare it across calls, which
 // is more machinery than this brief asked for. Flagged, not guessed.
 func Reconcile(ctx context.Context, s *Store, instrumentID int64, timeframe string, plan analysis.TradePlan, version string, asOf, now time.Time) (Setup, *SetupEvent, error) {
+	return ReconcileWithMode(ctx, s, instrumentID, timeframe, plan, version, asOf, now, FoundUnknown)
+}
+
+// ReconcileWithMode is Reconcile recording how a new setup was found
+// (Phase 6.1): mode is written once, when the setup is created, and never
+// changed by a later step. Reconcile itself records FoundUnknown, for
+// callers that cannot tell (the backtest runner).
+//
+// The plan's evidence chain (analysis.TradePlan.Evidence) is recorded
+// with the detected event, and again with an amendment event (a candle
+// correction recomputed the plan). Transition events carry none: their
+// own evaluation time is the record of when the state changed.
+func ReconcileWithMode(ctx context.Context, s *Store, instrumentID int64, timeframe string, plan analysis.TradePlan, version string, asOf, now time.Time, mode FoundMode) (Setup, *SetupEvent, error) {
 	if plan.Status == analysis.PlanNone {
 		return Setup{}, nil, nil
+	}
+	evidence, err := marshalEvidence(plan.Evidence, version)
+	if err != nil {
+		return Setup{}, nil, fmt.Errorf("setups: reconcile: %w", err)
 	}
 
 	id, poiRevision, err := identityFrom(plan.POI, version)
@@ -58,11 +76,11 @@ func Reconcile(ctx context.Context, s *Store, instrumentID int64, timeframe stri
 	existing, err := s.GetByIdentity(ctx, instrumentID, timeframe, id)
 	switch {
 	case errors.Is(err, ErrSetupNotFound):
-		return reconcileNew(ctx, s, instrumentID, timeframe, id, poiRevision, snapshot, plan.Status, version, asOf, now)
+		return reconcileNew(ctx, s, instrumentID, timeframe, id, poiRevision, snapshot, plan.Status, version, asOf, now, mode, evidence)
 	case err != nil:
 		return Setup{}, nil, fmt.Errorf("setups: reconcile: %w", err)
 	default:
-		return reconcileExisting(ctx, s, existing, plan.Status, poiRevision, snapshot, version, asOf, now)
+		return reconcileExisting(ctx, s, existing, plan.Status, poiRevision, snapshot, version, asOf, now, evidence)
 	}
 }
 
@@ -78,7 +96,7 @@ func Reconcile(ctx context.Context, s *Store, instrumentID int64, timeframe stri
 //
 // status is never PlanNone here (Reconcile's own guard); stateFromPlanStatus
 // therefore never fails for it.
-func reconcileNew(ctx context.Context, s *Store, instrumentID int64, timeframe string, id identity, poiRevision int32, snapshot PlanSnapshot, status analysis.PlanStatus, version string, asOf, now time.Time) (Setup, *SetupEvent, error) {
+func reconcileNew(ctx context.Context, s *Store, instrumentID int64, timeframe string, id identity, poiRevision int32, snapshot PlanSnapshot, status analysis.PlanStatus, version string, asOf, now time.Time, mode FoundMode, evidence json.RawMessage) (Setup, *SetupEvent, error) {
 	created, err := s.Insert(ctx, newSetup{
 		InstrumentID:            instrumentID,
 		Timeframe:               timeframe,
@@ -88,6 +106,7 @@ func reconcileNew(ctx context.Context, s *Store, instrumentID int64, timeframe s
 		Plan:                    snapshot,
 		EvaluationTime:          asOf,
 		AlgorithmVersion:        version,
+		FoundMode:               mode,
 	}, now)
 	if err != nil {
 		return Setup{}, nil, err
@@ -101,6 +120,7 @@ func reconcileNew(ctx context.Context, s *Store, instrumentID int64, timeframe s
 		POISourceCandleRevision: poiRevision,
 		EvaluationTime:          asOf,
 		AlgorithmVersion:        version,
+		Evidence:                evidence,
 	})
 	if err != nil {
 		return Setup{}, nil, err
@@ -153,7 +173,7 @@ func reconcileNew(ctx context.Context, s *Store, instrumentID int64, timeframe s
 //
 // status is never PlanNone here (Reconcile's own guard); stateFromPlanStatus
 // therefore never fails for it.
-func reconcileExisting(ctx context.Context, s *Store, existing Setup, status analysis.PlanStatus, poiRevision int32, snapshot PlanSnapshot, version string, asOf, now time.Time) (Setup, *SetupEvent, error) {
+func reconcileExisting(ctx context.Context, s *Store, existing Setup, status analysis.PlanStatus, poiRevision int32, snapshot PlanSnapshot, version string, asOf, now time.Time, evidence json.RawMessage) (Setup, *SetupEvent, error) {
 	targetState, err := stateFromPlanStatus(status)
 	if err != nil {
 		return Setup{}, nil, fmt.Errorf("setups: reconcile existing setup %d: %w", existing.ID, err)
@@ -186,6 +206,7 @@ func reconcileExisting(ctx context.Context, s *Store, existing Setup, status ana
 			POISourceCandleRevision: poiRevision,
 			EvaluationTime:          asOf,
 			AlgorithmVersion:        version,
+			Evidence:                evidence,
 		})
 		if err != nil {
 			return Setup{}, nil, err
@@ -224,4 +245,21 @@ func reconcileExisting(ctx context.Context, s *Store, existing Setup, status ana
 		return Setup{}, nil, err
 	}
 	return updated, &lastEvent, nil
+}
+
+// marshalEvidence is the plan's evidence as stored: the analysis chain
+// with the strategy and algorithm versions this package records. nil
+// (none) when the plan carries none.
+func marshalEvidence(ev *analysis.PlanEvidence, version string) (json.RawMessage, error) {
+	if ev == nil {
+		return nil, nil
+	}
+	out := *ev
+	out.StrategyVersion = version
+	out.AlgorithmVersion = version
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal evidence: %w", err)
+	}
+	return b, nil
 }

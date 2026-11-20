@@ -289,6 +289,17 @@ paths:
             default: 50
             minimum: 1
             maximum: 200
+        - name: include_evidence
+          in: query
+          required: false
+          description: >
+            When true, each setup carries its recorded evidence chain
+            (`evidence`, the same document GET /setups/{id}/evidence returns),
+            so a chart can draw every setup's own evidence from one request
+            (Phase 6). Bounded by limit. Default false.
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
           description: OK
@@ -322,6 +333,40 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Setup"
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /setups/{id}/evidence:
+    get:
+      operationId: getSetupEvidence
+      summary: >
+        The evidence chain recorded with the setup's decision (Phase 6.1,
+        D6): the ordered steps of the story -- the swept swing, the sweep,
+        the protected swing, the break the order block was anchored to, the
+        premium or discount of the active range, the structural liquidity,
+        the QMR check, the zone and the plan -- each with its candle open
+        times, prices (decimal strings at the instrument's scale), the spec
+        section and its result. The newest recorded chain (the detected
+        event's, or a later amendment's after a candle correction).
+        recorded is false for every setup created before evidence was
+        recorded; nothing is reconstructed for those.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetupEvidence"
         "404":
           description: Not Found
           content:
@@ -1415,6 +1460,144 @@ components:
         updated_at:
           type: string
           format: date-time
+        found_mode:
+          type: string
+          enum: [live, replay, unknown]
+          description: >
+            How the setup was found: live (the candle that created it was the
+            newest closed candle when the worker processed it), replay (the
+            worker was catching up on older candles), or unknown (created
+            before this was recorded). Set once, at creation.
+        evidence_recorded:
+          type: boolean
+          description: Whether an evidence chain was recorded for this setup (false for every setup created before it was).
+        detected_at:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: Evaluation time of the setup's detected event.
+        triggered_at:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: >
+            Evaluation time of its triggered event (spec section 14: a candle
+            after the zone formed reached the entry). Null when it never
+            triggered. The setup continues after it.
+        invalidated_at:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: >
+            Evaluation time of its invalidated event (a candle closed through
+            the stop). Null while it is still active. A setup's zone ends here,
+            or at the last candle while still active.
+        evidence:
+          allOf:
+            - $ref: "#/components/schemas/SetupEvidence"
+          nullable: true
+          description: Only with include_evidence=true on GET /setups.
+    SetupEvidence:
+      type: object
+      required: [setup_id, recorded]
+      properties:
+        setup_id:
+          type: integer
+          format: int64
+        recorded:
+          type: boolean
+          description: False for a setup created before evidence was recorded ("evidence not recorded for this setup").
+        event_type:
+          type: string
+          description: The event that recorded it (detected, or amendment).
+        evaluation_time:
+          type: string
+          format: date-time
+        schema:
+          type: integer
+          format: int32
+        timeframe:
+          type: string
+        direction:
+          type: string
+        strategy_version:
+          type: string
+        algorithm_version:
+          type: string
+        as_of:
+          type: string
+          format: date-time
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceStep"
+    EvidenceStep:
+      type: object
+      required: [kind, section, result]
+      properties:
+        kind:
+          type: string
+          enum: [swing, sweep, break, premium_discount, structural_liquidity, qmr, poi, plan]
+        role:
+          type: string
+          description: Tells two steps of the same kind apart (swept, protected).
+        section:
+          type: string
+          description: The strategy spec section the step comes from.
+        result:
+          type: string
+          enum: [met, not_met, unevaluable]
+        reason:
+          type: string
+          description: A code for a not_met or unevaluable result.
+        candles:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceCandle"
+        levels:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceLevel"
+        attrs:
+          type: object
+          additionalProperties:
+            type: string
+    EvidenceCandle:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+        open_time:
+          type: string
+          format: date-time
+          nullable: true
+        candle_id:
+          type: integer
+          format: int64
+        revision:
+          type: integer
+          format: int32
+    EvidenceLevel:
+      type: object
+      required: [name, price]
+      properties:
+        name:
+          type: string
+        price:
+          type: string
+          description: Decimal string at the instrument's price scale.
+        swing_id:
+          type: integer
+          format: int64
+        time:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the level was set (a swing's pivot candle open time).
     SetupEvent:
       type: object
       required:
