@@ -186,7 +186,11 @@ func TestIntegration_ScaleIsImmutable(t *testing.T) {
 // and limit is enforced by the query itself, not by fetching
 // everything and truncating in Go.
 func TestIntegration_ListAllFiltered_KeysetAndLimit(t *testing.T) {
-	db := testDB(t)
+	checkKeysetAndLimit(t, testDB(t))
+}
+
+func checkKeysetAndLimit(t *testing.T, db *sql.DB) {
+	t.Helper()
 	store := NewStore(db)
 	ctx := context.Background()
 
@@ -217,20 +221,59 @@ func TestIntegration_ListAllFiltered_KeysetAndLimit(t *testing.T) {
 	b := insertOne("b")
 	c := insertOne("c")
 
-	firstPage, err := store.ListAllFiltered(ctx, &maxIDBefore, nil, 2)
-	if err != nil {
-		t.Fatalf("ListAllFiltered (first page): %v", err)
+	// Other packages insert instruments into the same database while this
+	// runs (go test runs packages in parallel), and ids come from one
+	// sequence, so foreign rows can sit before, between or after a, b and
+	// c. The test therefore walks the pages from the cursor and checks what
+	// keyset paging guarantees for every row -- at most limit rows a page,
+	// ids strictly increasing, each after its page's cursor, no row on two
+	// pages -- and that its own rows each appear exactly once, in order. It
+	// never asserts which foreign rows exist.
+	own := map[int64]string{a.ID: "a", b.ID: "b", c.ID: "c"}
+	var ownSeen []int64
+	seen := map[int64]bool{}
+	cursor := maxIDBefore
+	for page := 0; len(ownSeen) < 3; page++ {
+		if page > 10_000 {
+			t.Fatalf("walked %d pages without reaching c(%d)", page, c.ID)
+		}
+		rows, err := store.ListAllFiltered(ctx, &cursor, nil, 2)
+		if err != nil {
+			t.Fatalf("ListAllFiltered (page %d after %d): %v", page, cursor, err)
+		}
+		if len(rows) == 0 {
+			t.Fatalf("pages ended after %d with own rows %v seen, want a(%d), b(%d), c(%d)", cursor, ownSeen, a.ID, b.ID, c.ID)
+		}
+		if len(rows) > 2 {
+			t.Fatalf("page after %d has %d rows, want at most the limit 2", cursor, len(rows))
+		}
+		for _, r := range rows {
+			if r.ID <= cursor {
+				t.Fatalf("page after %d contains id %d, not after the cursor", cursor, r.ID)
+			}
+			if seen[r.ID] {
+				t.Fatalf("id %d returned on two pages", r.ID)
+			}
+			seen[r.ID] = true
+			cursor = r.ID
+			if _, ok := own[r.ID]; ok {
+				ownSeen = append(ownSeen, r.ID)
+			}
+		}
 	}
-	if len(firstPage) != 2 || firstPage[0].ID != a.ID || firstPage[1].ID != b.ID {
-		t.Fatalf("firstPage = %+v, want exactly [a(%d), b(%d)]", firstPage, a.ID, b.ID)
+	if ownSeen[0] != a.ID || ownSeen[1] != b.ID || ownSeen[2] != c.ID {
+		t.Fatalf("own rows in page order = %v, want a(%d), b(%d), c(%d)", ownSeen, a.ID, b.ID, c.ID)
 	}
 
-	secondPage, err := store.ListAllFiltered(ctx, &b.ID, nil, 2)
+	// The limit is honored when more rows exist: from just before a, at
+	// least a, b and c follow, so the page must hold exactly 2 rows.
+	beforeA := a.ID - 1
+	limited, err := store.ListAllFiltered(ctx, &beforeA, nil, 2)
 	if err != nil {
-		t.Fatalf("ListAllFiltered (second page): %v", err)
+		t.Fatalf("ListAllFiltered (limit): %v", err)
 	}
-	if len(secondPage) != 1 || secondPage[0].ID != c.ID {
-		t.Fatalf("secondPage = %+v, want exactly [c(%d)]", secondPage, c.ID)
+	if len(limited) != 2 || limited[0].ID != a.ID {
+		t.Fatalf("page after a-1 = %d rows starting %v, want 2 rows starting at a(%d)", len(limited), idsOf(limited), a.ID)
 	}
 
 	// A nil cursor is "from the start," not "unlimited" -- with a long-
@@ -264,7 +307,11 @@ func TestIntegration_ListAllFiltered_KeysetAndLimit(t *testing.T) {
 // exercise a database-level fact this package's public surface has no
 // other way to set up.
 func TestIntegration_ListAllFiltered_EnabledFilter(t *testing.T) {
-	db := testDB(t)
+	checkEnabledFilter(t, testDB(t))
+}
+
+func checkEnabledFilter(t *testing.T, db *sql.DB) {
+	t.Helper()
 	store := NewStore(db)
 	ctx := context.Background()
 
@@ -310,16 +357,32 @@ func TestIntegration_ListAllFiltered_EnabledFilter(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListAllFiltered: %v", err)
 			}
-			got := make([]int64, len(rows))
-			for i, r := range rows {
-				got[i] = r.ID
+			// Other packages insert instruments (disabled, the Insert
+			// default) into the same database while this runs, so rows
+			// this test did not create can follow the cursor too -- the CI
+			// flake "got ids [160 162], want [160]". Every row returned must
+			// meet the filter and be in id order after the cursor; of this
+			// test's own two rows, exactly the expected ones are returned.
+			var gotOwn []int64
+			prev := beforeBoth
+			for _, r := range rows {
+				if r.ID <= prev {
+					t.Fatalf("ids not strictly increasing after the cursor: %v", idsOf(rows))
+				}
+				prev = r.ID
+				if c.enabled != nil && r.Enabled != *c.enabled {
+					t.Fatalf("row %d has enabled=%v, filter enabled=%v", r.ID, r.Enabled, *c.enabled)
+				}
+				if r.ID == disabled.ID || r.ID == enabled.ID {
+					gotOwn = append(gotOwn, r.ID)
+				}
 			}
-			if len(got) != len(c.want) {
-				t.Fatalf("got ids %v, want %v", got, c.want)
+			if len(gotOwn) != len(c.want) {
+				t.Fatalf("own ids returned %v, want %v", gotOwn, c.want)
 			}
 			for i, id := range c.want {
-				if got[i] != id {
-					t.Fatalf("got ids %v, want %v", got, c.want)
+				if gotOwn[i] != id {
+					t.Fatalf("own ids returned %v, want %v", gotOwn, c.want)
 				}
 			}
 		})
@@ -333,4 +396,12 @@ func TestIntegration_GetByProviderAndSymbol_NotFound(t *testing.T) {
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
+}
+
+func idsOf(rows []Instrument) []int64 {
+	out := make([]int64, len(rows))
+	for i, r := range rows {
+		out[i] = r.ID
+	}
+	return out
 }
