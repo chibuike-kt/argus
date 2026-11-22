@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { useCallback } from "react";
 import { getSetup, getSetupEvidence, listSetups } from "@/api/setups";
 import { listInstruments } from "@/api/instruments";
+import { useWatchlistStore } from "@/lib/watchlist-store";
 import type { ApiCandle, ApiInstrument, ApiInstrumentStats, ApiSetup, ApiSetupEvent, ApiSetupEvidence } from "@/api/types";
 import { toInstrumentStats, useLiveStat, type LiveStatsEntry, type LiveStatsSnapshot } from "@/lib/live-stats";
 import { listSetupEvents } from "@/api/setups";
@@ -192,10 +193,13 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     }
   }, [staleSavedId, prefsSynced, fallbackInstrumentId]);
 
-  // 1. Instruments, once.
+  // 1. Instruments: once, and again (quietly, no loading state) after each
+  // watchlist add, which may have enabled an instrument this list did not
+  // have (D15.1), so selecting the new row finds it.
+  const watchlistVersion = useWatchlistStore().version;
   useEffect(() => {
     const controller = new AbortController();
-    setInstrumentsLoading(true);
+    if (watchlistVersion === 0) setInstrumentsLoading(true);
     listInstruments({ signal: controller.signal })
       .then((data) => {
         if (!controller.signal.aborted) setInstruments(data);
@@ -209,7 +213,7 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
         if (!controller.signal.aborted) setInstrumentsLoading(false);
       });
     return () => controller.abort();
-  }, []);
+  }, [watchlistVersion]);
 
   // 2. The selected setup: from the URL if given, otherwise the first
   // instrument's own most-recently-updated setup (GET /setups already

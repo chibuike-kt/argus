@@ -189,6 +189,20 @@ class LiveStatsStore {
     };
   }
 
+  // refresh forgets what is held for ids and asks again: one REST read and
+  // the stats subscription sent again. For an instrument that has just been
+  // enabled (a watchlist add, D15.1): its row appeared before the server
+  // enabled it, so the first read and the subscription both refused it.
+  refresh(ids: readonly number[]): void {
+    let held = false;
+    for (const id of ids) {
+      if (this.entries.delete(id)) held = true;
+    }
+    if (!held) return;
+    this.streamed = [];
+    this.queueSync();
+  }
+
   private queueSync(): void {
     if (this.syncQueued) return;
     this.syncQueued = true;
@@ -386,6 +400,12 @@ function getStore(): LiveStatsStore {
 export function resetLiveStatsForTests(): void {
   store?.dispose();
   store = null;
+}
+
+// refreshLiveStats re-reads ids and subscribes to them again (see
+// LiveStatsStore.refresh); a no-op for ids nothing holds.
+export function refreshLiveStats(ids: readonly number[]): void {
+  store?.refresh(ids);
 }
 
 // useLiveStats holds live figures for ids while the component is mounted

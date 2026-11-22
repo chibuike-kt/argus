@@ -17,6 +17,8 @@
 import { useSyncExternalStore } from "react";
 import { getWatchlist } from "@/api/auth";
 import { ApiClientError, apiBaseUrl, deleteRequest } from "@/api/client";
+import { addWatchlistItem, reorderWatchlist } from "@/api/watchlist";
+import { refreshLiveStats } from "./live-stats";
 
 // [U] display value: how long the undo toast stays (owner: "about 5 seconds").
 export const UNDO_WINDOW_MS = 5_000;
@@ -31,8 +33,16 @@ export interface WatchlistSnapshot {
   // fails comes back in its old place: the full list is kept, only
   // filtered by these.
   pending: number[];
-  // A removal the server refused, for the message; cleared on dismiss.
-  failure: { id: number; message: string } | null;
+  // The last failed change, kept until dismissed. action says which: a
+  // remove (the row came back), an add (the row was taken out again) or a
+  // reorder (the order was restored or reloaded). code is the server's
+  // error code when there is one (watchlist_full, tracked_cap_reached, ...).
+  failure: { id: number; message: string; action?: "remove" | "add" | "reorder"; code?: string } | null;
+  // Adds still waiting for the server (their rows are already shown).
+  adding: number[];
+  // Bumped after every add the server confirmed, so pages that cache the
+  // enabled instrument list can re-read it (an add may enable one, D15.1).
+  version: number;
 }
 
 type Listener = () => void;
@@ -45,7 +55,9 @@ class WatchlistStore {
   private pending = new Map<number, ReturnType<typeof setTimeout>>();
   private failure: WatchlistSnapshot["failure"] = null;
   private listeners = new Set<Listener>();
-  private snapshot: WatchlistSnapshot = { ids: undefined, loading: false, error: undefined, pending: [], failure: null };
+  private adding = new Set<number>();
+  private version = 0;
+  private snapshot: WatchlistSnapshot = { ids: undefined, loading: false, error: undefined, pending: [], failure: null, adding: [], version: 0 };
   private onPageHide = () => this.flushAll(true);
 
   subscribe = (l: Listener): (() => void) => {
@@ -94,6 +106,69 @@ class WatchlistStore {
     this.emit();
   }
 
+  // add appends id at once (optimistic) and asks the server; on failure
+  // only this row is taken out again, so a change made meanwhile stays.
+  // Adding a row still in its removal undo window is the undo.
+  async add(id: number): Promise<boolean> {
+    if (!this.all) return false;
+    if (this.pending.has(id)) {
+      this.undo(id);
+      return true;
+    }
+    if (this.all.includes(id) || this.adding.has(id)) return true;
+    this.adding.add(id);
+    this.all = [...this.all, id];
+    this.failure = null;
+    this.emit();
+    try {
+      const items = await addWatchlistItem(id);
+      this.all = items.map((i) => i.instrument_id);
+      this.version++;
+      // The row showed before the server enabled the instrument; its live
+      // figures were refused then, so ask again now.
+      refreshLiveStats([id]);
+      return true;
+    } catch (err: unknown) {
+      if (this.all) this.all = this.all.filter((x) => x !== id);
+      this.failure = { id, message: errorMessage(err), action: "add", code: err instanceof ApiClientError ? err.code : undefined };
+      return false;
+    } finally {
+      this.adding.delete(id);
+      this.emit();
+    }
+  }
+
+  // reorder shows the new order at once and saves it. Rows in their
+  // removal undo window are still on the server's list, so they are sent
+  // at the end. A refusal because the list changed elsewhere (409
+  // watchlist_changed) reloads the server's list; any other failure puts
+  // the previous order back.
+  async reorder(visible: number[]): Promise<boolean> {
+    if (!this.all) return false;
+    const before = this.all;
+    const pendingIds = before.filter((id) => this.pending.has(id));
+    const next = [...visible, ...pendingIds];
+    this.all = next;
+    this.failure = null;
+    this.emit();
+    try {
+      const items = await reorderWatchlist(next);
+      this.all = items.map((i) => i.instrument_id);
+      this.emit();
+      return true;
+    } catch (err: unknown) {
+      const code = err instanceof ApiClientError ? err.code : undefined;
+      this.failure = { id: visible[0] ?? 0, message: errorMessage(err), action: "reorder", code };
+      if (code === "watchlist_changed") {
+        await this.load();
+      } else {
+        this.all = before;
+        this.emit();
+      }
+      return false;
+    }
+  }
+
   dismissFailure(): void {
     this.failure = null;
     this.emit();
@@ -120,8 +195,7 @@ class WatchlistStore {
       if (this.all) this.all = this.all.filter((x) => x !== id);
     } catch (err: unknown) {
       this.pending.delete(id);
-      const message = err instanceof Error ? err.message : String(err);
-      this.failure = { id, message };
+      this.failure = { id, message: errorMessage(err), action: "remove" };
     }
     this.emit();
   }
@@ -133,7 +207,15 @@ class WatchlistStore {
   private emit(): void {
     const ids = this.all?.filter((id) => !this.pending.has(id));
     const pending = [...this.pending.keys()];
-    this.snapshot = { ids, loading: this.loading, error: this.error, pending, failure: this.failure };
+    this.snapshot = {
+      ids,
+      loading: this.loading,
+      error: this.error,
+      pending,
+      failure: this.failure,
+      adding: [...this.adding],
+      version: this.version,
+    };
     for (const l of this.listeners) l();
   }
 }
@@ -153,4 +235,8 @@ export function resetWatchlistStoreForTests(): void {
 export function useWatchlistStore(): WatchlistSnapshot {
   const s = getWatchlistStore();
   return useSyncExternalStore(s.subscribe, s.getSnapshot, s.getSnapshot);
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

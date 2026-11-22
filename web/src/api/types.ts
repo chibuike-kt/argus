@@ -333,3 +333,33 @@ export interface ApiActivityPage {
   items: ApiActivityItem[];
   next_cursor: string | null;
 }
+
+// ---- Phase 4.1a: watchlist add, tracking ----
+
+export type ApiTrackingState =
+  | "waiting"
+  | "loading_history"
+  | "live"
+  | "retrying"
+  | "failed"
+  | "needs_attention"
+  | "stopped";
+
+export interface ApiWatchlistItemTracking {
+  instrument_id: number;
+  // Within the system cap and being ingested (or about to be).
+  tracked: boolean;
+  state?: ApiTrackingState | null;
+  reason?: string | null;
+  attempt?: number | null;
+  updated_at?: string | null;
+}
+
+export interface ApiWatchlistTracking {
+  // Whether adding a disabled perpetual enables it here (D15.1: never in production).
+  can_enable: boolean;
+  // The system cap of distinct tracked symbols (D15.3).
+  cap: number;
+  tracked_instrument_ids: number[];
+  items: ApiWatchlistItemTracking[];
+}
