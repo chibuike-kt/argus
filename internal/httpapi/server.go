@@ -14,6 +14,7 @@ import (
 
 	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/config"
+	"github.com/chibuike-kt/argus/internal/engineview"
 	"github.com/chibuike-kt/argus/internal/hub"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/marketdata"
@@ -160,6 +161,8 @@ func NewRouter(d Deps) http.Handler {
 			api := &apiHandler{
 				store:        setupStore,
 				evidence:     setupStore,
+				engineView:   engineview.NewStore(d.DB),
+				clk:          clk,
 				instruments:  instruments.NewStore(d.DB),
 				candles:      candleStore,
 				stats:        candleStore,

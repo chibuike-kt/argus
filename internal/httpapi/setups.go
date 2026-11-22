@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/chibuike-kt/argus/internal/clock"
 	"github.com/chibuike-kt/argus/internal/config"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/quant"
@@ -76,6 +77,8 @@ var _ setupsStore = (*setups.Store)(nil)
 type apiHandler struct {
 	store        setupsStore
 	evidence     setupEvidenceStore // nil: no lifecycle or evidence fields (tests that do not need them)
+	engineView   engineViewStore    // structure window, engine status, activity (Phase 6.2, 6.5)
+	clk          clock.Clock        // nil: clock.Real
 	instruments  instrumentsStore
 	candles      candlesStore
 	stats        instrumentStatsStore
