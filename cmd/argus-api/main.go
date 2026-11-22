@@ -89,18 +89,21 @@ func main() {
 	liveHub.EnableStats(candlesStore)
 
 	handler := httpapi.NewRouter(httpapi.Deps{
-		Logger:       logger,
-		DB:           db,
-		Redis:        rdb,
-		Auth:         authSvc,
-		Watchlist:    watchlistStore,
-		Sessions:     sessions,
-		Users:        users,
-		AuthPolicy:   cfg.Auth,
-		Live:         cfg.Live,
-		Hub:          liveHub,
-		IsProduction: cfg.IsProduction(),
-		Clock:        clk,
+		Logger:        logger,
+		DB:            db,
+		Redis:         rdb,
+		Auth:          authSvc,
+		Watchlist:     watchlistStore,
+		Sessions:      sessions,
+		Users:         users,
+		AuthPolicy:    cfg.Auth,
+		Live:          cfg.Live,
+		Hub:           liveHub,
+		IsProduction:  cfg.IsProduction(),
+		TrackingFloor: cfg.Hyperliquid.Symbols,
+		TrackedCap:    cfg.Hyperliquid.MaxTrackedSymbols,
+		Environment:   cfg.Env,
+		Clock:         clk,
 	})
 	srv := httpapi.NewServer(":"+cfg.HTTPPort, handler, cfg.HTTPReadTimeout, 30*time.Second)
 

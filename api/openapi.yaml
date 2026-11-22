@@ -959,6 +959,106 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /watchlist/items:
+    post:
+      operationId: addWatchlistItem
+      summary: >
+        Adds one instrument at the end of the authenticated user's own
+        watchlist (D4; Phase 4.1a, D15). Idempotent: an instrument already
+        on the list changes nothing and returns the list. Ownership comes
+        only from the session. Limits: 50 items per user (ADR-015), and the
+        system cap of distinct tracked Hyperliquid symbols (D15.3, 8) --
+        an add that would track a new symbol beyond it is refused with
+        tracked_cap_reached. Outside production only, adding a disabled
+        Hyperliquid perpetual enables it, with an audit record (D15.1); in
+        production a disabled instrument is refused with
+        instrument_not_enabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WatchlistAddRequest"
+      responses:
+        "200":
+          description: OK, the whole list in order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WatchlistItem"
+        "400":
+          description: Bad Request (invalid id, or instrument_not_enabled)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No such instrument
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: watchlist_full (50 items) or tracked_cap_reached (the system cap)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /watchlist/order:
+    put:
+      operationId: reorderWatchlist
+      summary: >
+        Sets the order of the authenticated user's own watchlist (D4). The
+        ids must be exactly the current list, each once; if another tab
+        added or removed one meanwhile the request is refused with 409
+        watchlist_changed and nothing changes, so a reorder never undoes
+        a concurrent add or remove.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WatchlistUpdateRequest"
+      responses:
+        "200":
+          description: OK, the whole list in its new order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WatchlistItem"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: watchlist_changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /watchlist/tracking:
+    get:
+      operationId: getWatchlistTracking
+      summary: >
+        How ARGUS is tracking the authenticated user's watchlist (Phase
+        4.1a): each item's ingestion state as the worker last recorded it
+        (waiting, loading_history, live, retrying, failed,
+        needs_attention, stopped; absent before the worker has seen it),
+        and the system cap of distinct tracked symbols with the ids
+        tracked now, so a client can tell which adds the cap would refuse.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchlistTracking"
   /watchlist/items/{instrument_id}:
     delete:
       operationId: removeWatchlistItem
@@ -2020,6 +2120,59 @@ components:
           nullable: true
           description: live, replay or unknown (the setup's found_mode).
         gap_end:
+          type: string
+          format: date-time
+          nullable: true
+    WatchlistAddRequest:
+      type: object
+      required: [instrument_id]
+      properties:
+        instrument_id:
+          type: integer
+          format: int64
+    WatchlistTracking:
+      type: object
+      required: [cap, tracked_instrument_ids, items, can_enable]
+      properties:
+        can_enable:
+          type: boolean
+          description: "Whether adding a disabled Hyperliquid perpetual enables it here (D15.1, never in production)."
+        cap:
+          type: integer
+          format: int32
+          description: The system cap of distinct tracked Hyperliquid symbols (D15.3).
+        tracked_instrument_ids:
+          type: array
+          description: The instruments tracked now, in cap order (the configured floor first).
+          items:
+            type: integer
+            format: int64
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WatchlistItemTracking"
+    WatchlistItemTracking:
+      type: object
+      required: [instrument_id, tracked]
+      properties:
+        instrument_id:
+          type: integer
+          format: int64
+        tracked:
+          type: boolean
+          description: Within the cap and being ingested (or about to be).
+        state:
+          type: string
+          nullable: true
+          description: waiting, loading_history, live, retrying, failed, needs_attention or stopped; null before the worker has recorded one.
+        reason:
+          type: string
+          nullable: true
+        attempt:
+          type: integer
+          format: int32
+          nullable: true
+        updated_at:
           type: string
           format: date-time
           nullable: true

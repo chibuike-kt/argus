@@ -75,19 +75,23 @@ var _ setupsStore = (*setups.Store)(nil)
 // does not need store; it lives here rather than as a second struct so
 // one generated router can be mounted with one implementation.
 type apiHandler struct {
-	store        setupsStore
-	evidence     setupEvidenceStore // nil: no lifecycle or evidence fields (tests that do not need them)
-	engineView   engineViewStore    // structure window, engine status, activity (Phase 6.2, 6.5)
-	clk          clock.Clock        // nil: clock.Real
-	instruments  instrumentsStore
-	candles      candlesStore
-	stats        instrumentStatsStore
-	prefs        preferencesStore
-	auth         authService
-	watchlist    watchlistStore
-	authPolicy   config.AuthPolicy
-	isProduction bool
-	logger       *slog.Logger
+	store         setupsStore
+	evidence      setupEvidenceStore // nil: no lifecycle or evidence fields (tests that do not need them)
+	engineView    engineViewStore    // structure window, engine status, activity (Phase 6.2, 6.5)
+	clk           clock.Clock        // nil: clock.Real
+	tracking      trackingStore      // nil: GET /watchlist/tracking reports no states
+	trackingFloor []string
+	trackedCap    int
+	environment   string
+	instruments   instrumentsStore
+	candles       candlesStore
+	stats         instrumentStatsStore
+	prefs         preferencesStore
+	auth          authService
+	watchlist     watchlistStore
+	authPolicy    config.AuthPolicy
+	isProduction  bool
+	logger        *slog.Logger
 }
 
 func (h *apiHandler) Ping(_ context.Context, _ PingRequestObject) (PingResponseObject, error) {
