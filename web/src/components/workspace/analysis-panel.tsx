@@ -20,6 +20,10 @@ import { useNow } from "@/lib/use-now";
 import { useAnalysisWorkspace } from "./analysis-workspace";
 import { SetupPanel } from "./setup-panel";
 import { BiasGauge } from "./bias-gauge";
+import { SetupStateBadge } from "@/components/ui/setup-state-badge";
+import { mapApiState } from "@/api/mappers";
+import { utcTime } from "@/components/chart/setup-layers";
+import { EngineStatusLine, ActivityFeed } from "./engine-activity";
 
 // %-over-timeframe tiles (real-panel-data brief rule 4, unchanged by D3),
 // every value from GET /instruments/stats via the page's one stats
@@ -81,10 +85,27 @@ function BiasLine() {
   const direction = setup.direction === "bearish" ? "bearish" : "bullish";
   const targets = setup.plan_snapshot.targets;
   const rr = targets.length > 0 ? parseRatString(targets[targets.length - 1].rr) : 1;
+  // State first (owner requirement f): an invalidated setup is not a live
+  // bias, so it never shows the gauge as if it were.
+  if (setup.state === "invalidated") {
+    return (
+      <div className="rounded-lg border border-down/30 bg-down/5 px-3 py-2 text-[12px]" data-testid="bias-invalidated">
+        <div className="font-semibold text-down">Invalidated setup</div>
+        <p className="mt-0.5 text-fg-muted">
+          Setup #{setup.id} was {direction}
+          {setup.invalidated_at ? `, until a candle closed through its stop at ${utcTime(setup.invalidated_at)}` : ""}. It is not a live
+          bias.
+        </p>
+      </div>
+    );
+  }
   return (
-    <div className="flex items-start gap-2.5">
+    <div className="flex items-start gap-2.5" data-testid="bias-line">
       <ProvenanceChip p="S" className="mt-0.5" />
       <div className="flex-1">
+        <div className="mb-1 flex justify-center">
+          <SetupStateBadge state={mapApiState(setup.state)} />
+        </div>
         <BiasGauge direction={direction} rr={rr} />
         <p className="-mt-1 text-center text-[11px] text-fg-subtle">
           Derived from the selected setup's direction and R:R, not market-wide sentiment
@@ -202,6 +223,7 @@ function ReviewControls() {
 export function AnalysisPanel() {
   return (
     <div className="space-y-4">
+      <EngineStatusLine />
       <BiasLine />
       <PerformanceTiles />
       <div className="border-t border-line pt-4">
@@ -211,6 +233,9 @@ export function AnalysisPanel() {
         <DataQualityRow />
       </div>
       <ReviewControls />
+      <div className="border-t border-line pt-4">
+        <ActivityFeed />
+      </div>
     </div>
   );
 }

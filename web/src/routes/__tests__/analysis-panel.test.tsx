@@ -205,6 +205,16 @@ function installFetchMock(opts: {
         ? Promise.resolve(jsonResponse(setup))
         : Promise.resolve(jsonResponse({ error: { code: "not_found", message: "not found" } }, 404));
     }
+    const evidenceMatch = /^\/api\/v1\/setups\/(\d+)\/evidence$/.exec(url.pathname);
+    if (evidenceMatch) {
+      return Promise.resolve(jsonResponse({ setup_id: Number(evidenceMatch[1]), recorded: false }));
+    }
+    if (url.pathname === "/api/v1/engine/status") {
+      return Promise.resolve(jsonResponse({ as_of: "2026-11-22T01:47:00Z", instruments: [] }));
+    }
+    if (url.pathname === "/api/v1/activity") {
+      return Promise.resolve(jsonResponse({ items: [], next_cursor: null }));
+    }
     const eventsMatch = /^\/api\/v1\/setups\/(\d+)\/events$/.exec(url.pathname);
     if (eventsMatch) {
       const id = Number(eventsMatch[1]);
@@ -287,9 +297,11 @@ describe("/analysis right panel", () => {
     installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
     renderAnalysisRightPanel("/analysis?setupId=1");
 
-    expect(await screen.findByText("The active plan")).toBeInTheDocument();
-    expect(screen.getByText("90")).toBeInTheDocument(); // Entry, decimal-string-derived
-    expect(screen.getByText("88")).toBeInTheDocument(); // Stop
+    expect(await screen.findByText("The plan")).toBeInTheDocument();
+    // Entry and stop are the server's exact decimal strings, never a
+    // number the browser rounded.
+    expect(screen.getAllByText("90.00").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("88.00").length).toBeGreaterThan(0);
     expect(await screen.findByText("Detected")).toBeInTheDocument(); // evidence item label
   });
 
@@ -305,13 +317,13 @@ describe("/analysis right panel", () => {
     });
 
     const first = renderAnalysisRightPanel("/analysis?setupId=1");
-    expect(await screen.findByText("90")).toBeInTheDocument();
+    expect((await screen.findAllByText("90.00")).length).toBeGreaterThan(0);
     first.unmount();
     cleanup();
 
     renderAnalysisRightPanel("/analysis?setupId=2");
-    expect(await screen.findByText("150")).toBeInTheDocument();
-    expect(screen.queryByText("90")).toBeNull();
+    expect((await screen.findAllByText("150.00")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("90.00")).toBeNull();
   });
 
   // Phase 2 (D2): mock mode is gone. Setting VITE_USE_FIXTURES changes
@@ -325,11 +337,32 @@ describe("/analysis right panel", () => {
     expect(screen.queryByText(/0\.53|2\.84|4\.12/)).toBeNull();
   });
 
+  // Owner requirement f: the gauge never shows an invalidated setup as a
+  // live bias; the state comes first.
+  it("an invalidated setup shows its state first and no live bias gauge", async () => {
+    const setup = makeApiSetup({ id: 1, state: "invalidated", invalidated_at: "2026-11-22T00:20:00Z" } as Partial<import("@/api/types").ApiSetup>);
+    installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
+    renderAnalysisRightPanel("/analysis?setupId=1");
+    expect(await screen.findByTestId("bias-invalidated")).toHaveTextContent("It is not a live bias");
+    expect(screen.queryByTestId("bias-line")).toBeNull();
+    expect(await screen.findByTestId("invalidated-at")).toHaveTextContent("Invalidated 2026-11-22 00:20 UTC: no longer live.");
+    expect(await screen.findByTestId("evidence-not-recorded")).toHaveTextContent("Evidence not recorded for this setup.");
+  });
+
+  it("a live setup shows its state above the gauge", async () => {
+    const setup = makeApiSetup({ id: 1, state: "triggered" });
+    installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
+    renderAnalysisRightPanel("/analysis?setupId=1");
+    const line = await screen.findByTestId("bias-line");
+    expect(line).toHaveTextContent("Triggered");
+    expect(screen.queryByTestId("bias-invalidated")).toBeNull();
+  });
+
   it("real instrument: performance, data quality and no Sample marker anywhere in the panel", async () => {
     const setup = makeApiSetup({ id: 1 });
     installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
     renderAnalysisRightPanel("/analysis?setupId=1");
-    await screen.findByText("The active plan");
+    await screen.findByText("The plan");
     // Wait for values that exist only once the stats response has
     // arrived. Both read the same stats row through the workspace
     // context, but each is waited for explicitly.
@@ -382,7 +415,7 @@ describe("/analysis right panel", () => {
     const setup = makeApiSetup({ id: 1 });
     installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) }, stats: shortHistoryStats });
     renderAnalysisRightPanel("/analysis?setupId=1");
-    await screen.findByText("The active plan");
+    await screen.findByText("The plan");
     // Proof the response has arrived: finalized-through shows a real
     // time (it is an em dash before load). Only then are the tiles'
     // em dashes the server's "absent", not the loading state.
@@ -434,18 +467,21 @@ describe("/analysis right panel", () => {
     const setup = makeApiSetup({ id: 1 });
     installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
     renderAnalysisRightPanel("/analysis?setupId=1");
-    await screen.findByText("The active plan");
+    await screen.findByText("The plan");
     // Performance tiles and the data-quality row are real now (GET
     // /instruments/stats); see the "no Sample marker anywhere" test
     // above. This one asserts the plan card/evidence specifically.
-    expect(screen.queryByText(/90\.00|88\.00/)).toBeNull(); // no raw unscaled fixture-style numbers leaking through
+    // The plan shows the stored decimal strings as sent, and no sample
+    // value: nothing but the API's own fields.
+    expect(screen.getAllByText("90.00").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Sample/i)).toBeNull();
   });
 
   it("never renders the fixture toast feed when real data is active (Part 1 regression)", async () => {
     const setup = makeApiSetup({ id: 1 });
     installFetchMock({ setupsById: { 1: setup }, eventsBySetupId: { 1: makeEvents(1) } });
     renderAnalysisRightPanel("/analysis?setupId=1");
-    await screen.findByText("The active plan");
+    await screen.findByText("The plan");
     // Give the toast feed's own 500ms mount-delay timer a chance to
     // fire if it were going to (it should not, with fixtures disabled).
     await new Promise((resolve) => setTimeout(resolve, 600));

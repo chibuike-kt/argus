@@ -1,3 +1,4 @@
+import { formatRR } from "@/api/money";
 import { Link } from "react-router-dom";
 import { CaretDown, CaretRight } from "@phosphor-icons/react";
 import { Panel } from "@/components/ui/panel";
@@ -8,8 +9,9 @@ import { toSetupSummary } from "@/api/mappers";
 import { cn } from "@/lib/cn";
 import { preferences, usePreferences } from "@/lib/preferences";
 import { useAnalysisWorkspace } from "./analysis-workspace";
+import { FoundModeChip } from "./setup-panel";
 
-const COLS = "grid grid-cols-[1.6fr_0.8fr_1fr_0.6fr_0.9fr_0.6fr_0.3fr] items-center gap-3";
+const COLS = "grid grid-cols-[1.4fr_0.8fr_1fr_0.6fr_1.4fr_0.6fr_0.3fr] items-center gap-3";
 const MAX_ROWS = 6;
 const OPEN_STORAGE_KEY = "argus:other-setups-open";
 
@@ -120,9 +122,10 @@ export function OtherSetupsStrip() {
                       </Pill>
                     </span>
                     <span className="tnum text-right">{n(s.entry)}</span>
-                    <span className="tnum text-right font-medium text-fg">{s.rr.toFixed(1)}</span>
-                    <span>
+                    <span className="tnum text-right font-medium text-fg">{formatRR(s.rr)}</span>
+                    <span className="flex items-center gap-1">
                       <SetupStateBadge state={s.state} />
+                      {api && <FoundModeChip mode={api.found_mode} className="px-1.5 text-[10px]" />}
                     </span>
                     <span className="tnum text-right text-fg-subtle">{age(s.createdAt)}</span>
                     <CaretRight className="size-3.5 justify-self-end text-fg-subtle" />

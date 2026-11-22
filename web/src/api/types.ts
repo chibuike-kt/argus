@@ -160,7 +160,7 @@ export interface ApiPlanSnapshot {
 
 export type ApiSetupState = "detected" | "actionable" | "triggered" | "invalidated";
 
-export interface ApiSetup {
+export interface ApiSetup extends ApiSetupLifecycle {
   id: number;
   instrument_id: number;
   timeframe: string;
@@ -190,4 +190,146 @@ export interface ApiSetupEvent {
   evaluation_time: string;
   algorithm_version: string;
   created_at: string;
+}
+
+// ---- Phase 6: lifecycle, evidence, structure, engine status, activity ----
+
+export type ApiFoundMode = "live" | "replay" | "unknown";
+
+export interface ApiSetupLifecycle {
+  // How the setup was found (Phase 6.1): live, replay, or unknown for a
+  // setup created before it was recorded.
+  found_mode?: ApiFoundMode;
+  evidence_recorded?: boolean;
+  // Evaluation times of its detected, triggered and invalidated events;
+  // null when that event never happened.
+  detected_at?: string | null;
+  triggered_at?: string | null;
+  invalidated_at?: string | null;
+  // Only with include_evidence=true.
+  evidence?: ApiSetupEvidence | null;
+}
+
+export interface ApiEvidenceCandle {
+  role: string;
+  open_time?: string | null;
+  candle_id?: number;
+  revision?: number;
+}
+
+export interface ApiEvidenceLevel {
+  name: string;
+  price: string;
+  swing_id?: number;
+  time?: string | null;
+}
+
+export type ApiEvidenceKind =
+  | "swing"
+  | "sweep"
+  | "break"
+  | "premium_discount"
+  | "structural_liquidity"
+  | "qmr"
+  | "poi"
+  | "plan";
+
+export interface ApiEvidenceStep {
+  kind: ApiEvidenceKind;
+  role?: string;
+  section: string;
+  result: "met" | "not_met" | "unevaluable";
+  reason?: string;
+  candles?: ApiEvidenceCandle[];
+  levels?: ApiEvidenceLevel[];
+  attrs?: Record<string, string>;
+}
+
+export interface ApiSetupEvidence {
+  setup_id: number;
+  // False: "evidence not recorded for this setup" (created before it was).
+  recorded: boolean;
+  event_type?: string;
+  evaluation_time?: string;
+  schema?: number;
+  timeframe?: string;
+  direction?: string;
+  strategy_version?: string;
+  algorithm_version?: string;
+  as_of?: string;
+  steps?: ApiEvidenceStep[];
+}
+
+export interface ApiStructureLevel {
+  swing_id: number;
+  price: string;
+  time: string;
+}
+
+export interface ApiStructureWindow {
+  instrument_id: number;
+  timeframe: string;
+  from: string;
+  to: string;
+  swings: { id: number; swing_type: "high" | "low"; pivot_time: string; price: string; confirmed_at: string }[];
+  breaks: {
+    id: number;
+    event_type: "direction_established" | "bos" | "choch";
+    direction_before: string;
+    direction_after: string;
+    trigger_open_time: string;
+    sweep_validated: boolean;
+    sweep_id?: number | null;
+    protected_swing_id?: number | null;
+    broken_swing?: ApiStructureLevel | null;
+  }[];
+  sweeps: {
+    id: number;
+    side: "buy" | "sell";
+    trigger_open_time: string;
+    penetration_extreme: string;
+    reclaim_close: string;
+    swept_swing: ApiStructureLevel;
+  }[];
+  next_from: string | null;
+}
+
+export interface ApiEngineInstrumentStatus {
+  instrument_id: number;
+  native_symbol: string;
+  provider: string;
+  analysed: boolean;
+  timeframe?: string | null;
+  evaluated_through: string | null;
+  last_evaluated_at: string | null;
+  latest_closed_close_time: string | null;
+  behind_seconds: number | null;
+  closed_candles_behind: number;
+}
+
+export interface ApiEngineStatus {
+  as_of: string;
+  instruments: ApiEngineInstrumentStatus[];
+}
+
+export type ApiActivityKind = "setup" | "structure" | "gap";
+
+export interface ApiActivityItem {
+  kind: ApiActivityKind;
+  id: number;
+  instrument_id: number;
+  timeframe: string;
+  at: string;
+  event_time: string;
+  detail: string;
+  setup_id?: number | null;
+  direction?: string | null;
+  poi_type?: string | null;
+  found_mode?: string | null;
+  gap_end?: string | null;
+}
+
+export interface ApiActivityPage {
+  items: ApiActivityItem[];
+  next_cursor: string | null;
 }

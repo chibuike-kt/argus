@@ -194,7 +194,7 @@ function toError(resp: Response, body: unknown, options?: RequestOptions): ApiCl
 // letting a hook's own try/catch guess at what went wrong.
 export async function getJSON<T>(
   path: string,
-  params?: Record<string, string | number | undefined>,
+  params?: Record<string, string | number | boolean | readonly (string | number)[] | undefined>,
   options?: GetJSONOptions,
 ): Promise<T> {
   // A plain relative URL string, not `new URL(path, window.location.origin)`:
@@ -204,7 +204,10 @@ export async function getJSON<T>(
   const query = new URLSearchParams();
   if (params) {
     for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined) query.set(key, String(value));
+      if (value === undefined) continue;
+      // An array is sent as the key repeated (OpenAPI form, explode).
+      if (Array.isArray(value)) for (const v of value) query.append(key, String(v));
+      else query.set(key, String(value));
     }
   }
   const queryString = query.toString();

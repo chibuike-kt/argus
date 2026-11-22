@@ -1,8 +1,9 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
-import { getSetup, listSetups } from "@/api/setups";
+import { useCallback } from "react";
+import { getSetup, getSetupEvidence, listSetups } from "@/api/setups";
 import { listInstruments } from "@/api/instruments";
-import type { ApiCandle, ApiInstrument, ApiInstrumentStats, ApiSetup, ApiSetupEvent } from "@/api/types";
+import type { ApiCandle, ApiInstrument, ApiInstrumentStats, ApiSetup, ApiSetupEvent, ApiSetupEvidence } from "@/api/types";
 import { toInstrumentStats, useLiveStat, type LiveStatsEntry, type LiveStatsSnapshot } from "@/lib/live-stats";
 import { listSetupEvents } from "@/api/setups";
 import { ApiClientError } from "@/api/client";
@@ -51,6 +52,23 @@ interface AnalysisWorkspace {
 
   otherSetups: ApiSetup[];
   otherSetupsLoading: boolean;
+
+  // Every setup ARGUS found for the selected instrument (newest updated
+  // first, at most SETUPS_ON_CHART), each with its lifecycle and recorded
+  // evidence (Phase 6): what the chart's setup layers draw.
+  instrumentSetups: ApiSetup[];
+  // The selected setup's recorded evidence: undefined while loading,
+  // recorded false for a setup created before evidence was stored.
+  evidence: ApiSetupEvidence | undefined;
+  // Opens a setup (the URL carries it, so a link to it works).
+  selectSetup: (id: number) => void;
+  // The chart element and the "Why this setup" row that are highlighted
+  // together ("<setupId>:<kind>[:<role>]"); null for none.
+  focusedElement: string | null;
+  setFocusedElement: (id: string | null) => void;
+  // "Play the story": the step drawn up to, null when not playing.
+  storyStep: number | null;
+  setStoryStep: (n: number | null) => void;
 
   candles: ApiCandle[];
   candlesLoading: boolean;
@@ -102,6 +120,19 @@ interface AnalysisWorkspace {
 
 const Ctx = createContext<AnalysisWorkspace | null>(null);
 
+// [U] display values: how many of an instrument's setups the chart draws
+// (the newest updated; the API's own maximum) and how often they are re-read.
+export const SETUPS_ON_CHART = 200;
+export const SETUPS_REFRESH_MS = 30_000;
+
+function resolvedInstrumentIdForSetups(
+  urlInstrumentId: string | null,
+  saved: number | undefined,
+  fallback: number | undefined,
+): number | undefined {
+  return urlInstrumentId ? Number(urlInstrumentId) : (saved ?? fallback);
+}
+
 export function useAnalysisWorkspace(): AnalysisWorkspace {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error("useAnalysisWorkspace must be used within AnalysisWorkspaceProvider");
@@ -109,7 +140,7 @@ export function useAnalysisWorkspace(): AnalysisWorkspace {
 }
 
 export function AnalysisWorkspaceProvider({ children }: { children: ReactNode }) {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const urlSetupId = params.get("setupId");
   const urlInstrumentId = params.get("instrumentId");
 
@@ -299,29 +330,80 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     return () => controller.abort();
   }, [setup]);
 
-  // 4. "Other setups" on the SAME instrument (brief's own scope: "from
-  // the setups list for the same instrument" -- a deliberate change from
-  // the fixture-era strip, which showed other INSTRUMENTS; see the
-  // report).
+  // 4. Every setup of the selected instrument, with its lifecycle and
+  // evidence, for the chart layers and the "other setups" strip; re-read
+  // every SETUPS_REFRESH_MS so a new setup or a state change appears
+  // without a reload (no setup push exists on the socket yet).
+  const [instrumentSetups, setInstrumentSetups] = useState<ApiSetup[]>([]);
+  const layerInstrumentId = setup?.instrument_id ?? resolvedInstrumentIdForSetups(urlInstrumentId, savedInstrumentId, fallbackInstrumentId);
   useEffect(() => {
-    if (!setup) {
-      setOtherSetups([]);
+    if (layerInstrumentId === undefined) {
+      setInstrumentSetups([]);
       return;
     }
     const controller = new AbortController();
-    setOtherSetupsLoading(true);
-    listSetups({ instrumentId: setup.instrument_id }, { signal: controller.signal })
-      .then((data) => {
-        if (!controller.signal.aborted) setOtherSetups(data.filter((s) => s.id !== setup.id));
+    let first = true;
+    const load = () => {
+      if (first) setOtherSetupsLoading(true);
+      listSetups({ instrumentId: layerInstrumentId, includeEvidence: true, limit: SETUPS_ON_CHART }, { signal: controller.signal })
+        .then((data) => {
+          if (!controller.signal.aborted) setInstrumentSetups(data);
+        })
+        .catch(() => {
+          // Keep what is drawn; the next refresh tries again.
+        })
+        .finally(() => {
+          if (!controller.signal.aborted && first) setOtherSetupsLoading(false);
+          first = false;
+        });
+    };
+    setInstrumentSetups([]);
+    load();
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, SETUPS_REFRESH_MS);
+    return () => {
+      controller.abort();
+      clearInterval(id);
+    };
+  }, [layerInstrumentId]);
+
+  useEffect(() => {
+    setOtherSetups(setup ? instrumentSetups.filter((s) => s.id !== setup.id) : instrumentSetups);
+  }, [instrumentSetups, setup]);
+
+  // 4b. The selected setup's evidence: from the list when it is there,
+  // else read on its own (a setup older than the SETUPS_ON_CHART newest).
+  const listed = setup ? instrumentSetups.find((s) => s.id === setup.id) : undefined;
+  const [fetchedEvidence, setFetchedEvidence] = useState<ApiSetupEvidence | undefined>();
+  useEffect(() => {
+    setFetchedEvidence(undefined);
+    if (!setup || listed?.evidence) return;
+    const controller = new AbortController();
+    getSetupEvidence(setup.id, { signal: controller.signal })
+      .then((ev) => {
+        if (!controller.signal.aborted) setFetchedEvidence(ev);
       })
-      .catch(() => {
-        if (!controller.signal.aborted) setOtherSetups([]);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setOtherSetupsLoading(false);
-      });
+      .catch(() => {});
     return () => controller.abort();
-  }, [setup]);
+  }, [setup, listed?.evidence]);
+  const evidence = listed?.evidence ?? fetchedEvidence;
+
+  const [focusedElement, setFocusedElement] = useState<string | null>(null);
+  const [storyStep, setStoryStep] = useState<number | null>(null);
+  useEffect(() => {
+    setFocusedElement(null);
+    setStoryStep(null);
+  }, [setup?.id]);
+  const selectSetup = useCallback(
+    (id: number) => {
+      const next = new URLSearchParams(params);
+      next.set("setupId", String(id));
+      next.delete("instrumentId");
+      setParams(next);
+    },
+    [params, setParams],
+  );
 
   // 5. Chart candles for the selected instrument: history (the most
   // recent MAX_CANDLES, not a window anchored at the setup's own
@@ -363,13 +445,21 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     instrumentsError,
     instrument,
     instrumentNotFound,
-    setup,
+    setup: listed ?? setup,
     setupLoading,
     setupError,
     events,
     eventsLoading,
     otherSetups,
     otherSetupsLoading,
+    // The selected setup as listed (with its lifecycle) when it is there.
+    instrumentSetups,
+    evidence,
+    selectSetup,
+    focusedElement,
+    setFocusedElement,
+    storyStep,
+    setStoryStep,
     candles,
     candlesLoading,
     candlesError,

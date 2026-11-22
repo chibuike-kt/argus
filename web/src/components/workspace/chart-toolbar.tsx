@@ -17,6 +17,7 @@ import {
   EyeSlash,
 } from "@phosphor-icons/react";
 import { preferences, usePreferences } from "@/lib/preferences";
+import { filtersFromPrefs, LAYER_TIMEFRAMES } from "@/components/chart/setup-layers";
 import { IconButton } from "@/components/ui/icon-button";
 import { CoinIcon } from "@/components/ui/coin-icon";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -45,29 +46,86 @@ function ToolbarBtn({ icon, label, text }: { icon: ReactNode; label: string; tex
   );
 }
 
-// SetupsToggle (fix/chart-interaction, item 1) shows or hides every one
-// of ARGUS's own chart layers (the selected setup's zone, its plan lines
-// and their price-axis labels). A saved preference. Hiding is the only
-// way to remove them from view: they are system analysis, never
-// deletable like a user drawing.
-function SetupsToggle() {
-  const visible = usePreferences().analysis_layers_visible !== false;
-  return (
-    <button
-      type="button"
-      data-testid="setups-toggle"
-      aria-pressed={visible}
-      aria-label={visible ? "Hide setup layers" : "Show setup layers"}
-      title={visible ? "Hide ARGUS's setup zone and plan on the chart" : "Show ARGUS's setup zone and plan on the chart"}
-      onClick={() => preferences.set("analysis_layers_visible", !visible)}
-      className={cn(
-        "focus-ring inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] font-medium transition-colors hover:bg-white/5 hover:text-fg [&_svg]:size-4",
-        visible ? "text-fg-muted" : "text-fg-subtle",
-      )}
+// SetupsMenu (Phase 6.3, owner requirement e) shows or hides ARGUS's setup
+// layers and filters them: by state, by the timeframe a setup was found on,
+// "show invalidated" (off by default; drawn dimmed when on) and the selected
+// setup's evidence. Every choice is a saved preference. Hiding and
+// filtering are the only ways to remove them from view: they are system
+// analysis, never movable or deletable like a user drawing.
+const STATE_LABELS: [string, string][] = [
+  ["state_detected", "Detected"],
+  ["state_actionable", "Actionable"],
+  ["state_triggered", "Triggered (still active)"],
+  ["state_invalidated", "Show invalidated (dimmed)"],
+];
+
+function SetupsMenu() {
+  const prefs = usePreferences();
+  const visible = prefs.analysis_layers_visible !== false;
+  const f = filtersFromPrefs(prefs.setup_layers);
+  const on: Record<string, boolean> = {
+    state_detected: f.states.detected,
+    state_actionable: f.states.actionable,
+    state_triggered: f.states.triggered,
+    state_invalidated: f.states.invalidated,
+    evidence: f.evidence,
+    ...Object.fromEntries(LAYER_TIMEFRAMES.map((t) => [`tf_${t}`, f.timeframes[t]])),
+  };
+  const item = (key: string, label: string) => (
+    <DropdownMenu.CheckboxItem
+      key={key}
+      checked={on[key]}
+      data-testid={`layer-${key}`}
+      onSelect={(e) => e.preventDefault()}
+      onCheckedChange={(v) => preferences.setEntry("setup_layers", key, v === true)}
+      className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1 text-[12px] text-fg-muted outline-none data-[highlighted]:bg-white/5 data-[highlighted]:text-fg"
     >
-      {visible ? <Eye /> : <EyeSlash />}
-      <span className={cn("hidden lg:inline", !visible && "line-through")}>Setups</span>
-    </button>
+      <Check className={cn("size-3.5 shrink-0", on[key] ? "opacity-100" : "opacity-0")} />
+      {label}
+    </DropdownMenu.CheckboxItem>
+  );
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          data-testid="setups-toggle"
+          aria-label="Setup layers"
+          title="ARGUS's setup layers: show, hide and filter"
+          className={cn(
+            "focus-ring inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] font-medium transition-colors hover:bg-white/5 hover:text-fg data-[state=open]:bg-white/5 [&_svg]:size-4",
+            visible ? "text-fg-muted" : "text-fg-subtle",
+          )}
+        >
+          {visible ? <Eye /> : <EyeSlash />}
+          <span className={cn("hidden lg:inline", !visible && "line-through")}>Setups</span>
+          <CaretDown className="size-3 text-fg-subtle" />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content align="start" sideOffset={6} className="glass-strong z-[60] min-w-[230px] rounded-lg p-1 shadow-xl">
+          <DropdownMenu.CheckboxItem
+            checked={visible}
+            data-testid="layer-visible"
+            onSelect={(e) => e.preventDefault()}
+            onCheckedChange={(v) => preferences.set("analysis_layers_visible", v === true)}
+            className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] font-medium text-fg outline-none data-[highlighted]:bg-white/5"
+          >
+            <Check className={cn("size-3.5 shrink-0", visible ? "opacity-100" : "opacity-0")} />
+            Show setup layers
+          </DropdownMenu.CheckboxItem>
+          <div className="px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">State</div>
+          {STATE_LABELS.map(([k, l]) => item(k, l))}
+          <div className="px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">Found on</div>
+          {LAYER_TIMEFRAMES.map((t) => item(`tf_${t}`, t))}
+          <div className="px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">Selected setup</div>
+          {item("evidence", "Evidence (swings, sweep, break, range, plan)")}
+          <p className="px-2.5 pb-1 pt-2 text-[10px] leading-snug text-fg-subtle">
+            Outline: solid found live, dashed found in replay, dotted not recorded. The selected setup is always drawn.
+          </p>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
@@ -226,7 +284,7 @@ export function ChartToolbar() {
       <ToolbarBtn icon={<ChartBar />} label="Chart type" />
       <ToolbarBtn icon={<SlidersHorizontal />} label="Indicators" text="Indicators" />
       <ToolbarBtn icon={<Bell />} label="Alert" text="Alert" />
-      <SetupsToggle />
+      <SetupsMenu />
 
       <div className="ml-auto flex items-center gap-1.5">
         <button

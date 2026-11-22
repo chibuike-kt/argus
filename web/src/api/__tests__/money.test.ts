@@ -25,8 +25,11 @@ describe("formatRR", () => {
     expect(formatRR(parseRatString("1/27"))).toBe("0.04R");
   });
 
-  it("keeps one decimal at or above 0.1", () => {
-    expect(formatRR(0.1)).toBe("0.1R");
+  it("keeps two decimals below 1R and one decimal at or above it", () => {
+    expect(formatRR(0.1)).toBe("0.10R");
+    // Close small targets stay distinct (owner decision 3).
+    expect([7, 9, 11].map((n) => formatRR(parseRatString(`${n}/46`)))).toEqual(["0.15R", "0.20R", "0.24R"]);
+    expect(formatRR(parseRatString("1/250"))).toBe("0.004R");
     expect(formatRR(1.5)).toBe("1.5R");
     expect(formatRR(2)).toBe("2.0R");
   });

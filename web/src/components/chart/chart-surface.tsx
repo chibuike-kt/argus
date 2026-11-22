@@ -23,7 +23,7 @@ import { LivePrice } from "@/components/ui/live-price";
 import { liveReason } from "@/lib/figure-reasons";
 import type { LiveStatsSnapshot } from "@/lib/live-stats";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
-import { formatMoney, toPlanOverlay } from "@/api/mappers";
+import { formatMoney } from "@/api/mappers";
 import { useDrawing } from "./drawing-context";
 import type { HistoryBackOutcome, LiveTick } from "@/lib/use-live-candles";
 import type { ConnectionState, WireStatusPayload } from "@/lib/live-socket";
@@ -32,9 +32,11 @@ import { fromSavedView, loadChartView, saveChartView, toSavedView } from "./char
 import { defaultVisibleRange } from "./default-view";
 import { RANGES, describeShown, rangeStartSec, type RangeKey } from "./range-buttons";
 import { INTERVAL_SECONDS, withGapWhitespace } from "./gap-whitespace";
-import { LastPriceLabelPrimitive, SystemAxisLabelsPrimitive, SystemPositionPrimitive, SystemZonePrimitive } from "./system-axis-labels";
-import { systemZoneFor, zoneEndWords, zoneStartWords, poiWords, type SystemZone } from "./system-zone";
-import { cloneDrawing } from "./drawings/types";
+import { LastPriceLabelPrimitive, SystemAxisLabelsPrimitive } from "./system-axis-labels";
+import { buildLayers, filtersFromPrefs, type LayerElement } from "./setup-layers";
+import { SetupLayersPrimitive } from "./setup-layers-primitive";
+import { SetupElementPopover } from "./setup-popover";
+import { cloneDrawing, nextId, type Drawing } from "./drawings/types";
 import { setSeriesTimeAxis } from "./drawings/time-axis";
 import {
   primitiveFor,
@@ -183,9 +185,11 @@ const POI_WORDS: Record<string, string> = { order_block: "order block", qmr: "QM
 
 // analysisLabel says what the system layer is, in one line, from the
 // setup's own recorded fields (no generated prose).
-export function analysisLabel(setup: ApiSetup): string {
+export function analysisLabel(setup: ApiSetup | undefined, drawn: number): string {
+  const count = `${drawn} setup${drawn === 1 ? "" : "s"} drawn`;
+  if (!setup) return `ARGUS analysis · ${count}`;
   const poi = POI_WORDS[setup.poi_type] ?? setup.poi_type.replace(/_/g, " ");
-  return `ARGUS analysis · setup #${setup.id} · ${setup.direction} ${poi} and plan · ${setup.timeframe} · ${setup.state}`;
+  return `ARGUS analysis · ${count} · selected #${setup.id} · ${setup.direction} ${poi} · ${setup.timeframe} · ${setup.state}`;
 }
 
 // AnalysisLayerChip labels ARGUS's own layer and toggles it. It is the
@@ -197,60 +201,11 @@ function AnalysisLayerChip({ layer }: { layer: AnalysisLayer }) {
     <span
       className="flex items-center gap-1 rounded-md border border-[#6d7bff]/40 bg-[#6d7bff]/10 px-1.5 py-0.5 text-[11px] text-fg-muted"
       data-testid="analysis-layer"
-      title="ARGUS's own analysis, drawn from the selected setup. Not a drawing: hide it with Setups in the chart controls; it cannot be deleted. Click the zone for details."
+      title="ARGUS's own analysis: every setup it found on this instrument, and the selected setup's evidence. Not a drawing: filter or hide it with Setups in the chart controls; it cannot be moved or deleted. Click any element for details."
     >
       <span className="size-1.5 rounded-full bg-[#6d7bff]" aria-hidden />
       {layer.label}
     </span>
-  );
-}
-
-// ZonePopover says what ARGUS's zone is, from its stored fields, and that
-// it is not a drawing.
-export function ZonePopover({ zone, x, y, onClose }: { zone: SystemZone; x: number; y: number; onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-  return (
-    <div
-      role="dialog"
-      aria-label={`Setup #${zone.setupId} ${poiWords(zone.poiType)}`}
-      data-testid="zone-popover"
-      className="glass-strong absolute z-30 w-72 rounded-lg p-3 text-[12px] text-fg-muted shadow-lg"
-      style={{ left: x, top: y }}
-    >
-      <div className="mb-1 flex items-center justify-between">
-        <span className="font-semibold text-fg">
-          Setup #{zone.setupId} · {zone.direction} {poiWords(zone.poiType)}
-        </span>
-        <button type="button" onClick={onClose} className="focus-ring rounded px-1 text-fg-subtle hover:text-fg" aria-label="Close">
-          ×
-        </button>
-      </div>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
-        <dt className="text-fg-subtle">Timeframe</dt>
-        <dd data-testid="zone-timeframe">
-          {zone.timeframe}
-          {zone.foreignTimeframe && " (detected there; shown on this chart)"}
-        </dd>
-        <dt className="text-fg-subtle">State</dt>
-        <dd data-testid="zone-state">{zone.state}</dd>
-        <dt className="text-fg-subtle">Zone high</dt>
-        <dd className="tnum" data-testid="zone-high">{zone.highText}</dd>
-        <dt className="text-fg-subtle">Zone low</dt>
-        <dd className="tnum" data-testid="zone-low">{zone.lowText}</dd>
-        <dt className="text-fg-subtle">Drawn</dt>
-        <dd data-testid="zone-span">
-          {zoneStartWords(zone)}, {zoneEndWords(zone)}
-        </dd>
-      </dl>
-      <p className="mt-2 text-[11px] text-fg-subtle">
-        ARGUS analysis, not a drawing: it cannot be deleted. Hide every setup layer with Setups in the chart controls. A zone thinner
-        than a few pixels is drawn at a minimum height; the values above are the stored ones.
-      </p>
-    </div>
   );
 }
 
@@ -289,24 +244,35 @@ export function ChartSurface({ className }: { className?: string }) {
       })),
     [candles],
   );
-  // ARGUS's own layers (fix/chart-interaction, item 1): the selected
-  // setup's zone and plan are system output, not user drawings. They are
-  // labelled on the chart and can be hidden (a saved preference), never
-  // deleted like a drawing.
-  const analysisVisible = usePreferences().analysis_layers_visible !== false;
-  const overlay = useMemo(() => (setup && analysisVisible ? toPlanOverlay(setup) : undefined), [setup, analysisVisible]);
+  // ARGUS's own layers (Phase 6.3): every setup it found for this
+  // instrument, drawn by setup-layers.ts, and the selected one's evidence.
+  // System output, never user drawings: labelled, filterable, hideable (a
+  // saved preference), never movable or deletable.
+  const prefs = usePreferences();
+  const analysisVisible = prefs.analysis_layers_visible !== false;
+  const {
+    timeframe: chartTimeframe,
+    instrumentSetups,
+    focusedElement,
+    setFocusedElement,
+    storyStep,
+    selectSetup,
+  } = useAnalysisWorkspace();
+  const filters = useMemo(() => filtersFromPrefs(prefs.setup_layers), [prefs.setup_layers]);
+  const lastCandleSec = candles.length ? Math.floor(Date.parse(candles[candles.length - 1].open_time) / 1000) : 0;
+  const formingSec = forming ? Math.floor(Date.parse(forming.candle.open_time) / 1000) : 0;
+  const newestSec = Math.max(lastCandleSec, formingSec);
+  const layers = useMemo(() => {
+    if (!analysisVisible || newestSec === 0) return [] as LayerElement[];
+    const list = instrumentSetups ?? [];
+    // The selected setup is drawn even when it is not among the listed ones.
+    const all = setup && !list.some((x) => x.id === setup.id) ? [...list, setup] : list;
+    return buildLayers(all, { chartTimeframe: chartTimeframe ?? "1m", lastCandleSec: newestSec, selectedId: setup?.id, filters });
+  }, [analysisVisible, instrumentSetups, setup, chartTimeframe, newestSec, filters]);
+  const drawnSetups = useMemo(() => new Set(layers.map((l) => l.setupId)).size, [layers]);
   const analysisLayer = useMemo<AnalysisLayer | undefined>(
-    () => (setup ? { label: analysisLabel(setup), visible: analysisVisible } : undefined),
-    [setup, analysisVisible],
-  );
-  const { events, timeframe: chartTimeframe } = useAnalysisWorkspace();
-  const systemZoneProp = useMemo(
-    () => (setup && analysisVisible ? systemZoneFor(setup, events ?? [], chartTimeframe ?? setup.timeframe) : undefined),
-    [setup, analysisVisible, events, chartTimeframe],
-  );
-  const planProp = useMemo(
-    () => (overlay ? { entry: overlay.entry, stop: overlay.stop, targets: overlay.targets, fromTime: overlay.fromTime } : undefined),
-    [overlay],
+    () => (setup || drawnSetups > 0 ? { label: analysisLabel(setup, drawnSetups), visible: analysisVisible } : undefined),
+    [setup, drawnSetups, analysisVisible],
   );
 
   if (!hasLoadedOnceRef.current) {
@@ -377,7 +343,9 @@ export function ChartSurface({ className }: { className?: string }) {
   // whatever candle happens to be first on screen, this is surfaced as a
   // small, honest label instead of hidden.
   const formationOutsideWindow =
-    !!overlay && chartCandles.length > 0 && new Date(overlay.fromTime) < new Date(chartCandles[0].openTime);
+    !!setup &&
+    chartCandles.length > 0 &&
+    new Date(setup.plan_snapshot.poi.order_block_open_time) < new Date(chartCandles[0].openTime);
 
   return (
     <ChartSurfaceInner
@@ -388,8 +356,12 @@ export function ChartSurface({ className }: { className?: string }) {
       candles={chartCandles}
       loading={candlesLoading}
       loadError={candlesError?.message}
-      systemZone={systemZoneProp}
-      plan={planProp}
+      layers={layers}
+      storyStep={storyStep ?? null}
+      focusedElement={focusedElement ?? null}
+      onFocusElement={setFocusedElement}
+      onOpenSetup={selectSetup}
+      selectedSetupId={setup?.id}
       formationOutsideWindow={formationOutsideWindow}
       analysisLayer={analysisLayer}
       forming={forming}
@@ -424,10 +396,16 @@ export interface ChartSurfaceInnerProps {
   // updates/the badge in that case, just with no system annotations
   // drawn (applyCandleData below detaches whatever was attached and
   // draws nothing new).
-  // ARGUS's own zone (system-zone.ts); undefined when no setup is
-  // selected or the Setups layer is hidden.
-  systemZone?: SystemZone;
-  plan?: ChartPlanOverlay;
+  // ARGUS's setup layers (setup-layers.ts): every drawn element, in paint
+  // order; empty or undefined draws nothing of ARGUS's.
+  layers?: LayerElement[];
+  // "Play the story": the selected setup's elements up to this step.
+  storyStep?: number | null;
+  // The element highlighted together with its "Why this setup" row.
+  focusedElement?: string | null;
+  onFocusElement?: (id: string | null) => void;
+  onOpenSetup?: (setupId: number) => void;
+  selectedSetupId?: number;
   formationOutsideWindow: boolean;
   // The selected setup's layer chip (label and shown/hidden); undefined
   // when no setup is selected (nothing of ARGUS's is drawn).
@@ -547,8 +525,12 @@ export function ChartSurfaceInner({
   candles,
   loading,
   loadError,
-  systemZone,
-  plan,
+  layers,
+  storyStep = null,
+  focusedElement = null,
+  onFocusElement,
+  onOpenSetup,
+  selectedSetupId,
   formationOutsideWindow,
   analysisLayer,
   forming,
@@ -577,21 +559,11 @@ export function ChartSurfaceInner({
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const controllerRef = useRef<DrawingController | null>(null);
   const attachedRef = useRef<Map<string, ISeriesPrimitive<Time>>>(new Map());
-  // System annotations (POI zone, plan overlay) are tracked here, not
-  // user drawings -- attachedRef above is the drawing store's own
-  // reconciliation target, scoped to the drawings the user actually
-  // placed. These two are recreated (never mutated in place: neither
-  // primitive type exposes an update() the way user-drawing primitives
-  // do via updatePrimitive) whenever candles or the plan itself changes.
-  // The zone's identity for the data path: its values, not its object
-  // (a new but equal zone object must not reload the chart).
-  const zoneKey = systemZone
-    ? [systemZone.setupId, systemZone.startSec, systemZone.endSec, systemZone.low, systemZone.high, systemZone.label, systemZone.planFromSec, systemZone.planToSec].join(":")
-    : "";
-  const systemPrimitivesRef = useRef<{ poi: SystemZonePrimitive | null; plan: SystemPositionPrimitive | null }>({
-    poi: null,
-    plan: null,
-  });
+  // ARGUS's setup layers: one primitive for every element, created with
+  // the chart and fed new elements in place (no reload of the candles).
+  const layersPrimitiveRef = useRef<SetupLayersPrimitive | null>(null);
+  const layersRef = useRef<LayerElement[]>(layers ?? []);
+  layersRef.current = layers ?? [];
   // The system annotations' price-axis labels, capped so they never pile
   // up (SystemAxisLabelsPrimitive). Created once with the chart.
   const systemAxisLabelsRef = useRef<SystemAxisLabelsPrimitive | null>(null);
@@ -620,8 +592,8 @@ export function ChartSurfaceInner({
   // The range buttons' own notice ("Showing 3.5 days, the most history
   // stored"), and the range still waiting for older history.
   const [rangeNotice, setRangeNotice] = useState<string | null>(null);
-  // The zone popover (a click on ARGUS's zone), in host pixels.
-  const [zonePopover, setZonePopover] = useState<{ x: number; y: number } | null>(null);
+  // The popover of a clicked ARGUS element, in host pixels.
+  const [elementPopover, setElementPopover] = useState<{ id: string; x: number; y: number } | null>(null);
   const [activeRange, setActiveRange] = useState<RangeKey | null>(null);
   const rangeRequestRef = useRef(0);
   // A range waiting for paged-in history to reach the chart: applied by
@@ -771,11 +743,6 @@ export function ChartSurfaceInner({
       dataLengthRef.current = 0;
       dataTimesRef.current = [];
       setSeriesTimeAxis(series, { times: [], intervalSec: INTERVAL_SECONDS[timeframe] ?? 60 });
-      systemAxisLabelsRef.current?.setLevels([]);
-      const prev = systemPrimitivesRef.current;
-      if (prev.poi) series.detachPrimitive(prev.poi);
-      if (prev.plan) series.detachPrimitive(prev.plan);
-      systemPrimitivesRef.current = { poi: null, plan: null };
       lastBarRef.current = EMPTY_BAR;
       lastAppliedOpenTimeRef.current = null;
       legendByTimeRef.current = new Map();
@@ -795,67 +762,9 @@ export function ChartSurfaceInner({
     setSeriesTimeAxis(series, { times: dataTimesRef.current, intervalSec: INTERVAL_SECONDS[timeframe] ?? 60 });
     lastAppliedOpenTimeRef.current = candles[candles.length - 1].openTime;
 
-    const prev = systemPrimitivesRef.current;
-    if (prev.poi) series.detachPrimitive(prev.poi);
-    if (prev.plan) series.detachPrimitive(prev.plan);
-    systemPrimitivesRef.current = { poi: null, plan: null };
-
-    // SMC annotations: ARGUS's own read-only output, in its own layer.
-    // No setup (an instrument with none, or one still loading): draw
-    // nothing here -- the detach above already cleared whatever a
-    // PREVIOUS setup/instrument had attached, and candles/live
-    // updates/the badge above are entirely unaffected by this being
-    // absent (the bug this whole file's own brief fixes: a setup used
-    // to be required just to render the chart at all).
-    if (plan && systemZone) {
-      // ARGUS's own zone and plan, drawn by the rule in system-zone.ts:
-      // from the formation candle to the setup's mitigation or
-      // invalidation (or its last stored state), never to the right edge
-      // by default, never from the chart's first bar as a fallback.
-      const poi = new SystemZonePrimitive({
-        startSec: systemZone.startSec,
-        endSec: systemZone.endSec,
-        low: systemZone.low,
-        high: systemZone.high,
-        label: systemZone.label,
-        color: SYSTEM_COLOR,
-      });
-      const planPrimitive = new SystemPositionPrimitive({
-        kind: "position-long",
-        time: systemZone.planFromSec as Time,
-        rightTime: systemZone.planToSec as Time,
-        entry: plan.entry,
-        stop: plan.stop,
-        targets: plan.targets,
-        style: { color: SYSTEM_COLOR, lineWidth: 1, lineStyle: "solid" },
-      });
-      series.attachPrimitive(poi);
-      series.attachPrimitive(planPrimitive);
-      systemPrimitivesRef.current = { poi, plan: planPrimitive };
-      systemAxisLabelsRef.current?.setLevels([
-        { key: "ob-high", price: systemZone.high, color: SYSTEM_COLOR },
-        { key: "ob-low", price: systemZone.low, color: SYSTEM_COLOR },
-        { key: "entry", price: plan.entry, color: SYSTEM_COLOR },
-        { key: "stop", price: plan.stop, color: C.down },
-        ...plan.targets.map((t, i) => ({ key: `target-${i}`, price: t, color: C.up })),
-      ]);
-    } else {
-      systemAxisLabelsRef.current?.setLevels([]);
-    }
-
-    // Structure labels (confirmed swings, BOS/CHOCH, the equilibrium
-    // line) are deliberately NOT drawn here: they come from
-    // structure_events/structure_state, which have no per-setup API
-    // today (see the wiring brief's own report). Overlaying fixture
-    // values for these on top of real candles would misrepresent them as
-    // findings about this real data, which this wiring is specifically
-    // meant not to do -- so this real-data path draws only the POI zone
-    // and the plan box above, both read directly from the setup's own
-    // plan_snapshot.
-
-    // Premium/discount split (spec section 8, the active range's
-    // equilibrium) is likewise not drawn here: no per-setup API field
-    // carries it today. See the comment above this block.
+    // ARGUS's setup layers are not part of the data path: they are their
+    // own primitive, anchored by time and price, updated by their own
+    // effect below whenever the setups or filters change.
 
     controllerRef.current?.setCandles(candles);
     lastBarRef.current = candles[candles.length - 1];
@@ -983,6 +892,13 @@ export function ChartSurfaceInner({
     );
     series.attachPrimitive(axisLabels);
     systemAxisLabelsRef.current = axisLabels;
+    const layersPrimitive = new SetupLayersPrimitive();
+    series.attachPrimitive(layersPrimitive);
+    layersPrimitive.setElements(layersRef.current);
+    layersPrimitiveRef.current = layersPrimitive;
+    // Dev only (stripped from production builds): lets a browser check find
+    // where each ARGUS element was drawn, to click it.
+    if (import.meta.env.DEV) (window as unknown as { __argusSetupLayers?: SetupLayersPrimitive }).__argusSetupLayers = layersPrimitive;
 
     chart.subscribeCrosshairMove((param) => {
       const d = param.seriesData.get(series) as CandlestickData<Time> | WhitespaceData<Time> | undefined;
@@ -1096,7 +1012,31 @@ export function ChartSurfaceInner({
     // real triggers this effect needs. poiZone/plan are now optional
     // (no setup): the `?.` reads below produce undefined deps in that
     // case, still a valid, stable dependency value React can compare.
-  }, [candles, zoneKey, plan?.entry, plan?.stop, plan?.fromTime, plan?.targets]);
+  }, [candles]);
+
+  // ARGUS's setup layers: new elements (setups re-read, filters changed,
+  // another setup selected, a new candle extending an active zone) are
+  // handed to the one primitive; the price axis labels the selected
+  // setup's zone and plan.
+  useEffect(() => {
+    const els = layers ?? [];
+    layersPrimitiveRef.current?.setElements(els);
+    const levels: { key: string; price: number; color: string }[] = [];
+    for (const el of els) {
+      if (!el.selected) continue;
+      const g = el.geometry;
+      if (el.kind === "zone" && g.type === "rect") {
+        levels.push({ key: "ob-high", price: g.high, color: SYSTEM_COLOR }, { key: "ob-low", price: g.low, color: SYSTEM_COLOR });
+      }
+      if (g.type === "plan") {
+        levels.push({ key: "entry", price: g.entry, color: SYSTEM_COLOR }, { key: "stop", price: g.stop, color: C.down });
+        g.targets.forEach((t, i) => levels.push({ key: `target-${i}`, price: t.price, color: C.up }));
+      }
+    }
+    systemAxisLabelsRef.current?.setLevels(levels);
+  }, [layers, chartGeneration]);
+  useEffect(() => layersPrimitiveRef.current?.setStoryLimit(storyStep), [storyStep, chartGeneration]);
+  useEffect(() => layersPrimitiveRef.current?.setFocused(focusedElement), [focusedElement, chartGeneration]);
 
   // live-tick path (Part 2D): a candle/candle_closed message, applied
   // with series.update() -- its own path, never through the candles
@@ -1174,25 +1114,63 @@ export function ChartSurfaceInner({
     setLegend((l) => (!l.hovering || hoveredTimeRef.current === t ? { bar: text, hovering: l.hovering } : l));
   }, [forming]);
 
-  // A click on ARGUS's zone (not on a user drawing) opens its popover.
+  // A click on an ARGUS element (not on a user drawing, not while a
+  // drawing is selected): on another setup it selects that setup; on the
+  // selected setup it opens the element's popover and highlights its row in
+  // "Why this setup". A click elsewhere closes the popover. Hovering brings
+  // a setup up, and names an element whose label had no room (tooltip).
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const onClick = (e: MouseEvent) => {
+    const at = (e: MouseEvent) => {
       const r = host.getBoundingClientRect();
-      const x = e.clientX - r.left;
-      const y = e.clientY - r.top;
-      const rect = systemPrimitivesRef.current.poi?.lastRect;
-      const slop = 3;
-      const onZone =
-        rect && x >= rect.left - slop && x <= rect.left + rect.width + slop && y >= rect.top - slop && y <= rect.top + rect.height + slop;
-      if (onZone && !store.selectedId) setZonePopover({ x: Math.min(x, r.width - 300), y: y + 12 });
-      else setZonePopover(null);
+      return { x: e.clientX - r.left, y: e.clientY - r.top, r };
     };
+    const onClick = (e: MouseEvent) => {
+      const { x, y, r } = at(e);
+      const id = store.selectedId ? null : (layersPrimitiveRef.current?.hitElement(x, y) ?? null);
+      if (!id) {
+        setElementPopover(null);
+        return;
+      }
+      const setupId = Number(id.split(":")[0]);
+      if (selectedSetupId !== undefined && setupId !== selectedSetupId && onOpenSetup) {
+        setElementPopover(null);
+        onOpenSetup(setupId);
+        return;
+      }
+      setElementPopover({ id, x: Math.max(0, Math.min(x, r.width - 330)), y: Math.min(y + 12, Math.max(0, r.height - 320)) });
+      onFocusElement?.(id);
+    };
+    let frame = 0;
+    let last: MouseEvent | null = null;
+    const onMove = (e: MouseEvent) => {
+      last = e;
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const prim = layersPrimitiveRef.current;
+        if (!prim || !last) return;
+        const { x, y } = at(last);
+        const id = prim.hitElement(x, y);
+        prim.setHoveredSetup(id ? Number(id.split(":")[0]) : null);
+        const hidden = id ? prim.hiddenLabels.find((h) => h.elementId === id) : undefined;
+        host.title = id ? `${hidden?.text ?? prim.elementLabel(id)} (ARGUS · click for details)` : "";
+      });
+    };
+    const onLeave = () => layersPrimitiveRef.current?.setHoveredSetup(null);
     host.addEventListener("click", onClick);
-    return () => host.removeEventListener("click", onClick);
-  }, [store]);
-  useEffect(() => setZonePopover(null), [zoneKey]);
+    host.addEventListener("mousemove", onMove);
+    host.addEventListener("mouseleave", onLeave);
+    return () => {
+      host.removeEventListener("click", onClick);
+      host.removeEventListener("mousemove", onMove);
+      host.removeEventListener("mouseleave", onLeave);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [store, onFocusElement, onOpenSetup, selectedSetupId]);
+  // A popover whose element is no longer drawn closes.
+  const popoverElement = elementPopover ? (layers ?? []).find((l) => l.id === elementPopover.id) : undefined;
 
   // Range buttons (Phase 3): set the visible range to the last 1 day, 5
   // days, ... ending at the newest bar. When the held history is shorter,
@@ -1396,8 +1374,26 @@ export function ChartSurfaceInner({
           />
         )}
 
-        {zonePopover && systemZone && (
-          <ZonePopover zone={systemZone} x={zonePopover.x} y={zonePopover.y} onClose={() => setZonePopover(null)} />
+        {elementPopover && popoverElement && (
+          <SetupElementPopover
+            element={popoverElement}
+            x={elementPopover.x}
+            y={elementPopover.y}
+            onClose={() => setElementPopover(null)}
+            onCopy={() => {
+              const now = Date.now();
+              add({ ...popoverElement.copy, id: nextId(), createdAt: now, updatedAt: now } as Drawing);
+              setElementPopover(null);
+            }}
+            onOpenSetup={
+              onOpenSetup && popoverElement.setupId !== selectedSetupId
+                ? () => {
+                    onOpenSetup(popoverElement.setupId);
+                    setElementPopover(null);
+                  }
+                : undefined
+            }
+          />
         )}
 
         <div className="pointer-events-none absolute left-3 top-2.5 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
