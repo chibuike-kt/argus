@@ -25,6 +25,9 @@ type candleStore interface {
 	SupersedeCandle(ctx context.Context, instrumentID int64, openTime clock.EventTime, corr marketdata.Correction) (marketdata.Candle, error)
 	RecordGap(ctx context.Context, instrumentID int64, start, end clock.EventTime) (marketdata.Gap, error)
 	UpsertQuote(ctx context.Context, q marketdata.BidAsk) (marketdata.BidAsk, error)
+	// ListClosedInRangeLimited is read after a fetch, so a minute the fetch
+	// did not return but the live stream already closed is not a gap.
+	ListClosedInRangeLimited(ctx context.Context, instrumentID int64, start, end time.Time, limit int32) ([]marketdata.Candle, error)
 }
 
 var _ candleStore = (*marketdata.Store)(nil)
@@ -203,14 +206,17 @@ func (s *Service) IngestHistorical(ctx context.Context, symbol string, start, en
 		return fmt.Errorf("ingestion: historical %s/%s [%s,%s): %w", s.providerName, symbol, start, end, err)
 	}
 
-	present := make(map[time.Time]bool, len(raw))
+	// Keyed by the UTC instant in nanoseconds, never by time.Time: a
+	// time.Time key compares its location too, so an aligned start in a
+	// non-UTC location never matched a UTC open time (CLAUDE.md, check 1).
+	present := make(map[int64]bool, len(raw))
 	for _, c := range raw {
 		nc, err := s.normalizer.NormalizeCandle(ctx, s.providerName, c)
 		if err != nil {
 			s.rejectCandle(symbol, c, err)
 			continue
 		}
-		present[nc.OpenTime.Time()] = true
+		present[nc.OpenTime.Time().UTC().UnixNano()] = true
 		if err := s.applyCandle(ctx, nc); err != nil {
 			return fmt.Errorf("ingestion: apply historical candle %s/%s instrument=%d open_time=%s: %w",
 				s.providerName, symbol, nc.InstrumentID, nc.OpenTime, err)
@@ -352,23 +358,55 @@ func (s *Service) closeCandle(ctx context.Context, nc NormalizedCandle) error {
 	return nil
 }
 
-// detectAndRecordGaps walks every expected 1-minute slot in [start, end)
-// and records consecutive missing, non-scheduled-closure minutes as a
-// single gap range. A minute is "missing" when it is both absent from
-// present AND the calendar does not affirmatively report it as a
-// scheduled closure.
+// detectAndRecordGaps records the closed minutes of [start, end) that are
+// really missing once the fetch has finished, as consecutive ranges.
 //
-// An inconclusive calendar outcome -- the calendar errors (including an
-// unimplemented one, e.g. ForexCalendar today) or reports
+// Only whole minutes are examined: from start rounded up to the minute to
+// end rounded down. A minute counts only when it has ended by end (the
+// caller's fetch time), so the minute still forming is never a gap. The
+// window's own sub-minute edges are never a gap either: before this, a
+// window like [16:51:01.518, 16:56:01.518) -- the periodic backfill's
+// "now minus 5 minutes" -- walked slots that never fell on a minute, none
+// matched a candle, and the whole window was recorded as a gap on every
+// tick (about 2,500 open rows, one per instrument per minute).
+//
+// A minute is missing when the fetch did not return it, no closed candle
+// is stored for it after the fetch (the live stream may have closed it),
+// and the calendar does not affirmatively report it as a scheduled
+// closure. An inconclusive calendar outcome -- an error (including an
+// unimplemented calendar, e.g. ForexCalendar today) or
 // MarketStatusUnknown -- is treated as "not a scheduled closure", so the
-// minute is still recorded as a gap. Under-reporting a real gap because
-// the calendar could not rule it out is worse than a false-positive gap
-// that later turns out to have been a scheduled closure once that
-// market's calendar is actually implemented.
-func (s *Service) detectAndRecordGaps(ctx context.Context, instrumentID int64, assetClass string, present map[time.Time]bool, start, end time.Time) error {
+// minute is still recorded: under-reporting a real gap is worse than a
+// false positive that a later calendar rules out.
+func (s *Service) detectAndRecordGaps(ctx context.Context, instrumentID int64, assetClass string, present map[int64]bool, start, end time.Time) error {
+	from, to := closedMinuteBounds(start, end)
+	if !from.Before(to) {
+		return nil
+	}
+
+	// Minutes the fetch did not return. Usually none, so the store is read
+	// only when there is something to check.
+	var candidates int
+	for t := from; t.Before(to); t = t.Add(time.Minute) {
+		if !present[t.UnixNano()] {
+			candidates++
+		}
+	}
+	if candidates == 0 {
+		return nil
+	}
+	minutes := int32(to.Sub(from) / time.Minute) //nolint:gosec // a fetch window, far below MaxInt32 minutes
+	stored, err := s.store.ListClosedInRangeLimited(ctx, instrumentID, from, to, minutes)
+	if err != nil {
+		return fmt.Errorf("ingestion: read closed candles instrument=%d [%s,%s): %w", instrumentID, from, to, err)
+	}
+	closed := make(map[int64]bool, len(stored))
+	for _, c := range stored {
+		closed[c.OpenTime.Time().UTC().UnixNano()] = true
+	}
+
 	var gapStart time.Time
 	inGap := false
-
 	flush := func(gapEnd time.Time) error {
 		if !inGap {
 			return nil
@@ -381,27 +419,37 @@ func (s *Service) detectAndRecordGaps(ctx context.Context, instrumentID int64, a
 		return nil
 	}
 
-	for t := start; t.Before(end); t = t.Add(time.Minute) {
+	for t := from; t.Before(to); t = t.Add(time.Minute) {
+		have := present[t.UnixNano()] || closed[t.UnixNano()]
 		scheduledClosure := false
-		if !present[t] {
+		if !have {
 			status, calErr := s.calendar.Status(ctx, assetClass, clock.NewEventTime(t))
 			scheduledClosure = calErr == nil && status == marketdata.MarketStatusScheduledClosure
 		}
-
-		if present[t] || scheduledClosure {
+		if have || scheduledClosure {
 			if err := flush(t); err != nil {
 				return err
 			}
 			continue
 		}
-
 		if !inGap {
 			gapStart = t
 			inGap = true
 		}
 	}
+	return flush(to)
+}
 
-	return flush(end)
+// closedMinuteBounds returns the whole minutes of [start, end), in UTC:
+// start rounded up to the minute, end rounded down. The minute containing
+// end (still forming when end is the fetch time) is never included.
+func closedMinuteBounds(start, end time.Time) (from, to time.Time) {
+	from = start.UTC().Truncate(time.Minute)
+	if from.Before(start) {
+		from = from.Add(time.Minute)
+	}
+	to = end.UTC().Truncate(time.Minute)
+	return from, to
 }
 
 // rejectCandle is this package's drop-and-log policy (guide 14) for a

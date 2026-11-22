@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +124,23 @@ func (f *fakeCandleStore) SupersedeCandle(_ context.Context, instrumentID int64,
 func (f *fakeCandleStore) RecordGap(_ context.Context, instrumentID int64, start, end clock.EventTime) (marketdata.Gap, error) {
 	f.gaps = append(f.gaps, fakeGap{InstrumentID: instrumentID, Start: start.Time(), End: end.Time()})
 	return marketdata.Gap{InstrumentID: instrumentID, Start: start, End: end}, nil
+}
+
+// ListClosedInRangeLimited mirrors marketdata.Store: current closed
+// candles with open_time in [start, end), oldest first.
+func (f *fakeCandleStore) ListClosedInRangeLimited(_ context.Context, instrumentID int64, start, end time.Time, limit int32) ([]marketdata.Candle, error) {
+	var out []marketdata.Candle
+	for k, c := range f.byKey {
+		ot := k.OpenTime
+		if k.InstrumentID == instrumentID && c.IsClosed && !ot.Before(start) && ot.Before(end) {
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].OpenTime.Time().Before(out[j].OpenTime.Time()) })
+	if int32(len(out)) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (f *fakeCandleStore) UpsertQuote(_ context.Context, q marketdata.BidAsk) (marketdata.BidAsk, error) {
@@ -321,12 +339,7 @@ func TestDetectAndRecordGaps_ConsolidatesConsecutiveMissingMinutes(t *testing.T)
 
 	start := time.Date(2026, time.October, 27, 12, 0, 0, 0, time.UTC)
 	end := start.Add(5 * time.Minute)
-	present := map[time.Time]bool{
-		start:                      true,
-		start.Add(1 * time.Minute): true,
-		// 12:02, 12:03 missing
-		start.Add(4 * time.Minute): true,
-	}
+	present := minutes(start, start.Add(1*time.Minute), start.Add(4*time.Minute)) // 12:02, 12:03 missing
 
 	if err := svc.detectAndRecordGaps(context.Background(), 1, "crypto_perp", present, start, end); err != nil {
 		t.Fatalf("detectAndRecordGaps: %v", err)
@@ -348,7 +361,7 @@ func TestDetectAndRecordGaps_ScheduledClosureIsNeverAGap(t *testing.T) {
 
 	start := time.Date(2026, time.October, 27, 12, 0, 0, 0, time.UTC)
 	end := start.Add(3 * time.Minute)
-	present := map[time.Time]bool{} // nothing present; calendar says closed for all of it
+	present := minutes() // nothing present; calendar says closed for all of it
 
 	if err := svc.detectAndRecordGaps(context.Background(), 1, "forex", present, start, end); err != nil {
 		t.Fatalf("detectAndRecordGaps: %v", err)
@@ -365,7 +378,7 @@ func TestDetectAndRecordGaps_InconclusiveCalendarStillRecordsAGap(t *testing.T) 
 	start := time.Date(2026, time.October, 27, 12, 0, 0, 0, time.UTC)
 	end := start.Add(1 * time.Minute)
 
-	if err := svc.detectAndRecordGaps(context.Background(), 1, "forex", map[time.Time]bool{}, start, end); err != nil {
+	if err := svc.detectAndRecordGaps(context.Background(), 1, "forex", minutes(), start, end); err != nil {
 		t.Fatalf("detectAndRecordGaps: %v", err)
 	}
 	if len(store.gaps) != 1 {
@@ -384,7 +397,7 @@ func TestDetectAndRecordGaps_ClosureInterruptsAGapRange(t *testing.T) {
 	svc := testService(t, store, nil, cal)
 
 	end := start.Add(3 * time.Minute)
-	if err := svc.detectAndRecordGaps(context.Background(), 1, "forex", map[time.Time]bool{}, start, end); err != nil {
+	if err := svc.detectAndRecordGaps(context.Background(), 1, "forex", minutes(), start, end); err != nil {
 		t.Fatalf("detectAndRecordGaps: %v", err)
 	}
 	if len(store.gaps) != 2 {
@@ -439,5 +452,173 @@ func TestHandleLiveCandle_RejectedCandleDoesNotPropagateAsError(t *testing.T) {
 	}
 	if len(store.byKey) != 0 {
 		t.Fatalf("a rejected candle was still written to the store: %+v", store.byKey)
+	}
+}
+
+// minutes is the fetched-minutes set detectAndRecordGaps takes, keyed by
+// the UTC instant in nanoseconds.
+func minutes(ts ...time.Time) map[int64]bool {
+	m := make(map[int64]bool, len(ts))
+	for _, t := range ts {
+		m[t.UTC().UnixNano()] = true
+	}
+	return m
+}
+
+func everyMinute(from time.Time, n int) map[int64]bool {
+	m := make(map[int64]bool, n)
+	for i := 0; i < n; i++ {
+		m[from.Add(time.Duration(i)*time.Minute).UTC().UnixNano()] = true
+	}
+	return m
+}
+
+// The real-run shape (gap-recording fix): the periodic backfill fetches
+// [now-5m, now) with an unaligned now, every minute. Every closed minute
+// in it was returned, so nothing is missing. Before the fix the walk
+// started at the unaligned now-5m, no slot fell on a minute, and the
+// whole window was recorded as a gap on every tick.
+func TestDetectAndRecordGaps_UnalignedPeriodicWindowWithEveryMinutePresentRecordsNothing(t *testing.T) {
+	store := newFakeCandleStore()
+	svc := testService(t, store, nil, fakeCalendar{status: marketdata.MarketStatusOpen})
+	now := time.Date(2026, time.November, 22, 1, 48, 23, 922440000, time.UTC)
+	start := now.Add(-5 * time.Minute) // 01:43:23.92244, the stored row's own start
+	// The fetch returned 01:43 (whose open is before start) to the forming 01:48.
+	present := everyMinute(time.Date(2026, time.November, 22, 1, 43, 0, 0, time.UTC), 6)
+
+	if err := svc.detectAndRecordGaps(context.Background(), 1, "crypto_perp", present, start, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.gaps) != 0 {
+		t.Fatalf("recorded %+v, want no gap: every closed minute of the window was fetched", store.gaps)
+	}
+}
+
+// The minute still forming is never a gap, even when the fetch did not
+// return it: it has not closed, so it cannot be missing yet.
+func TestDetectAndRecordGaps_FormingMinuteIsNeverAGap(t *testing.T) {
+	store := newFakeCandleStore()
+	svc := testService(t, store, nil, fakeCalendar{status: marketdata.MarketStatusOpen})
+	start := time.Date(2026, time.November, 22, 1, 43, 0, 0, time.UTC)
+	now := start.Add(5*time.Minute + 20*time.Second) // 01:48:20: 01:48 is forming
+	present := everyMinute(start, 5)                 // 01:43-01:47, the forming 01:48 not returned
+
+	if err := svc.detectAndRecordGaps(context.Background(), 1, "crypto_perp", present, start, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.gaps) != 0 {
+		t.Fatalf("recorded %+v, want none: 01:48 is still forming", store.gaps)
+	}
+}
+
+// A real hole inside an unaligned window is still recorded, on whole
+// minutes, and only the closed minutes of the window are examined.
+func TestDetectAndRecordGaps_RealHoleInUnalignedWindowIsRecordedOnMinuteBounds(t *testing.T) {
+	store := newFakeCandleStore()
+	svc := testService(t, store, nil, fakeCalendar{status: marketdata.MarketStatusOpen})
+	m := func(i int) time.Time { return time.Date(2026, time.November, 22, 1, 40+i, 0, 0, time.UTC) }
+	start := m(0).Add(30 * time.Second)                    // 01:40:30
+	now := m(6).Add(30 * time.Second)                      // 01:46:30, 01:46 forming
+	present := minutes(m(0), m(1), m(2), m(4), m(5), m(6)) // 01:43 missing
+
+	if err := svc.detectAndRecordGaps(context.Background(), 1, "crypto_perp", present, start, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.gaps) != 1 || !store.gaps[0].Start.Equal(m(3)) || !store.gaps[0].End.Equal(m(4)) {
+		t.Fatalf("recorded %+v, want exactly [01:43, 01:44)", store.gaps)
+	}
+	for _, g := range store.gaps {
+		if !g.Start.Equal(g.Start.Truncate(time.Minute)) || !g.End.Equal(g.End.Truncate(time.Minute)) {
+			t.Fatalf("gap %+v is not on minute bounds", g)
+		}
+	}
+}
+
+// A minute the fetch did not return but the live stream already closed
+// (stored closed) is not missing.
+func TestDetectAndRecordGaps_MinuteClosedByTheStreamIsNotAGap(t *testing.T) {
+	store := newFakeCandleStore()
+	svc := testService(t, store, nil, fakeCalendar{status: marketdata.MarketStatusOpen})
+	start := time.Date(2026, time.November, 22, 1, 40, 0, 0, time.UTC)
+	closedByStream := start.Add(2 * time.Minute)
+	store.byKey[store.key(1, clock.NewEventTime(closedByStream))] = marketdata.Candle{
+		InstrumentID: 1, OpenTime: clock.NewEventTime(closedByStream), IsClosed: true, Revision: 1,
+	}
+	present := minutes(start, start.Add(time.Minute), start.Add(3*time.Minute))
+
+	if err := svc.detectAndRecordGaps(context.Background(), 1, "crypto_perp", present, start, start.Add(4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.gaps) != 0 {
+		t.Fatalf("recorded %+v, want none: 01:42 is stored closed", store.gaps)
+	}
+}
+
+// historicalOnlyProvider serves HistoricalCandles from a fixed list; the
+// rest of Provider is unused here.
+type historicalOnlyProvider struct{ candles []ProviderCandle }
+
+func (p historicalOnlyProvider) Instruments(context.Context) ([]ProviderInstrument, error) {
+	return nil, nil
+}
+func (p historicalOnlyProvider) HistoricalCandles(context.Context, string, time.Time, time.Time) ([]ProviderCandle, error) {
+	return p.candles, nil
+}
+func (p historicalOnlyProvider) StreamCandles(ctx context.Context, _ string, _ func(context.Context, ProviderCandle) error) error {
+	<-ctx.Done()
+	return nil
+}
+func (p historicalOnlyProvider) StreamQuotes(ctx context.Context, _ string, _ func(context.Context, ProviderQuote) error) error {
+	<-ctx.Done()
+	return nil
+}
+
+// CLAUDE.md check 1, through the whole IngestHistorical path: a window
+// given in America/New_York across the November 1 2026 DST fall-back
+// (01:00-02:00 local happens twice), with every minute returned in UTC.
+// Before the fix the fetched set was keyed by time.Time, whose map key
+// includes the location, so not one New York slot matched a UTC open time
+// and every minute was recorded as missing.
+func TestIngestHistorical_NonUTCWindowAcrossDST_RecordsNoFalseGap(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("no tzdata")
+	}
+	// 05:50 UTC = 01:50 EDT; 06:10 UTC = 01:10 EST (after the fall-back).
+	startUTC := time.Date(2026, time.November, 1, 5, 50, 0, 0, time.UTC)
+	start := startUTC.In(ny)
+	end := startUTC.Add(20 * time.Minute).In(ny)
+	var raw []ProviderCandle
+	for i := 0; i <= 20; i++ { // through the forming minute, like the real adapter
+		raw = append(raw, ProviderCandle{
+			Symbol: "BTCUSDT", OpenTime: startUTC.Add(time.Duration(i) * time.Minute),
+			Open: "100.00", High: "100.00", Low: "100.00", Close: "100.00", Volume: "1", IsFinal: i < 20,
+		})
+	}
+	store := newFakeCandleStore()
+	svc := testService(t, store, historicalOnlyProvider{candles: raw}, fakeCalendar{status: marketdata.MarketStatusOpen})
+
+	if err := svc.IngestHistorical(context.Background(), "BTCUSDT", start, end); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.gaps) != 0 {
+		t.Fatalf("recorded %d gaps (first %+v), want none: every minute was fetched", len(store.gaps), store.gaps[0])
+	}
+}
+
+func TestClosedMinuteBounds(t *testing.T) {
+	at := func(h, m, s int) time.Time { return time.Date(2026, time.November, 22, h, m, s, 0, time.UTC) }
+	cases := []struct {
+		start, end, from, to time.Time
+	}{
+		{at(1, 43, 23), at(1, 48, 23), at(1, 44, 0), at(1, 48, 0)}, // unaligned both ends
+		{at(1, 43, 0), at(1, 48, 0), at(1, 43, 0), at(1, 48, 0)},   // aligned: unchanged
+		{at(1, 48, 1), at(1, 48, 59), at(1, 49, 0), at(1, 48, 0)},  // inside one minute: empty
+	}
+	for _, c := range cases {
+		from, to := closedMinuteBounds(c.start, c.end)
+		if !from.Equal(c.from) || !to.Equal(c.to) {
+			t.Errorf("closedMinuteBounds(%s, %s) = [%s, %s), want [%s, %s)", c.start, c.end, from, to, c.from, c.to)
+		}
 	}
 }
