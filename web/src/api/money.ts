@@ -25,5 +25,9 @@ export function parseRatString(rr: string): number {
 // below 0.1 keeps it legible ("0.04") without changing how larger,
 // more common values like 2 or 1.5 are shown (one decimal, unchanged).
 export function formatRR(rr: number): string {
-  return (Math.abs(rr) < 0.1 ? rr.toFixed(2) : rr.toFixed(1)) + "R";
+  // Below 1R two decimals (three below 0.01), so close targets such as
+  // 0.15R, 0.20R and 0.24R stay distinct instead of all reading "0.2R"
+  // (Phase 6, owner decision 3: the real R:R, however small).
+  const a = Math.abs(rr);
+  return (a < 0.01 ? rr.toFixed(3) : a < 1 ? rr.toFixed(2) : rr.toFixed(1)) + "R";
 }

@@ -243,6 +243,156 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /instruments/{id}/structure:
+    get:
+      operationId: getInstrumentStructure
+      summary: >
+        The stored market structure of one instrument and timeframe over a
+        time window, for the chart layers (Phase 6.2): confirmed swings,
+        structure events (BOS, CHOCH, direction established) and liquidity
+        sweeps, current rows only (a row superseded by a candle correction
+        is never returned). Read only. Bounded: [from, to) at most 31 days,
+        and at most limit rows of each kind, oldest first. When any kind
+        reached its limit, every kind is cut at the same time and next_from
+        says where the next page starts, so pages never overlap and never
+        skip a row. Prices are decimal strings at the instrument's price
+        scale. This is the stored structure, not a setup's evidence: a
+        setup's own swings, sweep and break are in GET /setups/{id}/evidence.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: timeframe
+          in: query
+          required: false
+          description: The analysed timeframe. Only 1m is analysed today.
+          schema:
+            type: string
+            default: 1m
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          description: Maximum rows of each kind. Default 500, minimum 10, maximum 2000.
+          schema:
+            type: integer
+            format: int32
+            default: 500
+            minimum: 10
+            maximum: 2000
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructureWindow"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /engine/status:
+    get:
+      operationId: getEngineStatus
+      summary: >
+        What the analysis engine has evaluated, from stored processing
+        cursors only (Phase 6.5, D7): per enabled instrument, the close time
+        of the last candle evaluated, when the worker last advanced it, the
+        newest stored closed candle, and how far the evaluation is behind
+        it. Nothing is estimated. A worker tick that found no new candle
+        writes nothing, so last_evaluated_at is the last time a candle was
+        evaluated, not the last time the worker woke up.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EngineStatus"
+  /activity:
+    get:
+      operationId: listActivity
+      summary: >
+        The activity feed, newest first, from stored rows only (Phase 6.5,
+        D7): setup events (a setup created or changing state), structure
+        events (BOS, CHOCH, direction established) and resolved ingestion
+        gaps (recovered by backfill, or confirmed to have no data). Open
+        gaps are not listed. Keyset paginated with an opaque cursor.
+      parameters:
+        - name: instrument_id
+          in: query
+          required: false
+          description: Restrict to these instruments (up to 50). Omitted means every enabled instrument.
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 50
+            items:
+              type: integer
+              format: int64
+        - name: kind
+          in: query
+          required: false
+          description: Which kinds to list. Omitted means all three.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [setup, structure, gap]
+        - name: cursor
+          in: query
+          required: false
+          description: The next_cursor of the previous page. Omitted for the first page.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Maximum items. Default 50, maximum 200.
+          schema:
+            type: integer
+            format: int32
+            default: 50
+            minimum: 1
+            maximum: 200
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivityPage"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /setups:
     get:
       operationId: listSetups
@@ -1636,3 +1786,240 @@ components:
         created_at:
           type: string
           format: date-time
+    StructureWindow:
+      type: object
+      required: [instrument_id, timeframe, from, to, swings, breaks, sweeps]
+      properties:
+        instrument_id:
+          type: integer
+          format: int64
+        timeframe:
+          type: string
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+          description: The end of what this page covers (exclusive). Equal to next_from when the page was cut.
+        swings:
+          type: array
+          items:
+            $ref: "#/components/schemas/StructureSwing"
+        breaks:
+          type: array
+          items:
+            $ref: "#/components/schemas/StructureBreak"
+        sweeps:
+          type: array
+          items:
+            $ref: "#/components/schemas/StructureSweep"
+        next_from:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: Where the next page starts when a kind reached its limit; null when the whole window was returned.
+    StructureSwing:
+      type: object
+      required: [id, swing_type, pivot_time, price, confirmed_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        swing_type:
+          type: string
+          enum: [high, low]
+        pivot_time:
+          type: string
+          format: date-time
+          description: The pivot candle's open time.
+        price:
+          type: string
+        confirmed_at:
+          type: string
+          format: date-time
+          description: Close time of the candle that confirmed it.
+    StructureBreak:
+      type: object
+      required: [id, event_type, direction_before, direction_after, trigger_open_time, sweep_validated]
+      properties:
+        id:
+          type: integer
+          format: int64
+        event_type:
+          type: string
+          enum: [direction_established, bos, choch]
+        direction_before:
+          type: string
+        direction_after:
+          type: string
+        trigger_open_time:
+          type: string
+          format: date-time
+          description: Open time of the candle that broke structure.
+        sweep_validated:
+          type: boolean
+        sweep_id:
+          type: integer
+          format: int64
+          nullable: true
+        protected_swing_id:
+          type: integer
+          format: int64
+          nullable: true
+        broken_swing:
+          allOf:
+            - $ref: "#/components/schemas/StructureLevel"
+          nullable: true
+          description: The swing a BOS or CHOCH broke; null for direction_established.
+    StructureSweep:
+      type: object
+      required: [id, side, trigger_open_time, penetration_extreme, reclaim_close, swept_swing]
+      properties:
+        id:
+          type: integer
+          format: int64
+        side:
+          type: string
+          enum: [buy, sell]
+        trigger_open_time:
+          type: string
+          format: date-time
+        penetration_extreme:
+          type: string
+        reclaim_close:
+          type: string
+        swept_swing:
+          $ref: "#/components/schemas/StructureLevel"
+    StructureLevel:
+      type: object
+      required: [swing_id, price, time]
+      properties:
+        swing_id:
+          type: integer
+          format: int64
+        price:
+          type: string
+        time:
+          type: string
+          format: date-time
+    EngineStatus:
+      type: object
+      required: [as_of, instruments]
+      properties:
+        as_of:
+          type: string
+          format: date-time
+          description: Server time when this was read.
+        instruments:
+          type: array
+          items:
+            $ref: "#/components/schemas/EngineInstrumentStatus"
+    EngineInstrumentStatus:
+      type: object
+      required: [instrument_id, native_symbol, provider, analysed, closed_candles_behind]
+      properties:
+        instrument_id:
+          type: integer
+          format: int64
+        native_symbol:
+          type: string
+        provider:
+          type: string
+        analysed:
+          type: boolean
+          description: False when the worker has never evaluated this instrument.
+        timeframe:
+          type: string
+          nullable: true
+        evaluated_through:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: Close time of the last candle the engine evaluated.
+        last_evaluated_at:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: When the worker last advanced the cursor (processing time).
+        latest_closed_close_time:
+          type: string
+          format: date-time
+          nullable: true
+          x-omitempty: false
+          description: Close time of the newest stored closed 1-minute candle.
+        behind_seconds:
+          type: integer
+          format: int64
+          nullable: true
+          x-omitempty: false
+          description: latest_closed_close_time minus evaluated_through, in seconds (0 when caught up). Null when either is absent.
+        closed_candles_behind:
+          type: integer
+          format: int64
+          description: Stored closed candles not yet evaluated.
+    ActivityPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityItem"
+        next_cursor:
+          type: string
+          nullable: true
+          x-omitempty: false
+          description: Pass as cursor for the next page; null on the last page.
+    ActivityItem:
+      type: object
+      required: [kind, id, instrument_id, timeframe, at, event_time, detail]
+      properties:
+        kind:
+          type: string
+          enum: [setup, structure, gap]
+        id:
+          type: integer
+          format: int64
+          description: The row id within its kind (setup event, structure event, gap).
+        instrument_id:
+          type: integer
+          format: int64
+        timeframe:
+          type: string
+        at:
+          type: string
+          format: date-time
+          description: When ARGUS recorded it (a gap's resolution time).
+        event_time:
+          type: string
+          format: date-time
+          description: The candle time it is about (a gap's start).
+        detail:
+          type: string
+          description: >
+            setup: the event type (detected, actionable, triggered,
+            invalidated, amendment). structure: bos, choch or
+            direction_established. gap: how it was resolved (for example
+            backfilled).
+        setup_id:
+          type: integer
+          format: int64
+          nullable: true
+        direction:
+          type: string
+          nullable: true
+        poi_type:
+          type: string
+          nullable: true
+        found_mode:
+          type: string
+          nullable: true
+          description: live, replay or unknown (the setup's found_mode).
+        gap_end:
+          type: string
+          format: date-time
+          nullable: true

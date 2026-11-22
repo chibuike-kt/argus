@@ -9,8 +9,9 @@
 // chart states were three different element trees.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { ChartSurface, ChartSurfaceInner, ZonePopover, type ChartSurfaceInnerProps } from "../chart-surface";
-import { systemZoneFor } from "../system-zone";
+import { ChartSurface, ChartSurfaceInner, type ChartSurfaceInnerProps } from "../chart-surface";
+import { SetupElementPopover } from "../setup-popover";
+import { buildLayers, DEFAULT_FILTERS } from "../setup-layers";
 import { loadChartView, saveChartView, type SavedChartView } from "../chart-view-persistence";
 import { preferences } from "@/lib/preferences";
 import { DrawingProvider, useDrawing } from "../drawing-context";
@@ -198,19 +199,6 @@ function candleSet(n: number, basePrice: number) {
   return out;
 }
 
-// testZone is a system zone over candleSet's first bars, as
-// system-zone.ts would build it for a setup on the chart's own timeframe.
-function testZone(low: number, high: number): import("../system-zone").SystemZone {
-  const start = Date.UTC(2026, 0, 1, 0, 0) / 1000;
-  return {
-    setupId: 1, timeframe: "1m", state: "triggered", poiType: "order_block", direction: "bullish",
-    lowText: String(low), highText: String(high), low, high,
-    startSec: start, endSec: start + 120, endReason: "mitigated",
-    planFromSec: start, planToSec: start + 240, planOpen: true, foreignTimeframe: false, label: "order block",
-  };
-}
-
-const basePlan = { entry: 100, stop: 95, targets: [110], fromTime: candleSet(5, 100)[0].openTime };
 
 // A tiny host that adds one drawing to the real store on mount, so the
 // test can prove it survives a later props change -- DrawingProvider's
@@ -307,8 +295,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -322,8 +308,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(8, 200)}
-        systemZone={testZone(195, 205)}
-        plan={{ ...basePlan, fromTime: candleSet(8, 200)[0].openTime }}
         formationOutsideWindow={false}
       />,
     );
@@ -338,8 +322,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -352,8 +334,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(8, 200)}
-        systemZone={testZone(195, 205)}
-        plan={{ ...basePlan, fromTime: candleSet(8, 200)[0].openTime }}
         formationOutsideWindow={false}
       />,
     );
@@ -379,8 +359,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="BTC-PERP"
         venue="test"
         candles={candlesA}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -396,8 +374,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="ETH-PERP"
         venue="test"
         candles={candlesB}
-        systemZone={undefined}
-        plan={undefined}
         formationOutsideWindow={false}
       />,
     );
@@ -412,8 +388,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="BTC-PERP"
         venue="test"
         candles={candlesA}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -433,8 +407,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
           candles={candleSet(5, 100)}
           loading={false}
           loadError={undefined}
-          systemZone={testZone(95, 105)}
-          plan={basePlan}
           formationOutsideWindow={false}
           forming={null}
           connectionState="open"
@@ -455,8 +427,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
           candles={candleSet(8, 200)}
           loading={false}
           loadError={undefined}
-          systemZone={testZone(195, 205)}
-          plan={{ ...basePlan, fromTime: candleSet(8, 200)[0].openTime }}
           formationOutsideWindow={false}
           forming={null}
           connectionState="open"
@@ -476,8 +446,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -487,8 +455,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="ETH-PERP"
         venue="test"
         candles={candleSet(5, 300)}
-        systemZone={testZone(295, 305)}
-        plan={{ ...basePlan, fromTime: candleSet(5, 300)[0].openTime }}
         formationOutsideWindow={false}
       />,
     );
@@ -511,8 +477,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -524,8 +488,6 @@ describe("switching instrument or interval does not rebuild the chart", () => {
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(8, 200)}
-        systemZone={testZone(195, 205)}
-        plan={{ ...basePlan, fromTime: candleSet(8, 200)[0].openTime }}
         formationOutsideWindow={false}
       />,
     );
@@ -572,8 +534,6 @@ describe("Part 2D: a live tick is applied through series.update(), never through
         symbol="BTC-PERP"
         venue="test"
         candles={candles}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -585,8 +545,6 @@ describe("Part 2D: a live tick is applied through series.update(), never through
         symbol="BTC-PERP"
         venue="test"
         candles={candles}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
         forming={liveTick(lastOpenTime, 999, { seq: 1 })}
       />,
@@ -609,8 +567,6 @@ describe("Part 2D: a live tick is applied through series.update(), never through
         symbol="BTC-PERP"
         venue="test"
         candles={candles}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -621,8 +577,6 @@ describe("Part 2D: a live tick is applied through series.update(), never through
         symbol="BTC-PERP"
         venue="test"
         candles={candles}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
         forming={liveTick(nextOpenTime, 888, { seq: 1 })}
       />,
@@ -639,8 +593,6 @@ describe("Part 2D: a live tick is applied through series.update(), never through
         symbol="BTC-PERP"
         venue="test"
         candles={candles}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
         forming={liveTick(lastOpenTime, 999, { revision: 2, seq: 10 })}
       />,
@@ -656,8 +608,6 @@ describe("Part 2D: a live tick is applied through series.update(), never through
         symbol="BTC-PERP"
         venue="test"
         candles={candles}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
         forming={liveTick(lastOpenTime, 111, { revision: 1, seq: 5 })}
       />,
@@ -685,8 +635,6 @@ describe("Part 2F: the status badge never shows the word \"Live\" (no decided fr
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
         connectionState="open"
         status={{ state: "live", provider: "fixture", last_event_at: lastEventAt }}
@@ -705,8 +653,6 @@ describe("Part 2F: the status badge never shows the word \"Live\" (no decided fr
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
         connectionState="open"
         status={{ state: "degraded" }}
@@ -760,8 +706,6 @@ describe("chart view persistence: only a user-made range change is saved", () =>
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -776,8 +720,6 @@ describe("chart view persistence: only a user-made range change is saved", () =>
         symbol="ETH-PERP"
         venue="test"
         candles={candleSet(5, 300)}
-        systemZone={testZone(295, 305)}
-        plan={{ ...basePlan, fromTime: candleSet(5, 300)[0].openTime }}
         formationOutsideWindow={false}
       />,
     );
@@ -794,8 +736,6 @@ describe("chart view persistence: only a user-made range change is saved", () =>
         symbol="BTC-PERP"
         venue="test"
         candles={[]}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -813,8 +753,6 @@ describe("chart view persistence: only a user-made range change is saved", () =>
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -824,8 +762,6 @@ describe("chart view persistence: only a user-made range change is saved", () =>
         symbol="ETH-PERP"
         venue="test"
         candles={candleSet(5, 300)}
-        systemZone={testZone(295, 305)}
-        plan={{ ...basePlan, fromTime: candleSet(5, 300)[0].openTime }}
         formationOutsideWindow={false}
       />,
     );
@@ -838,8 +774,6 @@ describe("chart view persistence: only a user-made range change is saved", () =>
         symbol="BTC-PERP"
         venue="test"
         candles={[]}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -859,8 +793,6 @@ describe("chart view persistence: only a user-made range change is saved", () =>
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -876,8 +808,6 @@ describe("chart view persistence: only a user-made range change is saved", () =>
         symbol="BTC-PERP"
         venue="test"
         candles={candleSet(5, 100)}
-        systemZone={testZone(95, 105)}
-        plan={basePlan}
         formationOutsideWindow={false}
       />,
     );
@@ -1348,9 +1278,11 @@ describe("ARGUS analysis layer", () => {
     );
   }
 
-  it("is labelled as ARGUS analysis with the setup's id, timeframe and state", () => {
+  it("is labelled as ARGUS analysis with how many setups are drawn and the selected one", () => {
     renderWithSetup();
-    expect(screen.getByTestId("analysis-layer")).toHaveTextContent("ARGUS analysis · setup #172 · bullish order block and plan · 1m · invalidated");
+    expect(screen.getByTestId("analysis-layer")).toHaveTextContent(
+      "ARGUS analysis · 1 setup drawn · selected #172 · bullish order block · 1m · invalidated",
+    );
   });
 
   it("Setups hidden (the saved preference) removes the label and the layer", () => {
@@ -1359,14 +1291,27 @@ describe("ARGUS analysis layer", () => {
     expect(screen.queryByTestId("analysis-layer")).toBeNull();
   });
 
-  it("the popover gives the stored high and low, the span and that it cannot be deleted", () => {
-    const zone = systemZoneFor(setup, events, "1h");
-    render(<ZonePopover zone={zone} x={0} y={0} onClose={() => {}} />);
-    expect(screen.getByTestId("zone-high")).toHaveTextContent("100.40");
-    expect(screen.getByTestId("zone-low")).toHaveTextContent("100.10");
-    expect(screen.getByTestId("zone-timeframe")).toHaveTextContent("1m (detected there; shown on this chart)");
-    expect(screen.getByTestId("zone-state")).toHaveTextContent("invalidated");
-    expect(screen.getByTestId("zone-span")).toHaveTextContent("from 2026-01-01 00:01 UTC, ends 2026-01-01 00:04 UTC, when the setup was invalidated");
-    expect(screen.getByTestId("zone-popover")).toHaveTextContent("it cannot be deleted");
+  it("the popover gives the stored high and low, where it came from, that it cannot be moved or deleted, and copies", () => {
+    const lifecycle = { ...setup, invalidated_at: "2026-01-01T00:04:00Z", found_mode: "replay" } as typeof setup;
+    const [zone] = buildLayers([lifecycle], {
+      chartTimeframe: "1h",
+      lastCandleSec: Date.UTC(2026, 0, 1, 0, 5) / 1000,
+      selectedId: undefined,
+      filters: { ...DEFAULT_FILTERS, states: { ...DEFAULT_FILTERS.states, invalidated: true } },
+    });
+    let copied = 0;
+    render(<SetupElementPopover element={zone} x={0} y={0} onClose={() => {}} onCopy={() => copied++} />);
+    expect(screen.getByTestId("popover-title")).toHaveTextContent("Bullish order block · 1m");
+    expect(screen.getByTestId("popover-row-zone-high")).toHaveTextContent("100.40");
+    expect(screen.getByTestId("popover-row-zone-low")).toHaveTextContent("100.10");
+    expect(screen.getByTestId("popover-row-timeframe")).toHaveTextContent("1m");
+    expect(screen.getByTestId("popover-row-state")).toHaveTextContent("invalidated");
+    expect(screen.getByTestId("popover-row-found")).toHaveTextContent("replay");
+    expect(screen.getByTestId("popover-candles")).toHaveTextContent("formation: 2026-01-01 00:01 UTC");
+    expect(screen.getByTestId("popover-reason")).toHaveTextContent("ends 2026-01-01 00:04 UTC, when the setup was invalidated");
+    expect(screen.getByTestId("setup-element-popover")).toHaveTextContent("cannot be moved or deleted");
+    expect(screen.queryByTestId("open-setup")).toBeNull();
+    screen.getByTestId("copy-to-drawings").click();
+    expect(copied).toBe(1);
   });
 });

@@ -42,6 +42,9 @@ export interface Prefs {
   // ARGUS's own chart layers (setup zone and plan lines): hidden when
   // false. Absent means shown.
   analysis_layers_visible?: boolean;
+  // The chart's setup-layer filters (Phase 6.3): state_<state>,
+  // tf_<timeframe>, evidence. Absent means the default (setup-layers.ts).
+  setup_layers?: Record<string, boolean>;
   watchlist_groups_collapsed?: Record<string, boolean>;
   drawing_tools?: DrawingToolsPref;
   chart_views?: Record<string, ChartViewPref>;
@@ -59,7 +62,12 @@ const LAST_USER_KEY = "argus:prefs:v1:last-user";
 // Keys whose value is a map/object: synced and merged per entry
 // ("chart_views/4:1m"), so two tabs changing different entries never
 // overwrite each other. Every other key is one scalar.
-const MAP_KEYS = new Set(["watchlist_groups_collapsed", "drawing_tools", "chart_views"]);
+const MAP_KEYS = new Set(["watchlist_groups_collapsed", "drawing_tools", "chart_views", "setup_layers"]);
+// The only names setup_layers may hold (the server's closed list).
+export const SETUP_LAYER_KEYS = new Set([
+  "state_detected", "state_actionable", "state_triggered", "state_invalidated",
+  "tf_1m", "tf_5m", "tf_15m", "tf_1h", "tf_4h", "tf_1d", "evidence",
+]);
 const TIMEFRAMES = new Set(["1m", "5m", "15m", "1h", "4h", "1d"]);
 const SEP = "/";
 
@@ -119,6 +127,11 @@ export function sanitizePrefs(raw: unknown): Prefs {
   if (isBool(r.tool_rail_collapsed)) out.tool_rail_collapsed = r.tool_rail_collapsed;
   if (isBool(r.other_setups_open)) out.other_setups_open = r.other_setups_open;
   if (isBool(r.analysis_layers_visible)) out.analysis_layers_visible = r.analysis_layers_visible;
+  if (r.setup_layers && typeof r.setup_layers === "object" && !Array.isArray(r.setup_layers)) {
+    const l: Record<string, boolean> = {};
+    for (const [k, v] of Object.entries(r.setup_layers as object)) if (SETUP_LAYER_KEYS.has(k) && isBool(v)) l[k] = v;
+    if (Object.keys(l).length) out.setup_layers = l;
+  }
   if (r.watchlist_groups_collapsed && typeof r.watchlist_groups_collapsed === "object") {
     const g: Record<string, boolean> = {};
     for (const [k, v] of Object.entries(r.watchlist_groups_collapsed as object))
@@ -294,7 +307,7 @@ class PreferencesStore {
   }
 
   // setEntry sets one entry of a map-valued key (undefined removes it).
-  setEntry<K extends "watchlist_groups_collapsed" | "drawing_tools" | "chart_views">(
+  setEntry<K extends "watchlist_groups_collapsed" | "drawing_tools" | "chart_views" | "setup_layers">(
     key: K,
     sub: string,
     value: unknown,

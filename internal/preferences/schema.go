@@ -68,6 +68,12 @@ type Document struct {
 	// are system output, never a user drawing, so they can be hidden but
 	// not deleted. Absent means shown.
 	AnalysisLayersVisible *bool `json:"analysis_layers_visible,omitempty"`
+	// SetupLayers are the chart's setup-layer filters (Phase 6.3), each a
+	// closed name in setupLayerKeys: state_<state> shows setups in that
+	// state (state_invalidated is "show invalidated", drawn dimmed),
+	// tf_<timeframe> shows setups found on that timeframe, evidence draws
+	// the selected setup's evidence. Absent means the app's default.
+	SetupLayers map[string]bool `json:"setup_layers,omitempty"`
 	// WatchlistGroupsCollapsed is per watchlist group name.
 	WatchlistGroupsCollapsed map[string]bool `json:"watchlist_groups_collapsed,omitempty"`
 	// DrawingTools are the drawing toolbar's toggles.
@@ -97,6 +103,13 @@ type ChartView struct {
 	BarSpacing     float64 `json:"bar_spacing"`
 	RightOffset    float64 `json:"right_offset"`
 	PinnedToLatest bool    `json:"pinned_to_latest"`
+}
+
+// setupLayerKeys are the only names SetupLayers may hold.
+var setupLayerKeys = map[string]bool{
+	"state_detected": true, "state_actionable": true, "state_triggered": true, "state_invalidated": true,
+	"tf_1m": true, "tf_5m": true, "tf_15m": true, "tf_1h": true, "tf_4h": true, "tf_1d": true,
+	"evidence": true,
 }
 
 // Bounds for the validated fields (match the web app's own clamps).
@@ -143,6 +156,11 @@ func ValidatePreferences(raw []byte) ([]byte, error) {
 	for name := range doc.WatchlistGroupsCollapsed {
 		if name == "" || len(name) > maxGroupNameLen {
 			return nil, invalid("watchlist group name must be 1-%d bytes", maxGroupNameLen)
+		}
+	}
+	for key := range doc.SetupLayers {
+		if !setupLayerKeys[key] {
+			return nil, invalid("setup_layers key %q is not a known layer filter", key)
 		}
 	}
 	if len(doc.ChartViews) > maxChartViews {

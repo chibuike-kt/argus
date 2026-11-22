@@ -312,6 +312,18 @@ type Querier interface {
 	// ListActiveSessionsForUser is GET /auth/sessions' own read path:
 	// neither revoked nor expired (idle or absolute) as of now.
 	ListActiveSessionsForUser(ctx context.Context, arg ListActiveSessionsForUserParams) ([]Session, error)
+	// ListActivity: the activity feed, newest first, from stored rows only (D7):
+	// setup events (created or changed state), structure events (BOS, CHOCH,
+	// direction established), and ingestion gaps that were resolved (recovered
+	// or confirmed to have no data). Open gaps are not activity: nothing has
+	// happened to them yet.
+	//
+	// at is when ARGUS recorded the row (created_at, or resolved_at for a gap);
+	// event_time is the candle time it is about. Keyset pagination on
+	// (at, kind, id) strictly below the cursor; the first page passes a cursor
+	// in the far future. Events created in one transaction share created_at,
+	// which is why kind and id are part of the key.
+	ListActivity(ctx context.Context, arg ListActivityParams) ([]ListActivityRow, error)
 	// ListAllInstruments is GET /instruments' own read path -- every
 	// registered instrument regardless of enablement, unlike
 	// ListEnabledInstruments (the worker's own read path). Adding neither
@@ -373,6 +385,13 @@ type Querier interface {
 	// is responsible for detecting; this query does not fill gaps.
 	ListCurrentCandlesInRange(ctx context.Context, arg ListCurrentCandlesInRangeParams) ([]Candle, error)
 	ListEnabledInstruments(ctx context.Context) ([]Instrument, error)
+	// ListEngineStatus: every enabled instrument with its processing cursor
+	// (absent when the worker has never evaluated it), and the newest stored
+	// closed 1-minute candle and how many closed candles close after the
+	// cursor -- how far the analysis is behind the data that is stored.
+	// has_cursor false: the cursor columns hold the epoch and must not be read;
+	// has_closed_candle false likewise for latest_closed_close_time.
+	ListEngineStatus(ctx context.Context) ([]ListEngineStatusRow, error)
 	// ListEventsForSetup returns a setup's full history in creation order
 	// -- reconstructing a setup's story (the frontend's eventual "Evidence"
 	// list is exactly this kind of data).
@@ -454,6 +473,24 @@ type Querier interface {
 	// itself for the same reason ListClosedCandlesInRangeLimited's own
 	// comment gives.
 	ListSetupsByInstrumentFiltered(ctx context.Context, arg ListSetupsByInstrumentFilteredParams) ([]Setup, error)
+	// ListStructureEventsInWindow: current BOS, CHOCH and direction-established
+	// events whose trigger candle opened in [from_time, to_time), oldest first.
+	// A BOS or CHOCH names exactly one broken swing (000005); its price and
+	// pivot time come with it so a client can draw the line from the broken
+	// swing to the break candle. For direction_established the broken-swing
+	// columns are NULL (it names four swings, none of them "broken").
+	ListStructureEventsInWindow(ctx context.Context, arg ListStructureEventsInWindowParams) ([]ListStructureEventsInWindowRow, error)
+	// ListSweepsInWindow: current liquidity sweeps whose trigger candle opened
+	// in [from_time, to_time), oldest first, with the swept swing's price and
+	// pivot time.
+	ListSweepsInWindow(ctx context.Context, arg ListSweepsInWindowParams) ([]ListSweepsInWindowRow, error)
+	// Read-only views for the chart layers, the engine status line and the
+	// activity feed (product overhaul brief, Phase 6.2 and 6.5, D7). Every row
+	// comes from stored structure, setup events, cursors and gaps; nothing is
+	// derived here that the engine did not record.
+	// ListSwingsInWindow: current confirmed swings whose pivot candle opened in
+	// [from_time, to_time), oldest first, at most row_limit rows.
+	ListSwingsInWindow(ctx context.Context, arg ListSwingsInWindowParams) ([]ListSwingsInWindowRow, error)
 	ListWatchlistItems(ctx context.Context, userID int64) ([]WatchlistItem, error)
 	MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) (User, error)
 	// MarkOnboardingCompleted is unconditional -- the service layer

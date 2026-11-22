@@ -23,6 +23,27 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for ActivityItemKind.
+const (
+	ActivityItemKindGap       ActivityItemKind = "gap"
+	ActivityItemKindSetup     ActivityItemKind = "setup"
+	ActivityItemKindStructure ActivityItemKind = "structure"
+)
+
+// Valid indicates whether the value is a known member of the ActivityItemKind enum.
+func (e ActivityItemKind) Valid() bool {
+	switch e {
+	case ActivityItemKindGap:
+		return true
+	case ActivityItemKindSetup:
+		return true
+	case ActivityItemKindStructure:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for EvidenceStepKind.
 const (
 	Break               EvidenceStepKind = "break"
@@ -152,6 +173,84 @@ func (e SetupEventEventType) Valid() bool {
 	}
 }
 
+// Defines values for StructureBreakEventType.
+const (
+	Bos                  StructureBreakEventType = "bos"
+	Choch                StructureBreakEventType = "choch"
+	DirectionEstablished StructureBreakEventType = "direction_established"
+)
+
+// Valid indicates whether the value is a known member of the StructureBreakEventType enum.
+func (e StructureBreakEventType) Valid() bool {
+	switch e {
+	case Bos:
+		return true
+	case Choch:
+		return true
+	case DirectionEstablished:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StructureSweepSide.
+const (
+	Buy  StructureSweepSide = "buy"
+	Sell StructureSweepSide = "sell"
+)
+
+// Valid indicates whether the value is a known member of the StructureSweepSide enum.
+func (e StructureSweepSide) Valid() bool {
+	switch e {
+	case Buy:
+		return true
+	case Sell:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StructureSwingSwingType.
+const (
+	High StructureSwingSwingType = "high"
+	Low  StructureSwingSwingType = "low"
+)
+
+// Valid indicates whether the value is a known member of the StructureSwingSwingType enum.
+func (e StructureSwingSwingType) Valid() bool {
+	switch e {
+	case High:
+		return true
+	case Low:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListActivityParamsKind.
+const (
+	ListActivityParamsKindGap       ListActivityParamsKind = "gap"
+	ListActivityParamsKindSetup     ListActivityParamsKind = "setup"
+	ListActivityParamsKindStructure ListActivityParamsKind = "structure"
+)
+
+// Valid indicates whether the value is a known member of the ListActivityParamsKind enum.
+func (e ListActivityParamsKind) Valid() bool {
+	switch e {
+	case ListActivityParamsKindGap:
+		return true
+	case ListActivityParamsKindSetup:
+		return true
+	case ListActivityParamsKindStructure:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListInstrumentsParamsEnabled.
 const (
 	All   ListInstrumentsParamsEnabled = "all"
@@ -245,6 +344,42 @@ func (e ListSetupsParamsState) Valid() bool {
 	}
 }
 
+// ActivityItem defines model for ActivityItem.
+type ActivityItem struct {
+	// At When ARGUS recorded it (a gap's resolution time).
+	At time.Time `json:"at"`
+
+	// Detail setup: the event type (detected, actionable, triggered, invalidated, amendment). structure: bos, choch or direction_established. gap: how it was resolved (for example backfilled).
+	Detail    string  `json:"detail"`
+	Direction *string `json:"direction,omitempty"`
+
+	// EventTime The candle time it is about (a gap's start).
+	EventTime time.Time `json:"event_time"`
+
+	// FoundMode live, replay or unknown (the setup's found_mode).
+	FoundMode *string    `json:"found_mode,omitempty"`
+	GapEnd    *time.Time `json:"gap_end,omitempty"`
+
+	// Id The row id within its kind (setup event, structure event, gap).
+	Id           int64            `json:"id"`
+	InstrumentId int64            `json:"instrument_id"`
+	Kind         ActivityItemKind `json:"kind"`
+	PoiType      *string          `json:"poi_type,omitempty"`
+	SetupId      *int64           `json:"setup_id,omitempty"`
+	Timeframe    string           `json:"timeframe"`
+}
+
+// ActivityItemKind defines model for ActivityItem.Kind.
+type ActivityItemKind string
+
+// ActivityPage defines model for ActivityPage.
+type ActivityPage struct {
+	Items []ActivityItem `json:"items"`
+
+	// NextCursor Pass as cursor for the next page; null on the last page.
+	NextCursor *string `json:"next_cursor"`
+}
+
 // AuthSession defines model for AuthSession.
 type AuthSession struct {
 	CreatedAt  time.Time `json:"created_at"`
@@ -298,6 +433,38 @@ type Drawings struct {
 type DrawingsUpdate struct {
 	Data    json.RawMessage `json:"data"`
 	Version int32           `json:"version"`
+}
+
+// EngineInstrumentStatus defines model for EngineInstrumentStatus.
+type EngineInstrumentStatus struct {
+	// Analysed False when the worker has never evaluated this instrument.
+	Analysed bool `json:"analysed"`
+
+	// BehindSeconds latest_closed_close_time minus evaluated_through, in seconds (0 when caught up). Null when either is absent.
+	BehindSeconds *int64 `json:"behind_seconds"`
+
+	// ClosedCandlesBehind Stored closed candles not yet evaluated.
+	ClosedCandlesBehind int64 `json:"closed_candles_behind"`
+
+	// EvaluatedThrough Close time of the last candle the engine evaluated.
+	EvaluatedThrough *time.Time `json:"evaluated_through"`
+	InstrumentId     int64      `json:"instrument_id"`
+
+	// LastEvaluatedAt When the worker last advanced the cursor (processing time).
+	LastEvaluatedAt *time.Time `json:"last_evaluated_at"`
+
+	// LatestClosedCloseTime Close time of the newest stored closed 1-minute candle.
+	LatestClosedCloseTime *time.Time `json:"latest_closed_close_time"`
+	NativeSymbol          string     `json:"native_symbol"`
+	Provider              string     `json:"provider"`
+	Timeframe             *string    `json:"timeframe,omitempty"`
+}
+
+// EngineStatus defines model for EngineStatus.
+type EngineStatus struct {
+	// AsOf Server time when this was read.
+	AsOf        time.Time                `json:"as_of"`
+	Instruments []EngineInstrumentStatus `json:"instruments"`
 }
 
 // Error defines model for Error.
@@ -577,6 +744,76 @@ type SignupVerifyResponse struct {
 	Ticket string `json:"ticket"`
 }
 
+// StructureBreak defines model for StructureBreak.
+type StructureBreak struct {
+	// BrokenSwing The swing a BOS or CHOCH broke; null for direction_established.
+	BrokenSwing      *StructureLevel         `json:"broken_swing,omitempty"`
+	DirectionAfter   string                  `json:"direction_after"`
+	DirectionBefore  string                  `json:"direction_before"`
+	EventType        StructureBreakEventType `json:"event_type"`
+	Id               int64                   `json:"id"`
+	ProtectedSwingId *int64                  `json:"protected_swing_id,omitempty"`
+	SweepId          *int64                  `json:"sweep_id,omitempty"`
+	SweepValidated   bool                    `json:"sweep_validated"`
+
+	// TriggerOpenTime Open time of the candle that broke structure.
+	TriggerOpenTime time.Time `json:"trigger_open_time"`
+}
+
+// StructureBreakEventType defines model for StructureBreak.EventType.
+type StructureBreakEventType string
+
+// StructureLevel defines model for StructureLevel.
+type StructureLevel struct {
+	Price   string    `json:"price"`
+	SwingId int64     `json:"swing_id"`
+	Time    time.Time `json:"time"`
+}
+
+// StructureSweep defines model for StructureSweep.
+type StructureSweep struct {
+	Id                 int64              `json:"id"`
+	PenetrationExtreme string             `json:"penetration_extreme"`
+	ReclaimClose       string             `json:"reclaim_close"`
+	Side               StructureSweepSide `json:"side"`
+	SweptSwing         StructureLevel     `json:"swept_swing"`
+	TriggerOpenTime    time.Time          `json:"trigger_open_time"`
+}
+
+// StructureSweepSide defines model for StructureSweep.Side.
+type StructureSweepSide string
+
+// StructureSwing defines model for StructureSwing.
+type StructureSwing struct {
+	// ConfirmedAt Close time of the candle that confirmed it.
+	ConfirmedAt time.Time `json:"confirmed_at"`
+	Id          int64     `json:"id"`
+
+	// PivotTime The pivot candle's open time.
+	PivotTime time.Time               `json:"pivot_time"`
+	Price     string                  `json:"price"`
+	SwingType StructureSwingSwingType `json:"swing_type"`
+}
+
+// StructureSwingSwingType defines model for StructureSwing.SwingType.
+type StructureSwingSwingType string
+
+// StructureWindow defines model for StructureWindow.
+type StructureWindow struct {
+	Breaks       []StructureBreak `json:"breaks"`
+	From         time.Time        `json:"from"`
+	InstrumentId int64            `json:"instrument_id"`
+
+	// NextFrom Where the next page starts when a kind reached its limit; null when the whole window was returned.
+	NextFrom  *time.Time       `json:"next_from"`
+	Sweeps    []StructureSweep `json:"sweeps"`
+	Swings    []StructureSwing `json:"swings"`
+	Timeframe string           `json:"timeframe"`
+
+	// To The end of what this page covers (exclusive). Equal to next_from when the page was cut.
+	To time.Time `json:"to"`
+}
+
 // TargetSnapshot defines model for TargetSnapshot.
 type TargetSnapshot struct {
 	Level string `json:"level"`
@@ -600,6 +837,24 @@ type DrawingsInstrumentId = int64
 
 // DrawingsTimeframe defines model for DrawingsTimeframe.
 type DrawingsTimeframe = string
+
+// ListActivityParams defines parameters for ListActivity.
+type ListActivityParams struct {
+	// InstrumentId Restrict to these instruments (up to 50). Omitted means every enabled instrument.
+	InstrumentId *[]int64 `form:"instrument_id,omitempty" json:"instrument_id,omitempty"`
+
+	// Kind Which kinds to list. Omitted means all three.
+	Kind *[]ListActivityParamsKind `form:"kind,omitempty" json:"kind,omitempty"`
+
+	// Cursor The next_cursor of the previous page. Omitted for the first page.
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum items. Default 50, maximum 200.
+	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListActivityParamsKind defines parameters for ListActivity.
+type ListActivityParamsKind string
 
 // ListInstrumentsParams defines parameters for ListInstruments.
 type ListInstrumentsParams struct {
@@ -641,6 +896,17 @@ type ListInstrumentCandlesParamsInterval string
 
 // ListInstrumentCandlesParamsOrder defines parameters for ListInstrumentCandles.
 type ListInstrumentCandlesParamsOrder string
+
+// GetInstrumentStructureParams defines parameters for GetInstrumentStructure.
+type GetInstrumentStructureParams struct {
+	// Timeframe The analysed timeframe. Only 1m is analysed today.
+	Timeframe *string   `form:"timeframe,omitempty" json:"timeframe,omitempty"`
+	From      time.Time `form:"from" json:"from"`
+	To        time.Time `form:"to" json:"to"`
+
+	// Limit Maximum rows of each kind. Default 500, minimum 10, maximum 2000.
+	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
+}
 
 // GetDrawingsParams defines parameters for GetDrawings.
 type GetDrawingsParams struct {
@@ -704,6 +970,9 @@ type UpdateWatchlistJSONRequestBody = WatchlistUpdateRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// ListActivity The activity feed, newest first, from stored rows only (Phase 6.5, D7): setup events (a setup created or changing state), structure events (BOS, CHOCH, direction established) and resolved ingestion gaps (recovered by backfill, or confirmed to have no data). Open gaps are not listed. Keyset paginated with an opaque cursor.
+	// (GET /activity)
+	ListActivity(w http.ResponseWriter, r *http.Request, params ListActivityParams)
 	// AuthLogin Generic invalid_credentials for unknown email, wrong password or an unverified account alike (ADR-015). On success, sets the session cookie and returns the user.
 	// (POST /auth/login)
 	AuthLogin(w http.ResponseWriter, r *http.Request)
@@ -731,6 +1000,9 @@ type ServerInterface interface {
 	// AuthSignupVerify Checks a 6-digit code and, if correct, returns a single-use signup ticket valid for 30 minutes (ADR-015). One generic invalid_code for a wrong, expired, unknown or exhausted code -- none of those is distinguished for the caller.
 	// (POST /auth/signup/verify)
 	AuthSignupVerify(w http.ResponseWriter, r *http.Request)
+	// GetEngineStatus What the analysis engine has evaluated, from stored processing cursors only (Phase 6.5, D7): per enabled instrument, the close time of the last candle evaluated, when the worker last advanced it, the newest stored closed candle, and how far the evaluation is behind it. Nothing is estimated. A worker tick that found no new candle writes nothing, so last_evaluated_at is the last time a candle was evaluated, not the last time the worker woke up.
+	// (GET /engine/status)
+	GetEngineStatus(w http.ResponseWriter, r *http.Request)
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams)
@@ -740,6 +1012,9 @@ type ServerInterface interface {
 	// ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams)
+	// GetInstrumentStructure The stored market structure of one instrument and timeframe over a time window, for the chart layers (Phase 6.2): confirmed swings, structure events (BOS, CHOCH, direction established) and liquidity sweeps, current rows only (a row superseded by a candle correction is never returned). Read only. Bounded: [from, to) at most 31 days, and at most limit rows of each kind, oldest first. When any kind reached its limit, every kind is cut at the same time and next_from says where the next page starts, so pages never overlap and never skip a row. Prices are decimal strings at the instrument's price scale. This is the stored structure, not a setup's evidence: a setup's own swings, sweep and break are in GET /setups/{id}/evidence.
+	// (GET /instruments/{id}/structure)
+	GetInstrumentStructure(w http.ResponseWriter, r *http.Request, id int64, params GetInstrumentStructureParams)
 	// GetDrawings The signed-in user's own drawings on one chart (instrument and timeframe). Nothing stored yet: an empty array at version 0. An unknown or disabled instrument is a 404.
 	// (GET /me/drawings)
 	GetDrawings(w http.ResponseWriter, r *http.Request, params GetDrawingsParams)
@@ -787,6 +1062,12 @@ type ServerInterface interface {
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
 
 type Unimplemented struct{}
+
+// ListActivity The activity feed, newest first, from stored rows only (Phase 6.5, D7): setup events (a setup created or changing state), structure events (BOS, CHOCH, direction established) and resolved ingestion gaps (recovered by backfill, or confirmed to have no data). Open gaps are not listed. Keyset paginated with an opaque cursor.
+// (GET /activity)
+func (_ Unimplemented) ListActivity(w http.ResponseWriter, r *http.Request, params ListActivityParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
 
 // AuthLogin Generic invalid_credentials for unknown email, wrong password or an unverified account alike (ADR-015). On success, sets the session cookie and returns the user.
 // (POST /auth/login)
@@ -842,6 +1123,12 @@ func (_ Unimplemented) AuthSignupVerify(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// GetEngineStatus What the analysis engine has evaluated, from stored processing cursors only (Phase 6.5, D7): per enabled instrument, the close time of the last candle evaluated, when the worker last advanced it, the newest stored closed candle, and how far the evaluation is behind it. Nothing is estimated. A worker tick that found no new candle writes nothing, so last_evaluated_at is the last time a candle was evaluated, not the last time the worker woke up.
+// (GET /engine/status)
+func (_ Unimplemented) GetEngineStatus(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 // (GET /instruments)
 func (_ Unimplemented) ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams) {
@@ -857,6 +1144,12 @@ func (_ Unimplemented) ListInstrumentStats(w http.ResponseWriter, r *http.Reques
 // ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 // (GET /instruments/{id}/candles)
 func (_ Unimplemented) ListInstrumentCandles(w http.ResponseWriter, r *http.Request, id int64, params ListInstrumentCandlesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetInstrumentStructure The stored market structure of one instrument and timeframe over a time window, for the chart layers (Phase 6.2): confirmed swings, structure events (BOS, CHOCH, direction established) and liquidity sweeps, current rows only (a row superseded by a candle correction is never returned). Read only. Bounded: [from, to) at most 31 days, and at most limit rows of each kind, oldest first. When any kind reached its limit, every kind is cut at the same time and next_from says where the next page starts, so pages never overlap and never skip a row. Prices are decimal strings at the instrument's price scale. This is the stored structure, not a setup's evidence: a setup's own swings, sweep and break are in GET /setups/{id}/evidence.
+// (GET /instruments/{id}/structure)
+func (_ Unimplemented) GetInstrumentStructure(w http.ResponseWriter, r *http.Request, id int64, params GetInstrumentStructureParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -952,6 +1245,78 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// ListActivity operation middleware
+func (siw *ServerInterfaceWrapper) ListActivity(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListActivityParams
+
+	// ------------- Optional query parameter "instrument_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "instrument_id", r.URL.Query(), &params.InstrumentId, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "instrument_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "instrument_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "kind" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "kind", r.URL.Query(), &params.Kind, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "kind"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "kind", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: "int32"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListActivity(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // AuthLogin operation middleware
 func (siw *ServerInterfaceWrapper) AuthLogin(w http.ResponseWriter, r *http.Request) {
@@ -1082,6 +1447,20 @@ func (siw *ServerInterfaceWrapper) AuthSignupVerify(w http.ResponseWriter, r *ht
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.AuthSignupVerify(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetEngineStatus operation middleware
+func (siw *ServerInterfaceWrapper) GetEngineStatus(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetEngineStatus(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1268,6 +1647,87 @@ func (siw *ServerInterfaceWrapper) ListInstrumentCandles(w http.ResponseWriter, 
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListInstrumentCandles(w, r, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetInstrumentStructure operation middleware
+func (siw *ServerInterfaceWrapper) GetInstrumentStructure(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetInstrumentStructureParams
+
+	// ------------- Optional query parameter "timeframe" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "timeframe", r.URL.Query(), &params.Timeframe, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "timeframe"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "timeframe", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "from" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "from", r.URL.Query(), &params.From, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "from"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "from", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "to" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "to", r.URL.Query(), &params.To, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "to"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "to", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: "int32"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetInstrumentStructure(w, r, id, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1782,6 +2242,15 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/instruments/{id}/candles", wrapper.ListInstrumentCandles)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/instruments/{id}/structure", wrapper.GetInstrumentStructure)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/engine/status", wrapper.GetEngineStatus)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/activity", wrapper.ListActivity)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/setups", wrapper.ListSetups)
 	})
 	r.Group(func(r chi.Router) {
@@ -1849,6 +2318,42 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 
 	return r
+}
+
+type ListActivityRequestObject struct {
+	Params ListActivityParams
+}
+
+type ListActivityResponseObject interface {
+	VisitListActivityResponse(w http.ResponseWriter) error
+}
+
+type ListActivity200JSONResponse ActivityPage
+
+func (response ListActivity200JSONResponse) VisitListActivityResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListActivity400JSONResponse Error
+
+func (response ListActivity400JSONResponse) VisitListActivityResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 type AuthLoginRequestObject struct {
@@ -2125,6 +2630,27 @@ func (response AuthSignupVerify400JSONResponse) VisitAuthSignupVerifyResponse(w 
 	return err
 }
 
+type GetEngineStatusRequestObject struct {
+}
+
+type GetEngineStatusResponseObject interface {
+	VisitGetEngineStatusResponse(w http.ResponseWriter) error
+}
+
+type GetEngineStatus200JSONResponse EngineStatus
+
+func (response GetEngineStatus200JSONResponse) VisitGetEngineStatusResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListInstrumentsRequestObject struct {
 	Params ListInstrumentsParams
 }
@@ -2237,6 +2763,57 @@ func (response ListInstrumentCandles400JSONResponse) VisitListInstrumentCandlesR
 type ListInstrumentCandles404JSONResponse Error
 
 func (response ListInstrumentCandles404JSONResponse) VisitListInstrumentCandlesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetInstrumentStructureRequestObject struct {
+	Id     int64 `json:"id"`
+	Params GetInstrumentStructureParams
+}
+
+type GetInstrumentStructureResponseObject interface {
+	VisitGetInstrumentStructureResponse(w http.ResponseWriter) error
+}
+
+type GetInstrumentStructure200JSONResponse StructureWindow
+
+func (response GetInstrumentStructure200JSONResponse) VisitGetInstrumentStructureResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetInstrumentStructure400JSONResponse Error
+
+func (response GetInstrumentStructure400JSONResponse) VisitGetInstrumentStructureResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetInstrumentStructure404JSONResponse Error
+
+func (response GetInstrumentStructure404JSONResponse) VisitGetInstrumentStructureResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -2795,6 +3372,9 @@ func (response RemoveWatchlistItem400JSONResponse) VisitRemoveWatchlistItemRespo
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// ListActivity The activity feed, newest first, from stored rows only (Phase 6.5, D7): setup events (a setup created or changing state), structure events (BOS, CHOCH, direction established) and resolved ingestion gaps (recovered by backfill, or confirmed to have no data). Open gaps are not listed. Keyset paginated with an opaque cursor.
+	// (GET /activity)
+	ListActivity(ctx context.Context, request ListActivityRequestObject) (ListActivityResponseObject, error)
 	// AuthLogin Generic invalid_credentials for unknown email, wrong password or an unverified account alike (ADR-015). On success, sets the session cookie and returns the user.
 	// (POST /auth/login)
 	AuthLogin(ctx context.Context, request AuthLoginRequestObject) (AuthLoginResponseObject, error)
@@ -2822,6 +3402,9 @@ type StrictServerInterface interface {
 	// AuthSignupVerify Checks a 6-digit code and, if correct, returns a single-use signup ticket valid for 30 minutes (ADR-015). One generic invalid_code for a wrong, expired, unknown or exhausted code -- none of those is distinguished for the caller.
 	// (POST /auth/signup/verify)
 	AuthSignupVerify(ctx context.Context, request AuthSignupVerifyRequestObject) (AuthSignupVerifyResponseObject, error)
+	// GetEngineStatus What the analysis engine has evaluated, from stored processing cursors only (Phase 6.5, D7): per enabled instrument, the close time of the last candle evaluated, when the worker last advanced it, the newest stored closed candle, and how far the evaluation is behind it. Nothing is estimated. A worker tick that found no new candle writes nothing, so last_evaluated_at is the last time a candle was evaluated, not the last time the worker woke up.
+	// (GET /engine/status)
+	GetEngineStatus(ctx context.Context, request GetEngineStatusRequestObject) (GetEngineStatusResponseObject, error)
 	// ListInstruments List every registered instrument -- internal/instruments.Store.ListAllFiltered. Defaults to enabled rows only (web-wiring-polish brief, item 2): a disabled test/fixture row filling a capped page was hiding the real, enabled instruments. The enabled query parameter can widen or narrow that.
 	// (GET /instruments)
 	ListInstruments(ctx context.Context, request ListInstrumentsRequestObject) (ListInstrumentsResponseObject, error)
@@ -2831,6 +3414,9 @@ type StrictServerInterface interface {
 	// ListInstrumentCandles Closed candles for one instrument in [from, to), at the requested interval (default 1m, so an existing caller that never sends this parameter is unaffected). 1m is served directly (internal/marketdata.Store.ListClosedInRangeLimited, the same read path cmd/argus-worker's own CandleSource uses); 5m/15m/1h/4h/1d are computed on read from the canonical 1-minute series (internal/marketdata.Aggregate/AggregateRange/WindowsInRange) -- the browser never aggregates (live-chart-pipeline brief rule 4), so history and the live stream's own derived candles cannot disagree. A forming candle's own values can still change, so it is never included at any interval; a window with any missing or still- forming source minute is silently excluded, never guessed or partially filled. from/to are both optional at this schema level so order=desc can mean "the latest N, no range known or needed" (web-wiring-polish brief, item 1) for 1m; above 1m both from and to are required regardless of order (see the handler's own comment on why the open-ended "latest N" shortcut is not built for aggregated intervals). Which intervals this endpoint serves for a given instrument is read entirely from that instrument's own supported_intervals (owner approved 12 November 2026) -- an interval not in that list is a 400, never an asset-class guess. Calendar-aware (session-bounded) windows for forex are not built, which is exactly why a forex instrument's own row does not list anything above 1m today.
 	// (GET /instruments/{id}/candles)
 	ListInstrumentCandles(ctx context.Context, request ListInstrumentCandlesRequestObject) (ListInstrumentCandlesResponseObject, error)
+	// GetInstrumentStructure The stored market structure of one instrument and timeframe over a time window, for the chart layers (Phase 6.2): confirmed swings, structure events (BOS, CHOCH, direction established) and liquidity sweeps, current rows only (a row superseded by a candle correction is never returned). Read only. Bounded: [from, to) at most 31 days, and at most limit rows of each kind, oldest first. When any kind reached its limit, every kind is cut at the same time and next_from says where the next page starts, so pages never overlap and never skip a row. Prices are decimal strings at the instrument's price scale. This is the stored structure, not a setup's evidence: a setup's own swings, sweep and break are in GET /setups/{id}/evidence.
+	// (GET /instruments/{id}/structure)
+	GetInstrumentStructure(ctx context.Context, request GetInstrumentStructureRequestObject) (GetInstrumentStructureResponseObject, error)
 	// GetDrawings The signed-in user's own drawings on one chart (instrument and timeframe). Nothing stored yet: an empty array at version 0. An unknown or disabled instrument is a 404.
 	// (GET /me/drawings)
 	GetDrawings(ctx context.Context, request GetDrawingsRequestObject) (GetDrawingsResponseObject, error)
@@ -2912,6 +3498,32 @@ type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
 	options     StrictHTTPServerOptions
+}
+
+// ListActivity operation middleware
+func (sh *strictHandler) ListActivity(w http.ResponseWriter, r *http.Request, params ListActivityParams) {
+	var request ListActivityRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListActivity(ctx, request.(ListActivityRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListActivity")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListActivityResponseObject); ok {
+		if err := validResponse.VisitListActivityResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
 }
 
 // AuthLogin operation middleware
@@ -3160,6 +3772,30 @@ func (sh *strictHandler) AuthSignupVerify(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// GetEngineStatus operation middleware
+func (sh *strictHandler) GetEngineStatus(w http.ResponseWriter, r *http.Request) {
+	var request GetEngineStatusRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetEngineStatus(ctx, request.(GetEngineStatusRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetEngineStatus")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetEngineStatusResponseObject); ok {
+		if err := validResponse.VisitGetEngineStatusResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // ListInstruments operation middleware
 func (sh *strictHandler) ListInstruments(w http.ResponseWriter, r *http.Request, params ListInstrumentsParams) {
 	var request ListInstrumentsRequestObject
@@ -3232,6 +3868,33 @@ func (sh *strictHandler) ListInstrumentCandles(w http.ResponseWriter, r *http.Re
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ListInstrumentCandlesResponseObject); ok {
 		if err := validResponse.VisitListInstrumentCandlesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetInstrumentStructure operation middleware
+func (sh *strictHandler) GetInstrumentStructure(w http.ResponseWriter, r *http.Request, id int64, params GetInstrumentStructureParams) {
+	var request GetInstrumentStructureRequestObject
+
+	request.Id = id
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetInstrumentStructure(ctx, request.(GetInstrumentStructureRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetInstrumentStructure")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetInstrumentStructureResponseObject); ok {
+		if err := validResponse.VisitGetInstrumentStructureResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -3622,158 +4285,188 @@ func (sh *strictHandler) RemoveWatchlistItem(w http.ResponseWriter, r *http.Requ
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
-	"fwEAAP//",
+	"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",
+	"4LumDD7+/PH/BgAA//8=",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

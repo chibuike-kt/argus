@@ -1,3 +1,4 @@
+import { formatRR } from "@/api/money";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { CaretRight, CircleNotch } from "@phosphor-icons/react";
@@ -166,7 +167,7 @@ export function Setups() {
                 <span className="text-fg-muted">{s.timeframe}</span>
                 <span className="tnum text-right">{n(s.entry)}</span>
                 <span className="tnum text-right text-down">{n(s.stop)}</span>
-                <span className="tnum text-right font-medium text-fg">{s.rr.toFixed(1)}</span>
+                <span className="tnum text-right font-medium text-fg">{formatRR(s.rr)}</span>
                 <span>
                   <SetupStateBadge state={state} />
                 </span>

@@ -6,7 +6,6 @@ import type {
   SeriesType,
   Time,
 } from "lightweight-charts";
-import { PositionPrimitive, RectanglePrimitive } from "./drawings/primitives";
 import { labelColors } from "@/lib/label-contrast";
 
 // ARGUS's own annotations (order block high/low, entry, stop, targets) all
@@ -148,98 +147,6 @@ export class SystemAxisLabelsPrimitive implements ISeriesPrimitive<Time> {
       });
     }
     return views;
-  }
-}
-
-// The system annotations' own primitives with their native price-axis
-// labels switched off (SystemAxisLabelsPrimitive draws those instead). Same
-// drawing otherwise.
-export class SystemRectanglePrimitive extends RectanglePrimitive {
-  protected priceLineSpecs() {
-    return [];
-  }
-}
-
-export class SystemPositionPrimitive extends PositionPrimitive {
-  protected priceLineSpecs() {
-    return [];
-  }
-}
-
-// [U] display values: the smallest a system zone is drawn, so a zone a
-// few cents tall (a 1m order block on an hourly chart) never disappears.
-// Its real high and low are in the zone's popover; nothing stored changes.
-export const MIN_ZONE_HEIGHT_PX = 4;
-export const MIN_ZONE_WIDTH_PX = 6;
-
-export interface ZoneRect {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-}
-
-// SystemZonePrimitive draws ARGUS's setup zone from its start to its end
-// time (system-zone.ts), at least MIN_ZONE_* in size, with its label. It
-// keeps the rectangle it last drew so a click on it can open the zone's
-// popover. Not a user drawing: no handles, never in the drawing store.
-export class SystemZonePrimitive extends RectanglePrimitive {
-  lastRect: ZoneRect | null = null;
-
-  constructor(private z: { startSec: number; endSec: number; low: number; high: number; label: string; color: string }) {
-    super({
-      p1: { time: z.startSec as Time, price: z.high },
-      p2: { time: z.endSec as Time, price: z.low },
-      style: { color: z.color, lineWidth: 1, lineStyle: "solid" },
-      label: z.label,
-    });
-  }
-
-  protected priceLineSpecs() {
-    return [];
-  }
-
-  paneViews() {
-    return [
-      {
-        renderer: () => ({
-          draw: (target: Parameters<ReturnType<ReturnType<RectanglePrimitive["paneViews"]>[number]["renderer"]>["draw"]>[0]) => {
-            const x1 = this.x(this.z.startSec as Time);
-            const x2 = this.x(this.z.endSec as Time);
-            const y1 = this.y(this.z.high);
-            const y2 = this.y(this.z.low);
-            if (x1 == null || x2 == null || y1 == null || y2 == null) {
-              this.lastRect = null;
-              return;
-            }
-            target.useMediaCoordinateSpace(({ context: ctx }) => {
-              let left = Math.min(x1, x2);
-              let w = Math.abs(x2 - x1);
-              if (w < MIN_ZONE_WIDTH_PX) {
-                left -= (MIN_ZONE_WIDTH_PX - w) / 2;
-                w = MIN_ZONE_WIDTH_PX;
-              }
-              let top = Math.min(y1, y2);
-              let h = Math.abs(y2 - y1);
-              if (h < MIN_ZONE_HEIGHT_PX) {
-                top -= (MIN_ZONE_HEIGHT_PX - h) / 2;
-                h = MIN_ZONE_HEIGHT_PX;
-              }
-              this.lastRect = { left, top, width: w, height: h };
-              ctx.fillStyle = `${this.z.color}33`;
-              ctx.fillRect(left, top, w, h);
-              ctx.strokeStyle = `${this.z.color}aa`;
-              ctx.lineWidth = 1;
-              ctx.strokeRect(left + 0.5, top + 0.5, w - 1, h - 1);
-              ctx.font = "600 10px Onest, sans-serif";
-              ctx.fillStyle = "#c9cdff";
-              ctx.textBaseline = "bottom";
-              ctx.fillText(this.z.label.toUpperCase(), left + 2, top - 2);
-            });
-          },
-        }),
-      },
-    ];
   }
 }
 
