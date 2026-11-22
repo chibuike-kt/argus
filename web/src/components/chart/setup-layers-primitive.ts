@@ -13,7 +13,8 @@
 //
 // Hierarchy: the selected setup shows its whole story and its labels;
 // every other setup is a thin translucent zone at OTHER_SETUP_ALPHA with
-// one short label, brought up while hovered. Level of detail: below
+// one short label (kept at every zoom, so a long active zone can always be
+// told apart), brought up while hovered. Level of detail: below
 // LABEL_MIN_BAR_SPACING_PX of bar spacing only markers and the zone label
 // are drawn; swing point text needs SWING_TEXT_MIN_BAR_SPACING_PX.
 import type { IChartApi, ISeriesApi, ISeriesPrimitive, SeriesAttachedParameter, SeriesType, Time } from "lightweight-charts";
@@ -124,6 +125,8 @@ export class SetupLayersPrimitive implements ISeriesPrimitive<Time> {
   private storyLimit: number | null = null;
   private focusedId: string | null = null;
   private hoveredSetup: number | null = null;
+  // Pixels at the top the chart's legend covers (measured by the chart).
+  private reservedTop = LEGEND_RESERVED_PX;
   // What the last paint drew (shapes and visible labels), for hitElement.
   hitBoxes: HitBox[] = [];
   // Labels the last paint had to hide (no room): their elements keep a
@@ -155,6 +158,11 @@ export class SetupLayersPrimitive implements ISeriesPrimitive<Time> {
   }
   setFocused(id: string | null) {
     this.focusedId = id;
+    this.requestUpdate?.();
+  }
+  setReservedTop(px: number) {
+    if (Math.abs(px - this.reservedTop) < 0.5) return;
+    this.reservedTop = px;
     this.requestUpdate?.();
   }
   setHoveredSetup(id: number | null) {
@@ -212,10 +220,13 @@ export class SetupLayersPrimitive implements ISeriesPrimitive<Time> {
         ctx.restore();
         if (!box) continue;
         boxes.push({ id: el.id, ...box });
+        // An element entirely off-screen gets no label: before, the layout
+        // pulled such labels into view at the pane's edge (polish pass).
+        if (box.left + box.width < 0 || box.left > mediaSize.width || box.top + box.height < 0 || box.top > mediaSize.height) continue;
         this.labelsFor(el, box, { detailed, swingText, hovered, alpha: a }, measure, pending);
       }
 
-      const placed = layoutLabels(pending, { width: mediaSize.width, height: mediaSize.height, gap: 2, maxSteps: 6, top: LEGEND_RESERVED_PX });
+      const placed = layoutLabels(pending, { width: mediaSize.width, height: mediaSize.height, gap: 2, maxSteps: 6, top: this.reservedTop });
       const byId = new Map(pending.map((p) => [p.id, p]));
       this.hiddenLabels = [];
       this.visibleLabels = [];
@@ -275,7 +286,7 @@ export class SetupLayersPrimitive implements ISeriesPrimitive<Time> {
       out.push({ id, elementId: el.id, text, ax, ay, w: measure(text), h: LABEL_H, priority, place, color, pill, alpha: lod.alpha });
     if (!el.selected) {
       // Other setups: one short label on the zone, when there is detail to spare or it is hovered.
-      if (el.kind === "zone" && (lod.detailed || lod.hovered)) {
+      if (el.kind === "zone") {
         push(el.id, el.label, box.left, box.top, lod.hovered ? LABEL_PRIORITY.zone : LABEL_PRIORITY.otherZone, "above-right", P.muted);
       }
       return;

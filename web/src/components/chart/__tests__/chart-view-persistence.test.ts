@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { fromSavedView, toSavedView } from "../chart-view-persistence";
+import { RIGHT_MARGIN_BARS } from "../default-view";
 
 // 1m bars at t = 1000, 1060, ... (unix seconds).
 const series = (n: number, start = 1000) => Array.from({ length: n }, (_, i) => start + i * 60);
@@ -43,5 +44,20 @@ describe("chart view saved as time, not indexes", () => {
   it("nothing in view, or no data: nothing saved", () => {
     expect(toSavedView({ from: 200, to: 230 }, series(100), 6)).toBeNull();
     expect(toSavedView({ from: 0, to: 10 }, [], 6)).toBeNull();
+  });
+});
+
+describe("restoring a view pinned to the latest bar (polish pass, item 3)", () => {
+  const times = Array.from({ length: 206 }, (_, i) => 1_000 + i * 3600);
+  it("caps a saved right margin at the default, keeping the saved zoom", () => {
+    // The owner's real saved 1h BTC view: 83 empty bars of 217.
+    const saved = { from_time: times[70], to_time: times[205], bars_visible: 217.28, bar_spacing: 3.64, right_offset: 83.2, pinned_to_latest: true };
+    const r = fromSavedView(saved, times)!;
+    expect(r.to - (times.length - 1)).toBe(RIGHT_MARGIN_BARS);
+    expect(r.to - r.from).toBeCloseTo(217.28);
+  });
+  it("keeps a smaller saved margin as it was", () => {
+    const saved = { from_time: times[100], to_time: times[205], bars_visible: 100, bar_spacing: 6, right_offset: 2, pinned_to_latest: true };
+    expect(fromSavedView(saved, times)!.to).toBe(times.length - 1 + 2);
   });
 });
