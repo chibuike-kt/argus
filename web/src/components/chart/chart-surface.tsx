@@ -36,6 +36,7 @@ import { LastPriceLabelPrimitive, SystemAxisLabelsPrimitive } from "./system-axi
 import { buildLayers, filtersFromPrefs, type LayerElement } from "./setup-layers";
 import { SetupLayersPrimitive } from "./setup-layers-primitive";
 import { SetupElementPopover } from "./setup-popover";
+import { focusNotice, focusRange, focusSpan } from "./setup-focus";
 import { cloneDrawing, nextId, type Drawing } from "./drawings/types";
 import { setSeriesTimeAxis } from "./drawings/time-axis";
 import {
@@ -68,6 +69,25 @@ const SYSTEM_COLOR = "#6d7bff";
 // ("+12 levels" at 11px) whatever the instrument's price length. Display
 // value.
 const PRICE_AXIS_MIN_WIDTH_PX = 76;
+
+// The price scale's default margins (fractions of the pane); the top one
+// grows to clear the legend (polish pass, item 2). LEGEND_GAP_PX is the
+// space kept between the legend and the highest candle. Display values.
+const DEFAULT_TOP_MARGIN = 0.12;
+const DEFAULT_BOTTOM_MARGIN = 0.12;
+const LEGEND_GAP_PX = 10;
+// legendTopMargin is the price scale's top margin (a fraction of the pane)
+// that keeps every candle below the legend: the legend's bottom edge plus
+// LEGEND_GAP_PX, never less than the default and never more than 45% of
+// the pane (a tiny pane keeps room for its candles).
+export function legendTopMargin(legendBottomPx: number, paneHeightPx: number): number {
+  if (paneHeightPx <= 0) return DEFAULT_TOP_MARGIN;
+  return Math.min(0.45, Math.max(DEFAULT_TOP_MARGIN, (legendBottomPx + LEGEND_GAP_PX) / paneHeightPx));
+}
+
+// When framing a setup whose evidence predates the loaded candles, page
+// back this much further. Display value.
+const FOCUS_HISTORY_PAD_SEC = 3600;
 
 // A visible-range change counts as the trader's (and is saved) only within
 // this long after a wheel, drag or touch on the chart. Display value.
@@ -199,12 +219,12 @@ function AnalysisLayerChip({ layer }: { layer: AnalysisLayer }) {
   if (!layer.visible) return null;
   return (
     <span
-      className="flex items-center gap-1 rounded-md border border-[#6d7bff]/40 bg-[#6d7bff]/10 px-1.5 py-0.5 text-[11px] text-fg-muted"
+      className="pointer-events-auto flex min-w-0 max-w-full items-center gap-1 rounded-md border border-[#6d7bff]/40 bg-[#6d7bff]/10 px-1.5 py-0.5 text-[11px] text-fg-muted"
       data-testid="analysis-layer"
-      title="ARGUS's own analysis: every setup it found on this instrument, and the selected setup's evidence. Not a drawing: filter or hide it with Setups in the chart controls; it cannot be moved or deleted. Click any element for details."
+      title={`${layer.label}. ARGUS's own analysis: every setup it found on this instrument, and the selected setup's evidence. Not a drawing: filter or hide it with Setups in the chart controls; it cannot be moved or deleted. Click any element for details.`}
     >
-      <span className="size-1.5 rounded-full bg-[#6d7bff]" aria-hidden />
-      {layer.label}
+      <span className="size-1.5 shrink-0 rounded-full bg-[#6d7bff]" aria-hidden />
+      <span className="min-w-0 truncate">{layer.label}</span>
     </span>
   );
 }
@@ -257,6 +277,8 @@ export function ChartSurface({ className }: { className?: string }) {
     setFocusedElement,
     storyStep,
     selectSetup,
+    focusRequest,
+    setFocusNotice,
   } = useAnalysisWorkspace();
   const filters = useMemo(() => filtersFromPrefs(prefs.setup_layers), [prefs.setup_layers]);
   const lastCandleSec = candles.length ? Math.floor(Date.parse(candles[candles.length - 1].open_time) / 1000) : 0;
@@ -362,6 +384,8 @@ export function ChartSurface({ className }: { className?: string }) {
       onFocusElement={setFocusedElement}
       onOpenSetup={selectSetup}
       selectedSetupId={setup?.id}
+      focusRequest={focusRequest ?? 0}
+      onFocusNotice={setFocusNotice}
       formationOutsideWindow={formationOutsideWindow}
       analysisLayer={analysisLayer}
       forming={forming}
@@ -406,6 +430,10 @@ export interface ChartSurfaceInnerProps {
   onFocusElement?: (id: string | null) => void;
   onOpenSetup?: (setupId: number) => void;
   selectedSetupId?: number;
+  // Framing the selected setup (polish pass, item 4): each new value asks
+  // for one frame; the chart reports a sentence when not all of it fits.
+  focusRequest?: number;
+  onFocusNotice?: (s: string | null) => void;
   formationOutsideWindow: boolean;
   // The selected setup's layer chip (label and shown/hidden); undefined
   // when no setup is selected (nothing of ARGUS's is drawn).
@@ -481,7 +509,7 @@ function LiveStatusBadge({
   const now = useNow(1000);
   if (fatalReason) {
     return (
-      <span className="flex items-center gap-1 rounded-md border border-down/30 bg-down/10 px-1.5 py-0.5 text-[11px] text-down">
+      <span className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-down/30 bg-down/10 px-1.5 py-0.5 text-[11px] text-down">
         <span className="size-1.5 rounded-full bg-down" />
         Disconnected -- sign in again
       </span>
@@ -489,7 +517,7 @@ function LiveStatusBadge({
   }
   if (connectionState === "connecting" || connectionState === "closed") {
     return (
-      <span className="flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
+      <span className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
         <span className="size-1.5 animate-pulse rounded-full bg-fg-subtle" />
         {connectionState === "connecting" ? "Connecting…" : "Reconnecting…"}
       </span>
@@ -498,7 +526,7 @@ function LiveStatusBadge({
   if (!status) return null; // open, but the server has not sent a status message yet
   if (status.state === "degraded") {
     return (
-      <span className="flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-down">
+      <span className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-down">
         <span className="size-1.5 rounded-full bg-down" />
         Degraded
         {status.provider && <span className="text-fg-subtle">· {status.provider}</span>}
@@ -508,7 +536,7 @@ function LiveStatusBadge({
   const label = status.state === "live" ? "Connected" : status.state[0].toUpperCase() + status.state.slice(1);
   const age = status.last_event_at ? formatAge(now - new Date(status.last_event_at).getTime()) : null;
   return (
-    <span className="flex items-center gap-1 rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
+    <span className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-line bg-white/5 px-1.5 py-0.5 text-[11px] text-fg-subtle">
       <span className="size-1.5 rounded-full bg-up" />
       {label}
       {age && <span>· last candle {age} ago</span>}
@@ -531,6 +559,8 @@ export function ChartSurfaceInner({
   onFocusElement,
   onOpenSetup,
   selectedSetupId,
+  focusRequest = 0,
+  onFocusNotice,
   formationOutsideWindow,
   analysisLayer,
   forming,
@@ -592,6 +622,14 @@ export function ChartSurfaceInner({
   // The range buttons' own notice ("Showing 3.5 days, the most history
   // stored"), and the range still waiting for older history.
   const [rangeNotice, setRangeNotice] = useState<string | null>(null);
+  // The legend overlay, kept inside the plot (never over the price axis),
+  // and the price axis width it is bounded by (polish pass, items 1 and 2).
+  const legendRef = useRef<HTMLDivElement>(null);
+  const [axisWidth, setAxisWidth] = useState(PRICE_AXIS_MIN_WIDTH_PX);
+  // A frame of the selected setup waiting for the chart to be ready (the
+  // saved view restored, the setup's elements built, older history in).
+  const pendingFocusRef = useRef<{ token: number; historyAsked: boolean; oldestSec: number | null } | null>(null);
+  const focusTokenRef = useRef(0);
   // The popover of a clicked ARGUS element, in host pixels.
   const [elementPopover, setElementPopover] = useState<{ id: string; x: number; y: number } | null>(null);
   const [activeRange, setActiveRange] = useState<RangeKey | null>(null);
@@ -898,7 +936,11 @@ export function ChartSurfaceInner({
     layersPrimitiveRef.current = layersPrimitive;
     // Dev only (stripped from production builds): lets a browser check find
     // where each ARGUS element was drawn, to click it.
-    if (import.meta.env.DEV) (window as unknown as { __argusSetupLayers?: SetupLayersPrimitive }).__argusSetupLayers = layersPrimitive;
+    if (import.meta.env.DEV) {
+      const w = window as unknown as { __argusSetupLayers?: SetupLayersPrimitive; __argusChart?: { chart: IChartApi; times: () => number[] } };
+      w.__argusSetupLayers = layersPrimitive;
+      w.__argusChart = { chart, times: () => dataTimesRef.current };
+    }
 
     chart.subscribeCrosshairMove((param) => {
       const d = param.seriesData.get(series) as CandlestickData<Time> | WhitespaceData<Time> | undefined;
@@ -1005,6 +1047,7 @@ export function ChartSurfaceInner({
       pendingRestoreScopeRef.current = null;
       withProgrammaticRangeChange(() => restoreOrDefaultView(chart, newScope));
     }
+    tryApplyFocus();
     // applyCandleData/symbol/timeframe/hasCandles are read fresh each
     // run via closure, same convention the create effect above already
     // uses (this project's own lint config does not enforce
@@ -1036,6 +1079,73 @@ export function ChartSurfaceInner({
     systemAxisLabelsRef.current?.setLevels(levels);
   }, [layers, chartGeneration]);
   useEffect(() => layersPrimitiveRef.current?.setStoryLimit(storyStep), [storyStep, chartGeneration]);
+
+  // Items 1 and 2: the legend stays inside the plot, and the price scale
+  // keeps a top margin as tall as the legend, so no candle high sits under
+  // it. Re-measured when the legend or the chart changes size.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const host = hostRef.current;
+    const legend = legendRef.current;
+    if (!chart || !host || !legend) return;
+    const fit = () => {
+      const axis = chart.priceScale("right").width();
+      if (axis > 0) setAxisWidth((w) => (Math.abs(w - axis) > 0.5 ? axis : w));
+      const paneH = host.clientHeight - chart.timeScale().height();
+      if (paneH <= 0) return;
+      const legendBottom = legend.offsetTop + legend.offsetHeight;
+      const top = legendTopMargin(legendBottom, paneH);
+      chart.priceScale("right").applyOptions({ scaleMargins: { top, bottom: DEFAULT_BOTTOM_MARGIN } });
+      layersPrimitiveRef.current?.setReservedTop(legendBottom + 2);
+    };
+    fit();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(fit);
+    ro.observe(legend);
+    ro.observe(host);
+    return () => ro.disconnect();
+  }, [chartGeneration, toolbarTick]);
+
+  // Item 4: frame the selected setup once per request -- never on a tick
+  // or a refresh -- after the saved view has been restored (so the frame
+  // is not overwritten by it), paging older history in first when the
+  // evidence starts before the loaded candles.
+  useEffect(() => {
+    if (!focusRequest) return;
+    pendingFocusRef.current = { token: ++focusTokenRef.current, historyAsked: false, oldestSec: null };
+    tryApplyFocus();
+  }, [focusRequest, chartGeneration]);
+  useEffect(() => tryApplyFocus(), [layers, selectedSetupId]);
+
+  function tryApplyFocus() {
+    const p = pendingFocusRef.current;
+    const chart = chartRef.current;
+    const times = dataTimesRef.current;
+    if (!p || !chart || selectedSetupId === undefined || times.length === 0) return;
+    if (pendingRestoreScopeRef.current !== null) return; // the restore runs first
+    const span = focusSpan(layersRef.current, selectedSetupId);
+    if (!span) return;
+    if (span.start < times[0] && loadHistoryBack) {
+      if (!p.historyAsked) {
+        p.historyAsked = true;
+        const token = p.token;
+        void loadHistoryBack(new Date((span.start - FOCUS_HISTORY_PAD_SEC) * 1000).toISOString()).then((res) => {
+          const cur = pendingFocusRef.current;
+          if (!cur || cur.token !== token) return;
+          cur.oldestSec = res.oldest ? (unix(res.oldest) as number) : Number.NEGATIVE_INFINITY;
+          tryApplyFocus();
+        });
+        return;
+      }
+      // Waiting for the paged-in history to reach the chart.
+      if (p.oldestSec === null || times[0] > p.oldestSec) return;
+    }
+    const plan = focusRange(span, { times, intervalSec: INTERVAL_SECONDS[timeframe] ?? 60 }, chart.timeScale().width());
+    if (!plan) return;
+    pendingFocusRef.current = null;
+    withProgrammaticRangeChange(() => chart.timeScale().setVisibleLogicalRange({ from: plan.from, to: plan.to }));
+    onFocusNotice?.(focusNotice(plan, timeframe));
+  }
   useEffect(() => layersPrimitiveRef.current?.setFocused(focusedElement), [focusedElement, chartGeneration]);
 
   // live-tick path (Part 2D): a candle/candle_closed message, applied
@@ -1396,8 +1506,13 @@ export function ChartSurfaceInner({
           />
         )}
 
-        <div className="pointer-events-none absolute left-3 top-2.5 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
-          <div className="flex items-center gap-1.5">
+        <div
+          ref={legendRef}
+          data-testid="chart-legend"
+          className="pointer-events-none absolute left-3 top-2.5 z-10 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12px]"
+          style={{ right: axisWidth + 8 }}
+        >
+          <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
             <CoinIcon symbol={symbol} size={18} />
             <span className="font-semibold text-fg">{symbol}</span>
             <span className="text-fg-subtle">· {venue}</span>
@@ -1411,7 +1526,7 @@ export function ChartSurfaceInner({
               Setup formed before this window
             </span>
           )}
-          <div className="tnum flex items-center gap-2.5 text-fg-subtle" data-testid="legend-ohlc" data-hovering={legend.hovering ? "true" : "false"}>
+          <div className="tnum flex shrink-0 items-center gap-2.5 whitespace-nowrap text-fg-subtle" data-testid="legend-ohlc" data-hovering={legend.hovering ? "true" : "false"}>
             {LEGEND_FIELDS.map((f) => {
               const label = f === "open" ? "O" : f === "high" ? "H" : f === "low" ? "L" : "C";
               const text = legend.bar[f] !== null ? formatDecimal(legend.bar[f]) : null;

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { CircleNotch, Play, Stop, Check, X, Question } from "@phosphor-icons/react";
+import { CircleNotch, Crosshair, Play, Stop, Check, X, Question } from "@phosphor-icons/react";
 import { Pill } from "@/components/ui/pill";
 import { Stat } from "@/components/ui/stat";
 import { ProvenanceChip } from "@/components/ui/provenance-chip";
@@ -175,7 +175,7 @@ function WhyThisSetup() {
 }
 
 export function SetupPanel() {
-  const { setup, instrument, setupLoading, setupError, events, eventsLoading } = useAnalysisWorkspace();
+  const { setup, instrument, setupLoading, setupError, events, eventsLoading, focusSetup, focusNotice } = useAnalysisWorkspace();
 
   if (setupLoading) {
     return (
@@ -209,7 +209,22 @@ export function SetupPanel() {
           <SetupStateBadge state={state} className="text-[12px]" />
           <FoundModeChip mode={setup.found_mode} />
           <span className="ml-auto text-[11px] text-fg-subtle">#{setup.id}</span>
+          <button
+            type="button"
+            data-testid="focus-setup"
+            onClick={focusSetup}
+            title="Frame this setup's evidence on the chart"
+            className="focus-ring inline-flex items-center gap-1 rounded-md border border-line px-2 py-0.5 text-[11px] font-medium text-fg hover:bg-white/5"
+          >
+            <Crosshair className="size-3" />
+            Focus
+          </button>
         </div>
+        {focusNotice && (
+          <p className="text-[11px] leading-snug text-fg-muted" data-testid="focus-notice">
+            {focusNotice}
+          </p>
+        )}
         {setup.state === "invalidated" && setup.invalidated_at && (
           <p className="text-[11px] text-down" data-testid="invalidated-at">
             Invalidated {utcTime(setup.invalidated_at)}: no longer live.

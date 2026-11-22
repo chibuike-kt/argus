@@ -9,7 +9,7 @@
 // chart states were three different element trees.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { ChartSurface, ChartSurfaceInner, type ChartSurfaceInnerProps } from "../chart-surface";
+import { ChartSurface, ChartSurfaceInner, legendTopMargin, type ChartSurfaceInnerProps } from "../chart-surface";
 import { SetupElementPopover } from "../setup-popover";
 import { buildLayers, DEFAULT_FILTERS } from "../setup-layers";
 import { loadChartView, saveChartView, type SavedChartView } from "../chart-view-persistence";
@@ -1313,5 +1313,37 @@ describe("ARGUS analysis layer", () => {
     expect(screen.queryByTestId("open-setup")).toBeNull();
     screen.getByTestId("copy-to-drawings").click();
     expect(copied).toBe(1);
+  });
+});
+
+// Polish pass, items 1 and 2: the legend is bounded to the plot (never over
+// the price axis) and wraps its OHLC row to its own line instead of
+// overflowing; the long analysis chip truncates with its full text on hover.
+describe("chart legend stays inside the plot", () => {
+  afterEach(() => cleanup());
+
+  it("is bounded on the right by the price axis and lets its rows wrap", () => {
+    render(
+      <Harness
+        {...({ className: "", symbol: "BTC", venue: "hyperliquid", candles: candleSet(3, 100), formationOutsideWindow: false } as unknown as HarnessProps)}
+      />,
+    );
+    const legend = screen.getByTestId("chart-legend");
+    // The axis is at least its minimum width (76 px) plus an 8 px gap.
+    expect(parseFloat(legend.style.right)).toBeGreaterThanOrEqual(84);
+    expect(legend.className).toMatch(/flex-wrap/);
+    expect(screen.getByTestId("legend-ohlc").className).toMatch(/whitespace-nowrap/);
+  });
+});
+
+describe("price scale top margin clears the legend (polish pass, item 2)", () => {
+  it("grows with the legend's height so no candle high sits under it", () => {
+    // A one-line legend on a tall pane: the default margin is enough.
+    expect(legendTopMargin(30, 600)).toBe(0.12);
+    // A wrapped, three-line legend (the owner's 1h case): the margin covers it.
+    const m = legendTopMargin(90, 500);
+    expect(m * 500).toBeGreaterThanOrEqual(90);
+    // Never more than 45% of the pane.
+    expect(legendTopMargin(400, 500)).toBe(0.45);
   });
 });

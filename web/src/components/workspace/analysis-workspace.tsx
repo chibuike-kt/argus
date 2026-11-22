@@ -69,6 +69,14 @@ interface AnalysisWorkspace {
   // "Play the story": the step drawn up to, null when not playing.
   storyStep: number | null;
   setStoryStep: (n: number | null) => void;
+  // Framing the selected setup on the chart (polish pass, item 4): bumped
+  // when a setup is explicitly selected (the link names it) and by the
+  // panel's Focus button, never by ticks or refreshes. The chart reports
+  // back a sentence when not all of the evidence fits with its labels.
+  focusRequest: number;
+  focusSetup: () => void;
+  focusNotice: string | null;
+  setFocusNotice: (s: string | null) => void;
 
   candles: ApiCandle[];
   candlesLoading: boolean;
@@ -390,10 +398,20 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
   const evidence = listed?.evidence ?? fetchedEvidence;
 
   const [focusedElement, setFocusedElement] = useState<string | null>(null);
+  const [focusRequest, setFocusRequest] = useState(0);
+  const [focusNotice, setFocusNotice] = useState<string | null>(null);
+  const focusSetup = useCallback(() => setFocusRequest((n) => n + 1), []);
+  // An explicit selection (a link or the URL names the setup) frames it,
+  // once that setup has loaded (never the previous one while it loads).
+  const selectedId = setup?.id;
+  useEffect(() => {
+    if (urlSetupId && selectedId !== undefined && String(selectedId) === urlSetupId) setFocusRequest((n) => n + 1);
+  }, [urlSetupId, selectedId]);
   const [storyStep, setStoryStep] = useState<number | null>(null);
   useEffect(() => {
     setFocusedElement(null);
     setStoryStep(null);
+    setFocusNotice(null);
   }, [setup?.id]);
   const selectSetup = useCallback(
     (id: number) => {
@@ -460,6 +478,10 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     setFocusedElement,
     storyStep,
     setStoryStep,
+    focusRequest,
+    focusSetup,
+    focusNotice,
+    setFocusNotice,
     candles,
     candlesLoading,
     candlesError,

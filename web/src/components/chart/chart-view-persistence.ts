@@ -1,3 +1,4 @@
+import { RIGHT_MARGIN_BARS } from "./default-view";
 import { preferences, type ChartViewPref } from "@/lib/preferences";
 
 // The chart's saved visible range, per instrument and timeframe, stored as
@@ -55,14 +56,20 @@ export function toSavedView(range: LogicalRange, times: readonly number[], barSp
 // fromSavedView converts a saved view back into a logical range over the
 // data now loaded, or null when it no longer fits (the caller then shows
 // the default view):
-//   - pinned to latest: end the same distance past the newest bar, same width;
+//   - pinned to latest: end the same distance past the newest bar (at most
+//     RIGHT_MARGIN_BARS), same width;
 //   - otherwise: start at the first bar at or after from_time, same width --
 //     null when the saved time span no longer overlaps the loaded data.
 export function fromSavedView(saved: SavedChartView, times: readonly number[]): LogicalRange | null {
   const n = times.length;
   if (n === 0 || !(saved.bars_visible > 0)) return null;
   if (saved.pinned_to_latest) {
-    const to = n - 1 + saved.right_offset;
+    // The saved zoom is kept, but the margin right of the newest bar is at
+    // most the default one. A pan into the empty space (to draw there) was
+    // saved as a right offset and then restored on every load: 83 bars of
+    // 217 on the owner's 1h BTC view, a third of the plot empty (polish
+    // pass, item 3). The pan itself still works within a session.
+    const to = n - 1 + Math.min(saved.right_offset, RIGHT_MARGIN_BARS);
     return { from: to - saved.bars_visible, to };
   }
   if (saved.from_time > times[n - 1] || saved.to_time < times[0]) return null;
