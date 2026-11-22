@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"math/rand/v2"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/ingestion/hyperliquid"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/marketdata"
+	"github.com/chibuike-kt/argus/internal/tracking"
 )
 
 // startHyperliquidIngest is ARGUS_INGEST_PROVIDER=hyperliquid's own
@@ -31,6 +33,7 @@ import (
 // anything that already existed.
 func startHyperliquidIngest(
 	ctx context.Context,
+	db *sql.DB,
 	cfg config.Config,
 	logger *slog.Logger,
 	instrumentStore *instruments.Store,
@@ -60,16 +63,25 @@ func startHyperliquidIngest(
 	// Instruments, rather than StreamCandles ever fetching it itself.
 	// A failure here is logged and skipped, never fatal to startup:
 	// this check is observational, not load-bearing.
+	// The whole perpetual catalog, once at startup: its size decimals feed
+	// the stream's price-format check (set before any stream starts --
+	// SetSzDecimals is not safe during one, and 4.1a does not change the
+	// adapter), and its rows are registered, disabled (D15).
+	trackStore := tracking.NewStore(db)
 	if all, err := provider.Instruments(ctx); err != nil {
-		logger.Warn("hyperliquid: could not fetch instruments for price-format checking; streamed prices will not be checked against Hyperliquid's own precision rule this run", "error", err)
+		logger.Warn("hyperliquid: could not fetch instruments for price-format checking or the catalog; streamed prices will not be checked against Hyperliquid's own precision rule this run", "error", err)
 	} else {
 		szDecimals := make(map[string]int32, len(all))
 		for _, pi := range all {
 			szDecimals[pi.Symbol] = pi.QtyDecimalPlaces // QtyDecimalPlaces is szDecimals itself, unmodified -- see Instruments' own doc comment
 		}
 		provider.SetSzDecimals(szDecimals)
+		if res, err := refreshCatalog(ctx, all, instrumentStore, trackStore, clk, logger); err != nil {
+			logger.Error("worker: catalog refresh failed at startup", "error", err)
+		} else {
+			logger.Info("worker: catalog refreshed", "listed", res.Listed, "created_disabled", res.Created, "needs_attention", res.Attention)
+		}
 	}
-
 	cache := ingestion.NewInstrumentCache(instrumentStore)
 	normalizer := ingestion.NewNormalizer(cache, clk)
 	svc := ingestion.NewService(hyperliquid.ProviderName, provider, normalizer, cache, marketdataStore, marketdata.ContinuousCalendar{}, logger)
@@ -79,12 +91,30 @@ func startHyperliquidIngest(
 		"symbols", cfg.Hyperliquid.Symbols, "backfill_days", cfg.Hyperliquid.BackfillDays)
 
 	state := storeBackfillState{instruments: instrumentStore, candles: marketdataStore}
-	for _, symbol := range cfg.Hyperliquid.Symbols {
-		go runHyperliquidSymbol(ctx, symbol, svc, state, cfg, logger, clk)
+	go runCatalogRefresh(ctx, provider, instrumentStore, trackStore, cfg.Hyperliquid.CatalogRefreshInterval, clk, logger)
+	sup := newSupervisor(cfg.Hyperliquid.Symbols, cfg.Hyperliquid.MaxTrackedSymbols, cfg.Hyperliquid.RemovalGrace, cfg.Hyperliquid.BackfillConcurrency,
+		trackStore, func(ctx context.Context, symbol string, hooks symbolHooks) {
+			runHyperliquidSymbolWith(ctx, symbol, svc, state, cfg, logger, clk, hooks)
+		}, clk, logger)
+	go sup.run(ctx, cfg.Hyperliquid.SupervisorInterval)
+}
+
+// symbolHooks connect one symbol pipeline to the supervisor (Phase 4.1a,
+// D15): gate queues the history backfill of new symbols (D15.4: at most
+// BackfillConcurrency at once), report records the pipeline's state for
+// the watchlist row. Both optional.
+type symbolHooks struct {
+	gate   chan struct{}
+	report func(state tracking.State, reason string, attempt int)
+}
+
+func (h symbolHooks) set(state tracking.State, reason string, attempt int) {
+	if h.report != nil {
+		h.report(state, reason, attempt)
 	}
 }
 
-// runHyperliquidSymbol closes any hole since the newest stored candle
+// runHyperliquidSymbolWith closes any hole since the newest stored candle
 // (backfillUntilCaughtUp: window read from the database, retried until
 // it succeeds), then alternates between streaming live candles and --
 // on any disconnect, planned, failed or stalled -- the same database-
@@ -97,8 +127,29 @@ func startHyperliquidIngest(
 // (machine asleep, network down) the failed attempt's window was never
 // retried and the hole stayed forever. The startup backfill had the
 // same one-shot shape.
-func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Service, state integrityState, cfg config.Config, logger *slog.Logger, clk clock.Clock) {
-	if !backfillUntilCaughtUp(ctx, "startup", symbol, svc, state, cfg, logger, clk) {
+//
+// hooks report its state to the supervisor and queue its history backfill
+// (symbolHooks; the zero value reports nothing and does not queue).
+func runHyperliquidSymbolWith(ctx context.Context, symbol string, svc *ingestion.Service, state integrityState, cfg config.Config, logger *slog.Logger, clk clock.Clock, hooks symbolHooks) {
+	if hooks.gate != nil {
+		hooks.set(tracking.Waiting, "queued for the history backfill", 0)
+		select {
+		case hooks.gate <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+	}
+	hooks.set(tracking.LoadingHistory, "", 0)
+	ok := backfillUntilCaughtUp(ctx, "startup", symbol, svc, state, cfg, logger, clk, func(attempt int, err error) {
+		hooks.set(tracking.Retrying, "history backfill failed: "+err.Error(), attempt)
+	})
+	if hooks.gate != nil {
+		<-hooks.gate
+	}
+	if !ok {
+		if ctx.Err() == nil {
+			hooks.set(tracking.Failed, "no instrument row for this symbol", 0)
+		}
 		return
 	}
 	// The backfill only reaches back to the newest stored candle; holes
@@ -110,6 +161,7 @@ func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Ser
 		if ctx.Err() != nil {
 			return
 		}
+		hooks.set(tracking.Live, "", 0)
 
 		// Covers the real-run gap this brief's own verification
 		// found: the stream's in-memory tracked-minute starts empty
@@ -140,6 +192,7 @@ func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Ser
 		}
 		if err != nil {
 			logger.Error("hyperliquid: stream ended, will reconnect", "symbol", symbol, "error", err)
+			hooks.set(tracking.Retrying, "live stream ended: "+err.Error(), attempt+1)
 		} else {
 			logger.Info("hyperliquid: stream ended cleanly, will reconnect", "symbol", symbol)
 		}
@@ -148,7 +201,9 @@ func runHyperliquidSymbol(ctx context.Context, symbol string, svc *ingestion.Ser
 		// contract never guarantees the last in-flight minute was
 		// closed before the connection ended, and after a long outage
 		// this is what fills the hole.
-		if !backfillUntilCaughtUp(ctx, "reconnect", symbol, svc, state, cfg, logger, clk) {
+		if !backfillUntilCaughtUp(ctx, "reconnect", symbol, svc, state, cfg, logger, clk, func(n int, err error) {
+			hooks.set(tracking.Retrying, "backfill after reconnect failed: "+err.Error(), n)
+		}) {
 			return
 		}
 		integrityScan(ctx, "reconnect", symbol, svc, state, cfg, logger, clk)

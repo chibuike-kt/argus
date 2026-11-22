@@ -88,4 +88,24 @@ type Hyperliquid struct {
 	// reconnect path already scans after, so this is the safety net for a
 	// hole nothing else noticed. 0 disables the periodic run.
 	IntegrityScanInterval time.Duration `env:"ARGUS_HYPERLIQUID_INTEGRITY_SCAN_INTERVAL" envDefault:"10m"` // [U]
+
+	// MaxTrackedSymbols is the system cap of distinct Hyperliquid symbols
+	// ARGUS ingests and analyses at once (D15.3, 8): the configured floor
+	// plus every enabled instrument on at least one watchlist. Today's
+	// adapter opens one WebSocket connection per symbol and Hyperliquid
+	// allows 10 per IP, so 8 leaves room for reconnects. An add that would
+	// track a new symbol past it is refused; the worker never tracks more.
+	MaxTrackedSymbols int `env:"ARGUS_HYPERLIQUID_MAX_TRACKED_SYMBOLS" envDefault:"8"`
+	// RemovalGrace is how long a symbol keeps ingesting after it leaves
+	// every watchlist (D15.4, 10 minutes), so a remove then an undo does
+	// not restart its pipeline.
+	RemovalGrace time.Duration `env:"ARGUS_HYPERLIQUID_REMOVAL_GRACE" envDefault:"10m"`
+	// BackfillConcurrency is how many new symbols backfill their history
+	// at once (D15.4, 2); the rest wait their turn.
+	BackfillConcurrency int `env:"ARGUS_HYPERLIQUID_BACKFILL_CONCURRENCY" envDefault:"2"`
+	// SupervisorInterval is how often the worker re-reads the tracked set
+	// and starts or stops symbol pipelines; the catalog refresh runs at
+	// CatalogRefreshInterval. Implementation values. [U]
+	SupervisorInterval     time.Duration `env:"ARGUS_HYPERLIQUID_SUPERVISOR_INTERVAL" envDefault:"15s"`      // [U]
+	CatalogRefreshInterval time.Duration `env:"ARGUS_HYPERLIQUID_CATALOG_REFRESH_INTERVAL" envDefault:"24h"` // [U]
 }

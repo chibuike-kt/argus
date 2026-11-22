@@ -28,6 +28,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/platform/postgres"
 	"github.com/chibuike-kt/argus/internal/platform/redis"
 	"github.com/chibuike-kt/argus/internal/setups"
+	"github.com/chibuike-kt/argus/internal/tracking"
 )
 
 // tickInterval is how often the worker polls for newly closed candles.
@@ -152,7 +153,11 @@ func main() {
 	}
 
 	if cfg.IngestProvider == "hyperliquid" {
-		startHyperliquidIngest(ctx, cfg, logger, instrumentStore, marketdataStore, candlePublisher, clk)
+		startHyperliquidIngest(ctx, db, cfg, logger, instrumentStore, marketdataStore, candlePublisher, clk)
+		// D15.2: analyse what is ingested -- the enabled instruments of the
+		// tracked set (the floor plus everything on a watchlist), within the
+		// system cap -- not every enabled instrument.
+		proc.selectInstruments = trackedForAnalysis(instrumentStore, tracking.NewStore(db), cfg.Hyperliquid.Symbols, cfg.Hyperliquid.MaxTrackedSymbols)
 	}
 
 	logger.Info("worker started", "env", cfg.Env)

@@ -14,6 +14,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/quant"
 	"github.com/chibuike-kt/argus/internal/setups"
+	"github.com/chibuike-kt/argus/internal/tracking"
 )
 
 // timeframe is the only timeframe the analysis engine can evaluate
@@ -55,6 +56,10 @@ type processor struct {
 	// not pre-loaded at startup, since the enabled-instrument set can
 	// change between ticks.
 	cursorCache map[int64]time.Time
+	// selectInstruments chooses what each tick analyses; nil means every
+	// enabled instrument. The Hyperliquid worker sets it to the tracked set
+	// (D15.2, trackedForAnalysis).
+	selectInstruments func(ctx context.Context) ([]instruments.Instrument, error)
 
 	// testFailBeforeReconcile, when non-nil, is called with each
 	// candle's close_time right after analysis.Engine's step commits
@@ -126,9 +131,13 @@ func (r instrumentRunResult) lag() time.Duration {
 // is not swallowing the failure, only deferring its retry to the next
 // tick.
 func (p *processor) run(ctx context.Context) {
-	enabled, err := p.instruments.ListEnabled(ctx)
+	list := p.instruments.ListEnabled
+	if p.selectInstruments != nil {
+		list = p.selectInstruments
+	}
+	enabled, err := list(ctx)
 	if err != nil {
-		p.logger.Error("worker: list enabled instruments", "error", err)
+		p.logger.Error("worker: list instruments to analyse", "error", err)
 		return
 	}
 
@@ -423,4 +432,33 @@ func (p *processor) reconcileSetup(ctx context.Context, inst instruments.Instrum
 		)
 	}
 	return event != nil, nil
+}
+
+// trackedForAnalysis lists the enabled instruments of the tracked set,
+// within the system cap (D15.2): the same symbols the supervisor ingests.
+func trackedForAnalysis(store *instruments.Store, ts *tracking.Store, floor []string, capSymbols int) func(ctx context.Context) ([]instruments.Instrument, error) {
+	return func(ctx context.Context) ([]instruments.Instrument, error) {
+		tracked, err := ts.Tracked(ctx, floor)
+		if err != nil {
+			return nil, err
+		}
+		within := make(map[int64]bool, len(tracked))
+		for i, t := range tracked {
+			if i >= capSymbols {
+				break
+			}
+			within[t.ID] = true
+		}
+		enabled, err := store.ListEnabled(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]instruments.Instrument, 0, len(within))
+		for _, inst := range enabled {
+			if within[inst.ID] {
+				out = append(out, inst)
+			}
+		}
+		return out, nil
+	}
 }

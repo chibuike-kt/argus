@@ -12,7 +12,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/ingestion/hyperliquid"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/platform/postgres"
-	"github.com/chibuike-kt/argus/internal/quant"
+	"github.com/chibuike-kt/argus/internal/tracking"
 )
 
 // runSyncHyperliquid creates (disabled) instruments for every symbol in
@@ -91,30 +91,11 @@ func buildInstrumentParams(symbols []string, all []ingestion.ProviderInstrument)
 		}
 		delete(wanted, pi.Symbol)
 
-		priceScale := quant.Scale(pi.PriceDecimalPlaces)
-		qtyScale := quant.Scale(pi.QtyDecimalPlaces)
-		tick, err := quant.ParsePrice(pi.TickSize, priceScale)
+		params, err := tracking.CatalogParams(pi)
 		if err != nil {
-			return nil, nil, fmt.Errorf("sync-hyperliquid: %s: parse tick size %q at scale %d: %w", pi.Symbol, pi.TickSize, priceScale, err)
+			return nil, nil, fmt.Errorf("sync-hyperliquid: %w", err)
 		}
-		step, err := quant.ParseQty(pi.QtyStepSize, qtyScale)
-		if err != nil {
-			return nil, nil, fmt.Errorf("sync-hyperliquid: %s: parse qty step %q at scale %d: %w", pi.Symbol, pi.QtyStepSize, qtyScale, err)
-		}
-
-		toInsert = append(toInsert, instruments.NewInstrumentParams{
-			Provider:           hyperliquid.ProviderName,
-			NativeSymbol:       pi.Symbol,
-			AssetClass:         pi.AssetClass,
-			BaseAsset:          &pi.BaseAsset,
-			QuoteAsset:         &pi.QuoteAsset,
-			ContractType:       &pi.ContractType,
-			PriceScale:         &priceScale,
-			QtyScale:           &qtyScale,
-			TickSize:           tick,
-			QtyStepSize:        step,
-			SupportedIntervals: pi.SupportedIntervals,
-		})
+		toInsert = append(toInsert, params)
 	}
 	for s := range wanted {
 		missing = append(missing, s)

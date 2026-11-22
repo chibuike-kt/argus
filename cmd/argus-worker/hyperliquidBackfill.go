@@ -122,7 +122,10 @@ func backfillWindow(now time.Time, newest *time.Time, backfillDays int) (start t
 // It returns false when the symbol can never be ingested (no instrument
 // row for it -- not a transient failure, so retrying forever would only
 // spam the log) and when ctx ends; the caller then stops that symbol.
-func backfillUntilCaughtUp(ctx context.Context, reason, symbol string, svc *ingestion.Service, state backfillState, cfg config.Config, logger *slog.Logger, clk clock.Clock) bool {
+//
+// onRetry, when given, is told about each failed attempt (the supervisor
+// shows it on the watchlist row as "retrying").
+func backfillUntilCaughtUp(ctx context.Context, reason, symbol string, svc *ingestion.Service, state backfillState, cfg config.Config, logger *slog.Logger, clk clock.Clock, onRetry ...func(attempt int, err error)) bool {
 	var lostRecordedTo time.Time
 	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
@@ -162,6 +165,9 @@ func backfillUntilCaughtUp(ctx context.Context, reason, symbol string, svc *inge
 		}
 		if ctx.Err() != nil {
 			return false
+		}
+		for _, f := range onRetry {
+			f(attempt+1, err)
 		}
 		delay := reconnectBackoff(attempt, cfg.Live.ReconnectBackoffBase, cfg.Live.ReconnectBackoffCap)
 		logger.Error("hyperliquid: backfill failed, will retry -- stream not restarted until it succeeds",
