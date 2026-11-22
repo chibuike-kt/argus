@@ -104,6 +104,49 @@ func wsTimeoutTestFixture(t *testing.T, readTimeout, writeTimeout, heartbeatInte
 	return conn, publish
 }
 
+// startPublisher publishes a live candle every interval from its own
+// goroutine, owned by the test: its cleanup stops the goroutine and waits
+// for it to return. t.Cleanup runs last-registered first, and the
+// fixture's Redis client closes in a cleanup registered before this one,
+// so no publish can run once the client is closed.
+//
+// Before, the goroutine was only told to stop (defer close(stop)) and
+// never waited for. A publish in flight when the test returned -- or one
+// the select started after stop because the ticker was ready too -- ran
+// against the closed client and called t.Errorf after the test had
+// completed: "panic: Log in goroutine after
+// TestIntegration_WS_SurvivesPastRequestTimeout_Fast has completed:
+// publish: ... redis: client is closed" (19 of 20 runs).
+func startPublisher(t *testing.T, interval time.Duration, publish func(seqOffset int)) {
+	t.Helper()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+			}
+			// Both cases can be ready at once and select picks at
+			// random: never publish once stop has been asked for.
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			publish(i)
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		<-done
+	})
+}
+
 // readLoopCounts drains conn for exactly duration, counting candle and
 // heartbeat messages and failing the test immediately if the
 // connection closes or errors before duration elapses.
@@ -154,23 +197,7 @@ func TestIntegration_WS_SurvivesPastRequestTimeout_Fast(t *testing.T) {
 		hold         = 3 * time.Second // several multiples of all three above
 	)
 	conn, publish := wsTimeoutTestFixture(t, readTimeout, writeTimeout, heartbeat)
-
-	stop := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
-		i := 0
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				i++
-				publish(i)
-			}
-		}
-	}()
-	defer close(stop)
+	startPublisher(t, 200*time.Millisecond, publish)
 
 	candles, heartbeats := readLoopCounts(t, conn, hold)
 	if candles == 0 {
@@ -205,23 +232,7 @@ func TestIntegration_WS_SurvivesPastRequestTimeout_FullLength(t *testing.T) {
 		hold         = 75 * time.Second // past 70s, and past both timeouts above with margin
 	)
 	conn, publish := wsTimeoutTestFixture(t, readTimeout, writeTimeout, heartbeat)
-
-	stop := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		i := 0
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				i++
-				publish(i)
-			}
-		}
-	}()
-	defer close(stop)
+	startPublisher(t, 5*time.Second, publish)
 
 	start := time.Now()
 	candles, heartbeats := readLoopCounts(t, conn, hold)
