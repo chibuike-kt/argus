@@ -3,7 +3,8 @@
 - Status: Partially confirmed
 - Category: Market-data architecture
 - Version: 0.1.0-draft
-- Last updated: 26 October 2026
+- Last updated: 22 November 2026
+- Amended: 22 November 2026 (D11, D15.1)
 - Related: [ADR-007](ADR-007-provider-selection-and-commercial-data-rights.md), [ADR-011](ADR-011-immutable-decisions-corrections-and-plan-revisions.md), [ADR-019](ADR-019-testing-and-point-in-time-reproducibility.md)
 
 ---
@@ -40,7 +41,18 @@ The canonical base interval is one minute.
 
 Higher intervals should be derived consistently from the canonical series, with deterministic boundaries and explicit handling of missing source intervals.
 
+Amended 22 November 2026 (D11): 15m, 1h and 4h, and later 1d, are also stored natively from the provider; 5m stays derived from 1m, and derivation from 1m stays as the comparison reference until the native versus aggregated comparison is reported.
+
 ARGUS must not silently present an aggregate as complete when required source candles are missing.
+
+## Higher timeframe candles (amended 22 November 2026, decision D11)
+
+The 1 minute candle remains the canonical live representation. Higher timeframe candles (15m, 1h, 4h
+and later 1d) are also stored natively from the provider, backfilled from the provider's historical
+endpoint and kept current from its candle stream, because aggregating a short 1 minute history cannot
+establish higher timeframe structure. Native and aggregated candles are compared on real overlapping
+data before either is relied on. Closed candle finality, revisions and corrections follow the same
+rules at every timeframe.
 
 ## Candle states and corrections
 
@@ -91,6 +103,11 @@ Every instrument must have a canonical identity and validated metadata, includin
 - Enablement state.
 
 An instrument must not be enabled merely because a symbol exists at a provider.
+
+Amended 22 November 2026 (decision D15.1): an instrument may also be enabled by one explicit, audited
+operation: a user adding a Hyperliquid perpetual to their own watchlist, only outside production,
+recorded in instrument_enablements with who, which instrument, when and why. The worker never enables
+an instrument, and a symbol existing at a provider still never enables it by itself.
 
 ## Market calendar
 

@@ -2,7 +2,8 @@
 
 - Source: ARGUS Master ADR, section 15
 - Version: 0.1.0-draft
-- Last updated: 26 October 2026
+- Last updated: 22 November 2026
+- Amended: 22 November 2026 (D15)
 
 ---
 
@@ -15,6 +16,10 @@ This section records cross-cutting requirements that apply to the architecture a
 - The initial universe is small and curated.
 
 - Instrument coverage expands in phases.
+
+Amended 22 November 2026 (decision D15): in private research use, watchlist adds may enable a
+Hyperliquid perpetual outside production, with an audit record and a system cap of 8 tracked symbols.
+The public launch requirements above are unchanged.
 
 - A launch instrument requires verified historical coverage and data rights.
 

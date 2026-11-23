@@ -3,7 +3,8 @@
 - Status: Open; research and validation required
 - Category: Market-data architecture
 - Version: 0.1.0-draft
-- Last updated: 26 October 2026
+- Last updated: 22 November 2026
+- Amended: 22 November 2026 (D15)
 - Related: [ADR-006](ADR-006-market-data-contracts-and-canonical-representation.md), [ADR-002](ADR-002-deployment-model-audience-and-scale.md)
 
 ---
@@ -25,6 +26,10 @@ Technical API access does not necessarily grant the right to display, store, cac
 - The initial universe is small and curated.
 
 - Instruments are enabled in phases.
+
+Amended 22 November 2026 (decision D15): the audited watchlist enabling is for private research use
+only. Commercial data rights are still open, and this self service enabling must not be used for a
+public or multi user launch until this ADR is settled.
 
 - Full required historical candle coverage is a hard gate for each enabled launch instrument.
 

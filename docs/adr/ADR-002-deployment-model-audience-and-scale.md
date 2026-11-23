@@ -3,7 +3,8 @@
 - Status: Confirmed direction; feasibility validation required
 - Category: Product definition and boundaries
 - Version: 0.1.0-draft
-- Last updated: 26 October 2026
+- Last updated: 22 November 2026
+- Amended: 22 November 2026 (D15)
 - Related: [ADR-017](ADR-017-availability-backups-and-recovery-objectives.md), [ADR-018](ADR-018-observability-and-load-testing.md)
 
 ---
@@ -37,6 +38,11 @@ The target deployment model is:
 - A core application availability target of 99.5% measured monthly.
 
 - A hard all-in infrastructure and operations budget of approximately US$50 per month.
+
+Amended 22 November 2026 (decision D15): for private research use, the owner may add Hyperliquid
+perpetuals to a watchlist from the provider's catalog, which enables them outside production through
+one audited operation, and the system tracks at most 8 distinct symbols at once. The small curated
+universe remains the rule for any public or multi user launch, which stays subject to ADR-007.
 
 ## Required qualification
 
