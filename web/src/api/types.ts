@@ -360,6 +360,9 @@ export interface ApiWatchlistTracking {
   can_enable: boolean;
   // The system cap of distinct tracked symbols (D15.3).
   cap: number;
+  // How many more symbols can be tracked, counting the configured floor
+  // symbols as tracked (never below 0).
+  remaining: number;
   tracked_instrument_ids: number[];
   items: ApiWatchlistItemTracking[];
 }

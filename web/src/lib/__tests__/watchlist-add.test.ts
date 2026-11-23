@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getWatchlistStore, resetWatchlistStoreForTests } from "../watchlist-store";
-import { addAvailability, filterCatalog, WATCHLIST_MAX_ITEMS } from "@/components/workspace/symbol-search";
+import { addAvailability, filterCatalog, remainingWords, WATCHLIST_MAX_ITEMS } from "@/components/workspace/symbol-search";
 import { failureWords, moveItem, trackingBadge } from "@/components/workspace/watchlist";
 import type { ApiInstrument, ApiWatchlistTracking } from "@/api/types";
 import { refreshLiveStats } from "../live-stats";
@@ -142,6 +142,7 @@ const inst = (id: number, sym: string, enabled = false): ApiInstrument =>
 const tracking = (over: Partial<ApiWatchlistTracking> = {}): ApiWatchlistTracking => ({
   can_enable: true,
   cap: 8,
+  remaining: 5,
   tracked_instrument_ids: [1, 2, 3],
   items: [],
   ...over,
@@ -162,8 +163,15 @@ describe("symbol search rules", () => {
     expect(addAvailability(inst(9, "AVAX"), { ...base, listCount: WATCHLIST_MAX_ITEMS }).kind).toBe("blocked");
     const prod = addAvailability(inst(9, "AVAX"), { ...base, tracking: tracking({ can_enable: false }) });
     expect(prod).toEqual({ kind: "blocked", reason: "Needs to be enabled by the operator." });
-    const full = tracking({ cap: 3 });
-    expect(addAvailability(inst(9, "AVAX"), { ...base, tracking: full })).toMatchObject({ kind: "blocked", reason: expect.stringMatching(/at most 3 symbols/) });
+    const full = tracking({ cap: 3, remaining: 0 });
+    expect(addAvailability(inst(9, "AVAX"), { ...base, tracking: full })).toEqual({
+      kind: "blocked",
+      reason: "ARGUS tracks at most 3 symbols at once, including the ones it always tracks: no more symbols can be added. Remove a symbol from every watchlist to add another.",
+    });
+    // The server's remaining decides (it counts the floor): with one left, Add is offered.
+    expect(addAvailability(inst(9, "AVAX"), { ...base, tracking: tracking({ cap: 8, remaining: 1 }) })).toEqual({ kind: "add" });
+    expect(remainingWords(tracking({ cap: 8, remaining: 1 }))).toMatch(/: 1 more symbol can be added\./);
+    expect(remainingWords(tracking({ cap: 8, remaining: 4 }))).toMatch(/: 4 more symbols can be added\./);
     // A symbol already tracked (another user watches it) can be added at the cap.
     expect(addAvailability(inst(2, "ETH", true), { ...base, tracking: full })).toEqual({ kind: "add" });
   });

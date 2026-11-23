@@ -20,6 +20,7 @@ const perp = (id: number, sym: string, enabled: boolean) => ({
 let server: number[];
 let posted: number[];
 let catalogFails: number;
+let floorCount: number;
 
 beforeEach(() => {
   resetWatchlistStoreForTests();
@@ -27,6 +28,7 @@ beforeEach(() => {
   server = [1];
   posted = [];
   catalogFails = 0;
+  floorCount = 0;
   global.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input), "http://localhost");
     const method = init?.method ?? "GET";
@@ -39,7 +41,7 @@ beforeEach(() => {
     }
     if (url.pathname === "/api/v1/watchlist") return json(server.map((instrument_id, position) => ({ instrument_id, position })));
     if (url.pathname === "/api/v1/watchlist/tracking") {
-      return json({ can_enable: true, cap: 8, tracked_instrument_ids: [1], items: server.map((id) => ({ instrument_id: id, tracked: true, state: "live" })) });
+      return json({ can_enable: true, cap: 8, remaining: 7 - floorCount, tracked_instrument_ids: [1], items: server.map((id) => ({ instrument_id: id, tracked: true, state: "live" })) });
     }
     if (url.pathname === "/api/v1/watchlist/items" && method === "POST") {
       const { instrument_id } = JSON.parse(String(init?.body));
@@ -73,6 +75,7 @@ describe("symbol search dialog", () => {
     await waitFor(() => expect(document.activeElement).toBe(input));
     await waitFor(() => expect(screen.getByTestId("symbol-search-row-AVAX")).toBeInTheDocument());
     await waitFor(() => expect(screen.getByTestId("symbol-search-added-BTC")).toHaveTextContent("Added"));
+    await waitFor(() => expect(screen.getByTestId("symbol-search-cap")).toHaveTextContent("7 more symbols can be added"));
 
     await user.type(input, "a");
     // "a": AAVE and AVAX start with it; ETH does not contain it.
@@ -100,5 +103,18 @@ describe("symbol search dialog", () => {
     await waitFor(() => expect(screen.getByTestId("symbol-search-row-BTC")).toBeInTheDocument());
     await user.type(screen.getByTestId("symbol-search-input"), "zzz");
     await waitFor(() => expect(screen.getByTestId("symbol-search-empty")).toHaveTextContent("Nothing matches 'zzz'"));
+  });
+
+  it("with no slot left (the floor counted by the server), Add is disabled with the reason", async () => {
+    floorCount = 7; // remaining 0
+    const user = userEvent.setup();
+    renderApp();
+    await user.keyboard("{Control>}k{/Control}");
+    await waitFor(() => expect(screen.getByTestId("symbol-search-cap")).toHaveTextContent("no more symbols can be added"));
+    const add = screen.getByTestId("symbol-search-add-AVAX");
+    expect(add).toBeDisabled();
+    expect(add).toHaveAttribute("title", expect.stringMatching(/no more symbols can be added\. Remove a symbol from every watchlist/));
+    await user.click(add);
+    expect(posted).toEqual([]);
   });
 });

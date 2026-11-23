@@ -47,13 +47,22 @@ export function addAvailability(
   }
   const t = ctx.tracking;
   if (!inst.enabled && t && !t.can_enable) return { kind: "blocked", reason: "Needs to be enabled by the operator." };
-  if (t && !t.tracked_instrument_ids.includes(inst.id) && t.tracked_instrument_ids.length >= t.cap) {
-    return {
-      kind: "blocked",
-      reason: `ARGUS tracks at most ${t.cap} symbols at once. Remove one from every watchlist to add another.`,
-    };
+  if (t && !t.tracked_instrument_ids.includes(inst.id) && t.remaining <= 0) {
+    return { kind: "blocked", reason: capReason(t) };
   }
   return { kind: "add" };
+}
+
+// remainingWords says how many more symbols can be added; the server counts
+// the symbols ARGUS always tracks (the configured floor) as tracked.
+export function remainingWords(t: ApiWatchlistTracking): string {
+  const n = Math.max(t.remaining, 0);
+  const more = n === 0 ? "no more symbols can be added" : n === 1 ? "1 more symbol can be added" : `${n} more symbols can be added`;
+  return `ARGUS tracks at most ${t.cap} symbols at once, including the ones it always tracks: ${more}.`;
+}
+
+function capReason(t: ApiWatchlistTracking): string {
+  return `${remainingWords(t)} Remove a symbol from every watchlist to add another.`;
 }
 
 const SearchCtx = createContext<{ open: () => void } | null>(null);
@@ -163,7 +172,6 @@ export function SymbolSearchDialog({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const trackedCount = tracking?.tracked_instrument_ids.length;
   return (
     <div className="fixed inset-0 z-[80] flex items-start justify-center bg-black/50 pt-[12vh]" onMouseDown={onClose}>
       <div
@@ -270,7 +278,7 @@ export function SymbolSearchDialog({ onClose }: { onClose: () => void }) {
 
         <div className="border-t border-line px-3 py-2 text-[11px] leading-snug text-fg-subtle">
           <span data-testid="symbol-search-cap">
-            {tracking && trackedCount !== undefined ? `ARGUS is tracking ${trackedCount} of ${tracking.cap} symbols. ` : ""}
+            {tracking ? `${remainingWords(tracking)} ` : ""}
           </span>
           ↑ ↓ to move · Enter to add · Esc to close.{" "}
           {tracking?.can_enable ? "Adding a perpetual starts its history backfill and live data (private research use only)." : ""}
