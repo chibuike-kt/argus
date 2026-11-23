@@ -1,10 +1,11 @@
 // Command argus-instruments is a small operator CLI for the instrument
-// registry. Its only subcommand today, sync-hyperliquid, creates
-// (disabled) instruments for the configured Hyperliquid symbol list --
-// see docs/briefs/brief-hyperliquid-adapter.md. It never enables an
+// registry. sync-hyperliquid creates (disabled) instruments for the
+// configured Hyperliquid symbol list -- see
+// docs/briefs/brief-hyperliquid-adapter.md. It never enables an
 // instrument: instruments.Store.Insert is structurally incapable of
-// writing enabled = TRUE (see that package's own doc comment), and
-// this command does not touch the enabled column at all.
+// writing enabled = TRUE (see that package's own doc comment), and this
+// command does not touch the enabled column at all. clear-attention
+// removes one symbol's needs_attention state (architect review of 4.1a).
 package main
 
 import (
@@ -23,6 +24,8 @@ func main() {
 	switch os.Args[1] {
 	case "sync-hyperliquid":
 		err = runSyncHyperliquid(context.Background())
+	case "clear-attention":
+		err = runClearAttention(context.Background(), os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -45,5 +48,11 @@ subcommands:
   sync-hyperliquid   create (disabled) instruments for ARGUS_HYPERLIQUID_SYMBOLS,
                       from Hyperliquid's own public meta response. Refuses to
                       run against a production environment. Never enables an
-                      instrument -- prints the exact SQL to do that by hand.`)
+                      instrument -- prints the exact SQL to do that by hand.
+  clear-attention SYMBOL
+                      remove SYMBOL's needs_attention state (a precision change
+                      or delisting stopped its ingestion) so the worker starts
+                      it again. Logs who ran it and why it was allowed. Refuses
+                      to run against a production environment. Does not change
+                      the stored scales.`)
 }
