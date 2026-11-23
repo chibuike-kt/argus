@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { getLiveSocket, resetLiveSocketForTests } from "../live-socket";
-import { isOlder, resetLiveStatsForTests, useLiveStats } from "../live-stats";
+import { isOlder, refreshLiveStats, resetLiveStatsForTests, useLiveStats } from "../live-stats";
 import { compareDecimal } from "../decimal-display";
 import type { ApiInstrumentStats, ApiLiveFigures } from "@/api/types";
 
@@ -225,6 +225,26 @@ describe("live stats store", () => {
     }
     await waitFor(() => expect(restCalls.length).toBe(calls + 1));
     expect([...restCalls.at(-1)!].sort()).toEqual([1, 2]);
+  });
+
+  it("refresh re-reads and resubscribes an instrument refused while it was disabled (a watchlist add enabled it)", async () => {
+    restRows.set(1, rest(live(1, "100.00", "2026-11-18T12:01:00Z", "2026-11-18T12:01:05Z")));
+    const { result } = renderHook(() => useLiveStats([1, 40])); // 40: disabled when the row appeared
+    await waitFor(() => expect(result.current.entries.get(40)?.rejected).toBe(true));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws.open());
+    await waitFor(() => expect(ws.sentOfType("subscribe_stats").length).toBeGreaterThan(0));
+    const before = ws.sentOfType("subscribe_stats").length;
+
+    restRows.set(40, rest(live(40, "6.6840", "2026-11-18T12:01:00Z", "2026-11-18T12:01:05Z")));
+    act(() => refreshLiveStats([40]));
+    await waitFor(() => expect(result.current.entries.get(40)?.figures?.last_price).toBe("6.6840"));
+    expect(result.current.entries.get(40)?.rejected).toBe(false);
+    await waitFor(() => expect(ws.sentOfType("subscribe_stats").length).toBe(before + 1));
+    expect([...ws.sentOfType("subscribe_stats").at(-1)!.payload!.instrument_ids!].sort((a, b) => a - b)).toEqual([1, 40]);
+    // An id nothing holds changes nothing.
+    act(() => refreshLiveStats([999]));
+    expect(ws.sentOfType("subscribe_stats").length).toBe(before + 1);
   });
 
   it("releasing every consumer ends the stats subscription", async () => {

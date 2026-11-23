@@ -28,6 +28,10 @@ type Querier interface {
 	// room for a replacement row if one is being inserted; a pure
 	// retraction (no replacement) stops after step 1 and never calls step 2.
 	BeginSupersedeSwing(ctx context.Context, arg BeginSupersedeSwingParams) (int64, error)
+	// ClearNeedsAttention removes a Hyperliquid symbol's needs_attention state
+	// (the operator's decision, argus-instruments clear-attention): with no
+	// state row the supervisor starts the symbol again if it is tracked.
+	ClearNeedsAttention(ctx context.Context, nativeSymbol string) (ClearNeedsAttentionRow, error)
 	// CloseCandle freezes a forming candle. The is_closed = false guard makes a
 	// repeat close of an already-closed candle affect zero rows instead of
 	// hitting trg_candles_enforce_lifecycle's handshake-step rejection, so the
@@ -89,6 +93,11 @@ type Querier interface {
 	// to. trigger_open_time is unique per current row at a given position,
 	// so "earliest" is never ambiguous.
 	EarliestSweepValidatedEventByProtectedSwing(ctx context.Context, arg EarliestSweepValidatedEventByProtectedSwingParams) (StructureEvent, error)
+	// EnableInstrumentForWatchlist is the one code path that sets enabled =
+	// TRUE (D15.1): only from a watchlist add, only outside production (the
+	// caller's guard), always with an instrument_enablements row in the same
+	// transaction. Zero rows: it was already enabled.
+	EnableInstrumentForWatchlist(ctx context.Context, id int64) (int64, error)
 	// GetCandleGap returns a gap regardless of resolved state, so a caller
 	// that got zero rows from ResolveCandleGap can tell "never existed" apart
 	// from "already resolved" instead of guessing.
@@ -144,6 +153,7 @@ type Querier interface {
 	GetCurrentSwing(ctx context.Context, arg GetCurrentSwingParams) (ConfirmedSwing, error)
 	GetInstrumentByID(ctx context.Context, id int64) (Instrument, error)
 	GetInstrumentByProviderAndSymbol(ctx context.Context, arg GetInstrumentByProviderAndSymbolParams) (Instrument, error)
+	GetInstrumentForUpdate(ctx context.Context, id int64) (Instrument, error)
 	// GetLatestClosedCandle returns the most recent current, closed candle
 	// for an instrument -- used to bound a replay (e.g. a candle
 	// correction's recompute) at "now" in candle terms, without the caller
@@ -190,6 +200,7 @@ type Querier interface {
 	GetUserByID(ctx context.Context, id int64) (User, error)
 	GetUserDrawings(ctx context.Context, arg GetUserDrawingsParams) (UserDrawing, error)
 	GetUserPreferences(ctx context.Context, userID int64) (UserPreference, error)
+	GetWatchlistItem(ctx context.Context, arg GetWatchlistItemParams) (WatchlistItem, error)
 	// IncrementSignupWrongGuessesIfEligible atomically claims one guess
 	// against email_normalized's current code: it increments wrong_guesses
 	// and returns the row in the same statement, but only if this attempt
@@ -214,6 +225,7 @@ type Querier interface {
 	// default (000002): every value must come from the caller, and the
 	// database rejects the insert if any is left out.
 	InsertInstrument(ctx context.Context, arg InsertInstrumentParams) (Instrument, error)
+	InsertInstrumentEnablement(ctx context.Context, arg InsertInstrumentEnablementParams) (InstrumentEnablement, error)
 	InsertSession(ctx context.Context, arg InsertSessionParams) (Session, error)
 	// InsertSetup creates the row for a brand-new identity (spec section
 	// 15.1: the first step whose TradePlan.Status != PlanNone for this
@@ -396,6 +408,8 @@ type Querier interface {
 	// -- reconstructing a setup's story (the frontend's eventual "Evidence"
 	// list is exactly this kind of data).
 	ListEventsForSetup(ctx context.Context, setupID int64) ([]SetupEvent, error)
+	ListHyperliquidInstruments(ctx context.Context) ([]Instrument, error)
+	ListInstrumentEnablements(ctx context.Context, instrumentID int64) ([]InstrumentEnablement, error)
 	// ListLatestCurrentSwings is bounded by max_pivot_time, not merely "the
 	// latest current rows overall": during a correction replay, an
 	// unbounded query can pick up a swing the walk has not reconciled yet
@@ -491,7 +505,28 @@ type Querier interface {
 	// ListSwingsInWindow: current confirmed swings whose pivot candle opened in
 	// [from_time, to_time), oldest first, at most row_limit rows.
 	ListSwingsInWindow(ctx context.Context, arg ListSwingsInWindowParams) ([]ListSwingsInWindowRow, error)
+	// Tracking (Phase 4.1a, D15): which Hyperliquid instruments ARGUS ingests
+	// and analyses -- the enabled ones on at least one watchlist, plus the
+	// configured floor symbols -- and the audited operation that enables one.
+	// ListTrackedInstruments is the tracked set in cap order: the floor first,
+	// then by when the instrument was first put on any watchlist, then id. The
+	// worker tracks the first cap of them; the API counts them for the cap.
+	// Floor symbols are tracked whether or not their row is enabled (the
+	// worker always ingested its configured symbols); a watched symbol only
+	// when enabled.
+	// One index lookup per instrument (idx_watchlist_items_instrument_created)
+	// answers both "on any watchlist?" and "since when?" (an EXISTS here ran as
+	// a sequential scan per instrument: 70 ms at 50,000 watchlist rows).
+	ListTrackedInstruments(ctx context.Context, floor []string) ([]ListTrackedInstrumentsRow, error)
+	ListTrackedSymbolStates(ctx context.Context, instrumentIds []int64) ([]TrackedSymbolState, error)
 	ListWatchlistItems(ctx context.Context, userID int64) ([]WatchlistItem, error)
+	// ListWatchlistItemsForUpdate locks the user's rows for a reorder, so a
+	// concurrent add or remove waits and the permutation check is exact.
+	ListWatchlistItemsForUpdate(ctx context.Context, userID int64) ([]WatchlistItem, error)
+	// LockTrackedCap serialises every add that could grow the tracked set, for
+	// the rest of the transaction, so two concurrent adds of two different new
+	// symbols can never both pass the cap check.
+	LockTrackedCap(ctx context.Context) error
 	MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) (User, error)
 	// MarkOnboardingCompleted is unconditional -- the service layer
 	// (not this statement) is what checks display_name and at least one
@@ -515,6 +550,7 @@ type Querier interface {
 	// the 5th, exactly at the limit) fail only because of its own guess
 	// being counted.
 	MarkSignupVerified(ctx context.Context, arg MarkSignupVerifiedParams) (SignupVerification, error)
+	NextWatchlistPosition(ctx context.Context, userID int64) (int32, error)
 	// RecordCandleGap is idempotent: detecting the same gap twice (a retried
 	// or duplicate-delivered detection event) must not create a second row or
 	// error. The DO UPDATE is a deliberate no-op (detected_at keeps its
@@ -552,6 +588,7 @@ type Querier interface {
 	// migration that is written in place rather than through a supersede
 	// handshake (000005's comment on the table explains why).
 	SetStructureState(ctx context.Context, arg SetStructureStateParams) (StructureState, error)
+	SetWatchlistItemPosition(ctx context.Context, arg SetWatchlistItemPositionParams) error
 	// TouchSession slides the idle expiry and records last_seen_at -- the
 	// caller (the auth middleware) throttles how often this actually runs
 	// (at most once a minute per session, ADR-015's own instruction), not
@@ -607,6 +644,10 @@ type Querier interface {
 	// -- accepted_terms is required on every signup/start call, not only
 	// the first.
 	UpsertSignupCode(ctx context.Context, arg UpsertSignupCodeParams) (SignupVerification, error)
+	// UpsertTrackedSymbolState never replaces needs_attention with anything
+	// else (D15.5): a running pipeline's own "live" or "retrying" must not
+	// hide a precision change. Clearing it is the operator's decision.
+	UpsertTrackedSymbolState(ctx context.Context, arg UpsertTrackedSymbolStateParams) error
 }
 
 var _ Querier = (*Queries)(nil)

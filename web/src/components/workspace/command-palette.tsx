@@ -55,7 +55,8 @@ interface PaletteContextValue {
 
 const PaletteContext = createContext<PaletteContextValue | null>(null);
 
-// Global ⌘K / Ctrl+K navigation and symbol search -- the analysis workspace
+// Global ⌘⇧K / Ctrl+Shift+K navigation and symbol jump (Ctrl+K is the
+// watchlist symbol search since Phase 4.1a) -- the analysis workspace
 // has no nav tabs or logo header, so this (plus the toolbar's own search
 // trigger and a back-to-setups control) is how the terminal is navigated.
 export function CommandPaletteProvider({ children }: { children: ReactNode }) {
@@ -71,7 +72,9 @@ export function CommandPaletteProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      // Ctrl+Shift+K (Cmd+Shift+K): Ctrl+K opens the symbol search
+      // dialog since Phase 4.1a (the owner's choice for adding symbols).
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setOpen((o) => !o);
       }

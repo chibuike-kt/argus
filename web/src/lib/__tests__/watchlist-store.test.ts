@@ -83,7 +83,7 @@ describe("watchlist store removal", () => {
     await vi.advanceTimersByTimeAsync(UNDO_WINDOW_MS);
     expect(deletes()).toHaveLength(1);
     expect(s.getSnapshot().ids).toEqual([1, 2, 3]);
-    expect(s.getSnapshot().failure).toEqual({ id: 2, message: "database unavailable" });
+    expect(s.getSnapshot().failure).toEqual({ id: 2, message: "database unavailable", action: "remove" });
     s.dismissFailure();
     expect(s.getSnapshot().failure).toBeNull();
   });

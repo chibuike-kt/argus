@@ -289,13 +289,13 @@ export function ChartToolbar() {
       <div className="ml-auto flex items-center gap-1.5">
         <button
           onClick={palette.open}
-          aria-label="Search (Ctrl+K)"
-          title="Jump to a symbol or page"
+          aria-label="Jump to a symbol or page (Ctrl+Shift+K)"
+          title="Jump to a symbol or page (Ctrl+Shift+K). Ctrl+K adds a symbol to your watchlist."
           className="focus-ring inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] text-fg-subtle transition-colors hover:bg-white/5 hover:text-fg"
         >
           <MagnifyingGlass className="size-4" />
           <kbd className="hidden rounded border border-line px-1.5 py-0.5 text-[10px] lg:inline">
-            Ctrl K
+            Ctrl ⇧ K
           </kbd>
         </button>
         <IconButton

@@ -122,48 +122,87 @@ func backfillWindow(now time.Time, newest *time.Time, backfillDays int) (start t
 // It returns false when the symbol can never be ingested (no instrument
 // row for it -- not a transient failure, so retrying forever would only
 // spam the log) and when ctx ends; the caller then stops that symbol.
-func backfillUntilCaughtUp(ctx context.Context, reason, symbol string, svc *ingestion.Service, state backfillState, cfg config.Config, logger *slog.Logger, clk clock.Clock) bool {
+//
+// onRetry, when given, is told about each failed attempt (the supervisor
+// shows it on the watchlist row as "retrying").
+func backfillUntilCaughtUp(ctx context.Context, reason, symbol string, svc *ingestion.Service, state backfillState, cfg config.Config, logger *slog.Logger, clk clock.Clock, onRetry ...func(attempt int, err error)) bool {
+	var opt backfillOptions
+	if len(onRetry) > 0 {
+		opt.onRetry = onRetry[0]
+	}
+	return backfillUntilCaughtUpWith(ctx, reason, symbol, svc, state, cfg, logger, clk, opt)
+}
+
+// backfillOptions shape backfillUntilCaughtUpWith for a supervised symbol.
+type backfillOptions struct {
+	// onRetry is told about each failed attempt.
+	onRetry func(attempt int, err error)
+	// slot, when set, is a backfill slot (the supervisor's concurrency
+	// gate). It is held only while one attempt runs and given back
+	// before the retry delay, so symbols the provider keeps rejecting
+	// cannot hold every slot and starve a healthy one (architect review
+	// of 4.1a, item 1).
+	slot chan struct{}
+	// onSlot is told when an attempt has its slot and starts.
+	onSlot func(attempt int)
+	// retryCap, when set, caps the retry delay instead of the shared live
+	// feed cap (cfg.Live.ReconnectBackoffCap).
+	retryCap time.Duration
+}
+
+// retryDelay is the wait before the attempt after attempt (jittered).
+func (o backfillOptions) retryDelay(attempt int, live config.LiveFeed) time.Duration {
+	c := live.ReconnectBackoffCap
+	if o.retryCap > 0 {
+		c = o.retryCap
+	}
+	return reconnectBackoff(attempt, live.ReconnectBackoffBase, c)
+}
+
+// acquire takes the slot (when there is one); false when ctx ended first.
+func (o backfillOptions) acquire(ctx context.Context) bool {
+	if o.slot == nil {
+		return true
+	}
+	select {
+	case o.slot <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (o backfillOptions) release() {
+	if o.slot != nil {
+		<-o.slot
+	}
+}
+
+// backfillUntilCaughtUpWith is backfillUntilCaughtUp with options.
+func backfillUntilCaughtUpWith(ctx context.Context, reason, symbol string, svc *ingestion.Service, state backfillState, cfg config.Config, logger *slog.Logger, clk clock.Clock, opt backfillOptions) bool {
 	var lostRecordedTo time.Time
 	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
 			return false
 		}
-		now := clk.Now()
-		instrumentID, newest, err := state.newestClosed(ctx, symbol)
-		if errors.Is(err, instruments.ErrNotFound) {
-			logger.Error("hyperliquid: symbol has no instrument row -- not ingesting it; register the instrument first",
-				"symbol", symbol, "error", err)
+		if !opt.acquire(ctx) {
 			return false
 		}
-		if err == nil {
-			start, lost := backfillWindow(now, newest, cfg.Hyperliquid.BackfillDays)
-			if lost != nil && lost[1].After(lostRecordedTo) {
-				from := lost[0]
-				if from.Before(lostRecordedTo) {
-					from = lostRecordedTo
-				}
-				logger.Error("hyperliquid: gap older than the exchange's retention -- these minutes can never be backfilled",
-					"symbol", symbol, "instrument_id", instrumentID, "gap_start", from, "gap_end", lost[1],
-					"missing_minutes", int(lost[1].Sub(from)/time.Minute), "retention_candles", hyperliquidRetentionCandles)
-				if recErr := state.recordLostGap(ctx, instrumentID, from, lost[1]); recErr != nil {
-					logger.Error("hyperliquid: could not record the lost gap", "symbol", symbol, "error", recErr)
-				} else {
-					lostRecordedTo = lost[1]
-				}
-			}
-			err = svc.IngestHistorical(ctx, symbol, start, now)
-			if err == nil {
-				if attempt > 0 || newest == nil || now.Sub(*newest) > 2*time.Minute {
-					logger.Info("hyperliquid: backfill complete", "reason", reason, "symbol", symbol,
-						"from", start, "to", now, "attempts", attempt+1)
-				}
-				return true
-			}
+		if opt.onSlot != nil {
+			opt.onSlot(attempt)
+		}
+		done, ok, err := backfillAttempt(ctx, reason, symbol, svc, state, cfg, logger, clk, attempt, &lostRecordedTo)
+		opt.release()
+		if done {
+			return ok
 		}
 		if ctx.Err() != nil {
 			return false
 		}
-		delay := reconnectBackoff(attempt, cfg.Live.ReconnectBackoffBase, cfg.Live.ReconnectBackoffCap)
+		if opt.onRetry != nil {
+			opt.onRetry(attempt+1, err)
+		}
+		delay := opt.retryDelay(attempt, cfg.Live)
 		logger.Error("hyperliquid: backfill failed, will retry -- stream not restarted until it succeeds",
 			"reason", reason, "symbol", symbol, "attempt", attempt+1, "retry_in", delay.String(), "error", err)
 		select {
@@ -172,4 +211,42 @@ func backfillUntilCaughtUp(ctx context.Context, reason, symbol string, svc *inge
 		case <-time.After(delay):
 		}
 	}
+}
+
+// backfillAttempt is one attempt. done reports that the loop ends with ok;
+// otherwise err is why this attempt failed and the loop retries.
+func backfillAttempt(ctx context.Context, reason, symbol string, svc *ingestion.Service, state backfillState, cfg config.Config, logger *slog.Logger, clk clock.Clock, attempt int, lostRecordedTo *time.Time) (done, ok bool, err error) {
+	now := clk.Now()
+	instrumentID, newest, err := state.newestClosed(ctx, symbol)
+	if errors.Is(err, instruments.ErrNotFound) {
+		logger.Error("hyperliquid: symbol has no instrument row -- not ingesting it; register the instrument first",
+			"symbol", symbol, "error", err)
+		return true, false, err
+	}
+	if err == nil {
+		start, lost := backfillWindow(now, newest, cfg.Hyperliquid.BackfillDays)
+		if lost != nil && lost[1].After(*lostRecordedTo) {
+			from := lost[0]
+			if from.Before(*lostRecordedTo) {
+				from = *lostRecordedTo
+			}
+			logger.Error("hyperliquid: gap older than the exchange's retention -- these minutes can never be backfilled",
+				"symbol", symbol, "instrument_id", instrumentID, "gap_start", from, "gap_end", lost[1],
+				"missing_minutes", int(lost[1].Sub(from)/time.Minute), "retention_candles", hyperliquidRetentionCandles)
+			if recErr := state.recordLostGap(ctx, instrumentID, from, lost[1]); recErr != nil {
+				logger.Error("hyperliquid: could not record the lost gap", "symbol", symbol, "error", recErr)
+			} else {
+				*lostRecordedTo = lost[1]
+			}
+		}
+		err = svc.IngestHistorical(ctx, symbol, start, now)
+		if err == nil {
+			if attempt > 0 || newest == nil || now.Sub(*newest) > 2*time.Minute {
+				logger.Info("hyperliquid: backfill complete", "reason", reason, "symbol", symbol,
+					"from", start, "to", now, "attempts", attempt+1)
+			}
+			return true, true, nil
+		}
+	}
+	return false, false, err
 }

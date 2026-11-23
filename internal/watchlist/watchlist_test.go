@@ -87,7 +87,7 @@ func TestIntegration_Replace_ReplacesWholeListInOrder(t *testing.T) {
 	a := testInstrument(t, db, true)
 	b := testInstrument(t, db, true)
 
-	items, err := store.Replace(context.Background(), userID, []int64{a, b}, 50)
+	items, err := store.Replace(context.Background(), userID, []int64{a, b}, 50, noTrackedCap)
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestIntegration_Replace_ReplacesWholeListInOrder(t *testing.T) {
 
 	// Replacing again with just b, in position 0, drops a entirely --
 	// a full replace, not an incremental add/remove.
-	items, err = store.Replace(context.Background(), userID, []int64{b}, 50)
+	items, err = store.Replace(context.Background(), userID, []int64{b}, 50, noTrackedCap)
 	if err != nil {
 		t.Fatalf("second Replace: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestIntegration_Replace_TooManyItems_Rejected(t *testing.T) {
 	userID := testUser(t, db)
 	a := testInstrument(t, db, true)
 
-	if _, err := store.Replace(context.Background(), userID, []int64{a}, 0); !errors.Is(err, ErrTooManyItems) {
+	if _, err := store.Replace(context.Background(), userID, []int64{a}, 0, noTrackedCap); !errors.Is(err, ErrTooManyItems) {
 		t.Fatalf("Replace(1 item, max 0) = %v, want ErrTooManyItems", err)
 	}
 }
@@ -138,7 +138,7 @@ func TestIntegration_Replace_UnknownInstrument_Rejected(t *testing.T) {
 	store := NewStore(db, instruments.NewStore(db))
 	userID := testUser(t, db)
 
-	if _, err := store.Replace(context.Background(), userID, []int64{999999999}, 50); !errors.Is(err, ErrInstrumentNotFound) {
+	if _, err := store.Replace(context.Background(), userID, []int64{999999999}, 50, noTrackedCap); !errors.Is(err, ErrInstrumentNotFound) {
 		t.Fatalf("Replace(unknown instrument) = %v, want ErrInstrumentNotFound", err)
 	}
 }
@@ -149,7 +149,7 @@ func TestIntegration_Replace_DisabledInstrument_Rejected(t *testing.T) {
 	userID := testUser(t, db)
 	disabled := testInstrument(t, db, false)
 
-	if _, err := store.Replace(context.Background(), userID, []int64{disabled}, 50); !errors.Is(err, ErrInstrumentDisabled) {
+	if _, err := store.Replace(context.Background(), userID, []int64{disabled}, 50, noTrackedCap); !errors.Is(err, ErrInstrumentDisabled) {
 		t.Fatalf("Replace(disabled instrument) = %v, want ErrInstrumentDisabled", err)
 	}
 }
@@ -168,11 +168,11 @@ func TestIntegration_Replace_DuplicateInstrument_RejectedAndPreviousListUnchange
 	a := testInstrument(t, db, true)
 	b := testInstrument(t, db, true)
 
-	if _, err := store.Replace(context.Background(), userID, []int64{a}, 50); err != nil {
+	if _, err := store.Replace(context.Background(), userID, []int64{a}, 50, noTrackedCap); err != nil {
 		t.Fatalf("baseline Replace: %v", err)
 	}
 
-	if _, err := store.Replace(context.Background(), userID, []int64{b, b}, 50); !errors.Is(err, ErrDuplicateInstrument) {
+	if _, err := store.Replace(context.Background(), userID, []int64{b, b}, 50, noTrackedCap); !errors.Is(err, ErrDuplicateInstrument) {
 		t.Fatalf("Replace([b, b]) = %v, want ErrDuplicateInstrument", err)
 	}
 
@@ -200,10 +200,10 @@ func TestIntegration_Replace_DisabledInstrument_LeavesPreviousListUnchanged(t *t
 	a := testInstrument(t, db, true)
 	disabled := testInstrument(t, db, false)
 
-	if _, err := store.Replace(context.Background(), userID, []int64{a}, 50); err != nil {
+	if _, err := store.Replace(context.Background(), userID, []int64{a}, 50, noTrackedCap); err != nil {
 		t.Fatalf("baseline Replace: %v", err)
 	}
-	if _, err := store.Replace(context.Background(), userID, []int64{disabled}, 50); !errors.Is(err, ErrInstrumentDisabled) {
+	if _, err := store.Replace(context.Background(), userID, []int64{disabled}, 50, noTrackedCap); !errors.Is(err, ErrInstrumentDisabled) {
 		t.Fatalf("Replace(disabled instrument) = %v, want ErrInstrumentDisabled", err)
 	}
 
@@ -215,3 +215,7 @@ func TestIntegration_Replace_DisabledInstrument_LeavesPreviousListUnchanged(t *t
 		t.Fatalf("List after a rejected Replace = %+v, want the previous [{%d 0}] unchanged", items, a)
 	}
 }
+
+// noTrackedCap: these tests are about the list itself, not the system cap
+// of tracked symbols (covered in add_integration_test.go).
+var noTrackedCap = TrackedCapOptions{Max: 1 << 20}

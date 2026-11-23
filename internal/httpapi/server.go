@@ -20,6 +20,7 @@ import (
 	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/preferences"
 	"github.com/chibuike-kt/argus/internal/setups"
+	"github.com/chibuike-kt/argus/internal/tracking"
 )
 
 // maxRequestBodyBytes bounds every /api/v1 request body (architect
@@ -76,6 +77,12 @@ type Deps struct {
 	Hub          *hub.Hub
 	IsProduction bool
 	Clock        clock.Clock
+	// Tracking (Phase 4.1a, D15): the configured Hyperliquid floor
+	// symbols, the system cap of tracked symbols, and the environment name
+	// recorded with an enablement.
+	TrackingFloor []string
+	TrackedCap    int
+	Environment   string
 }
 
 // NewRouter builds the chi router with base middleware and routes.
@@ -159,19 +166,23 @@ func NewRouter(d Deps) http.Handler {
 			candleStore := marketdata.NewStore(d.DB, clock.Real{})
 			setupStore := setups.NewStore(d.DB)
 			api := &apiHandler{
-				store:        setupStore,
-				evidence:     setupStore,
-				engineView:   engineview.NewStore(d.DB),
-				clk:          clk,
-				instruments:  instruments.NewStore(d.DB),
-				candles:      candleStore,
-				stats:        candleStore,
-				prefs:        preferences.NewStore(d.DB, clk),
-				auth:         d.Auth,
-				watchlist:    d.Watchlist,
-				authPolicy:   d.AuthPolicy,
-				isProduction: d.IsProduction,
-				logger:       d.Logger,
+				store:         setupStore,
+				evidence:      setupStore,
+				engineView:    engineview.NewStore(d.DB),
+				tracking:      tracking.NewStore(d.DB),
+				trackingFloor: d.TrackingFloor,
+				trackedCap:    d.TrackedCap,
+				environment:   d.Environment,
+				clk:           clk,
+				instruments:   instruments.NewStore(d.DB),
+				candles:       candleStore,
+				stats:         candleStore,
+				prefs:         preferences.NewStore(d.DB, clk),
+				auth:          d.Auth,
+				watchlist:     d.Watchlist,
+				authPolicy:    d.AuthPolicy,
+				isProduction:  d.IsProduction,
+				logger:        d.Logger,
 			}
 			strict := NewStrictHandlerWithOptions(api, nil, StrictHTTPServerOptions{
 				RequestErrorHandlerFunc: func(w http.ResponseWriter, _ *http.Request, err error) {

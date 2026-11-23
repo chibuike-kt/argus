@@ -105,6 +105,15 @@ type Instrument struct {
 	PipSize sql.NullInt64 `json:"pip_size"`
 }
 
+type InstrumentEnablement struct {
+	ID           int64         `json:"id"`
+	InstrumentID int64         `json:"instrument_id"`
+	UserID       sql.NullInt64 `json:"user_id"`
+	Reason       string        `json:"reason"`
+	Environment  string        `json:"environment"`
+	EnabledAt    time.Time     `json:"enabled_at"`
+}
+
 type LatestQuote struct {
 	InstrumentID int64     `json:"instrument_id"`
 	Bid          int64     `json:"bid"`
@@ -232,6 +241,14 @@ type StructureState struct {
 	UpdatedAt             time.Time     `json:"updated_at"`
 	ProtectedLowSwingID   sql.NullInt64 `json:"protected_low_swing_id"`
 	ProtectedHighSwingID  sql.NullInt64 `json:"protected_high_swing_id"`
+}
+
+type TrackedSymbolState struct {
+	InstrumentID int64     `json:"instrument_id"`
+	State        string    `json:"state"`
+	Reason       string    `json:"reason"`
+	Attempt      int32     `json:"attempt"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type User struct {
