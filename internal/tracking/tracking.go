@@ -11,6 +11,8 @@ package tracking
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -119,6 +121,24 @@ func (s *Store) States(ctx context.Context, ids []int64) (map[int64]Status, erro
 		out[r.InstrumentID] = Status{InstrumentID: r.InstrumentID, State: State(r.State), Reason: r.Reason, Attempt: int(r.Attempt), UpdatedAt: r.UpdatedAt.UTC()}
 	}
 	return out, nil
+}
+
+// ErrNoAttention is returned when the symbol is not marked needs_attention
+// (or is not a registered Hyperliquid instrument).
+var ErrNoAttention = errors.New("tracking: symbol is not marked needs attention")
+
+// ClearNeedsAttention removes symbol's needs_attention state and returns
+// the state it had; ErrNoAttention when there was none. The supervisor
+// then starts the symbol again on its next pass if it is tracked.
+func (s *Store) ClearNeedsAttention(ctx context.Context, symbol string) (Status, error) {
+	r, err := s.q.ClearNeedsAttention(ctx, symbol)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Status{}, ErrNoAttention
+	}
+	if err != nil {
+		return Status{}, fmt.Errorf("tracking: clear needs attention for %s: %w", symbol, err)
+	}
+	return Status{InstrumentID: r.InstrumentID, State: NeedsAttention, Reason: r.Reason, UpdatedAt: r.UpdatedAt.UTC()}, nil
 }
 
 // HyperliquidInstruments returns every registered Hyperliquid instrument,
