@@ -222,6 +222,97 @@ func TestIntegration_Supervisor_NewSymbol_ProviderFailuresShowOnTheRow(t *testin
 	}
 }
 
+// Architect review of 4.1a, item 1: a backfill slot is held only while one
+// attempt runs. Two symbols Hyperliquid keeps rejecting, with both slots
+// (concurrency 2), must not starve a healthy third symbol: it reaches live.
+func TestIntegration_Supervisor_RejectedSymbolsDoNotHoldEveryBackfillSlot(t *testing.T) {
+	db := dbInSessionZone(t, "America/New_York")
+	clk := clock.Real{}
+	stamp := time.Now().UnixNano()
+	bad1, bad2, good := fmt.Sprintf("SLOTBADA%d", stamp), fmt.Sprintf("SLOTBADB%d", stamp), fmt.Sprintf("SLOTGOOD%d", stamp)
+
+	x := &flakyExchange{killFirst: map[string]int{}, reject: map[string]bool{bad1: true, bad2: true}, calls: map[string]int{}}
+	restSrv := httptest.NewServer(http.HandlerFunc(x.rest))
+	defer restSrv.Close()
+	wsSrv := httptest.NewServer(http.HandlerFunc(x.socket))
+	defer wsSrv.Close()
+
+	instrumentStore := instruments.NewStore(db)
+	bad1ID := seedHyperliquidTestInstrument(t, instrumentStore, bad1)
+	bad2ID := seedHyperliquidTestInstrument(t, instrumentStore, bad2)
+	goodID := seedHyperliquidTestInstrument(t, instrumentStore, good)
+
+	provider := hyperliquid.NewProvider(clk, nil,
+		hyperliquid.WithBaseURL(restSrv.URL),
+		hyperliquid.WithWSURL("ws"+strings.TrimPrefix(wsSrv.URL, "http")),
+		hyperliquid.WithHeartbeat(100*time.Millisecond, 5*time.Second))
+	marketdataStore := marketdata.NewStore(db, clk)
+	cache := ingestion.NewInstrumentCache(instrumentStore)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 4}))
+	svc := ingestion.NewService(hyperliquid.ProviderName, provider, ingestion.NewNormalizer(cache, clk), cache, marketdataStore, marketdata.ContinuousCalendar{}, logger)
+	cfg := config.Config{
+		Live:        config.LiveFeed{ReconnectBackoffBase: 20 * time.Millisecond, ReconnectBackoffCap: 100 * time.Millisecond},
+		Hyperliquid: config.Hyperliquid{BackfillDays: 1, NewSymbolBackfillRetryCap: 200 * time.Millisecond},
+	}
+	state := storeBackfillState{instruments: instrumentStore, candles: marketdataStore}
+	ts := tracking.NewStore(db)
+
+	// The healthy symbol is hidden from the tracked set until both
+	// rejected ones have taken a slot and failed an attempt, so the test
+	// does not depend on which goroutine reaches the gate first.
+	hidden := &hidingTracked{Store: ts, hide: good}
+	hidden.hiding.Store(true)
+	sup := newSupervisor([]string{bad1, bad2, good}, 8, time.Minute, 2, hidden, func(ctx context.Context, symbol string, hooks symbolHooks) {
+		runHyperliquidSymbolWith(ctx, symbol, svc, state, cfg, logger, clk, hooks)
+	}, clk, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); sup.run(ctx, 100*time.Millisecond) }()
+	defer func() { cancel(); <-done }()
+
+	var st map[int64]tracking.Status
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		st, _ = ts.States(context.Background(), []int64{bad1ID, bad2ID})
+		if st[bad1ID].State == tracking.Retrying && st[bad2ID].State == tracking.Retrying {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	hidden.hiding.Store(false)
+
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		st, _ = ts.States(context.Background(), []int64{bad1ID, bad2ID, goodID})
+		if st[goodID].State == tracking.Live && st[bad1ID].Attempt >= 3 && st[bad2ID].Attempt >= 3 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("states %+v: want the healthy symbol live while the two rejected ones keep retrying (attempt >= 3)", st)
+}
+
+// hidingTracked leaves hide out of the tracked set while hiding is set.
+type hidingTracked struct {
+	*tracking.Store
+	hide   string
+	hiding atomic.Bool
+}
+
+func (h *hidingTracked) Tracked(ctx context.Context, floor []string) ([]tracking.Tracked, error) {
+	all, err := h.Store.Tracked(ctx, floor)
+	if err != nil || !h.hiding.Load() {
+		return all, err
+	}
+	out := all[:0:0]
+	for _, t := range all {
+		if t.Symbol != h.hide {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 // recordingStates wraps tracking.Store, reporting every write.
 type recordingStates struct {
 	*tracking.Store

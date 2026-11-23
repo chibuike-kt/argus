@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -36,6 +37,10 @@ type instrumentInserter interface {
 	Insert(ctx context.Context, p instruments.NewInstrumentParams) (instruments.Instrument, error)
 }
 
+// errCatalogListingTooSmall: the provider's listing was empty or under
+// half of the stored catalog, so the refresh changed nothing.
+var errCatalogListingTooSmall = errors.New("catalog refresh skipped: the provider listing is empty or under half of the stored catalog")
+
 type catalogResult struct {
 	Listed, Created, Attention int
 }
@@ -46,6 +51,14 @@ func refreshCatalog(ctx context.Context, all []ingestion.ProviderInstrument, ins
 	stored, err := cs.HyperliquidInstruments(ctx)
 	if err != nil {
 		return res, err
+	}
+	// A listing that is empty or under half of what is stored is far more
+	// likely a provider fault (a partial or failed response) than a mass
+	// delisting: change nothing and mark nothing (architect review of
+	// 4.1a, item 3). The caller logs the error.
+	if len(all) == 0 || 2*len(all) < len(stored) {
+		return res, fmt.Errorf("%w: Hyperliquid listed %d perpetuals, %d are stored; nothing was changed and nothing marked needs attention",
+			errCatalogListingTooSmall, len(all), len(stored))
 	}
 	bySymbol := make(map[string]store.Instrument, len(stored))
 	for _, s := range stored {

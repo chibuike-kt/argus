@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
+	"github.com/chibuike-kt/argus/internal/config"
 	"github.com/chibuike-kt/argus/internal/ingestion"
 	"github.com/chibuike-kt/argus/internal/instruments"
 	"github.com/chibuike-kt/argus/internal/store"
@@ -320,5 +322,226 @@ func TestRefreshCatalog_CreatesDisabledRowsAndFlagsPrecisionChangesAndDelistings
 	}
 	if _, ok := cs.states[4]; ok {
 		t.Fatal("an unlisted, never enabled row was flagged")
+	}
+}
+
+// countingStart runs until stopped, counting starts and the most
+// pipelines ever running at once. A symbol in failOnce returns at once on
+// its first start (a pipeline that reported Failed).
+type countingStart struct {
+	mu       sync.Mutex
+	starts   map[string]int
+	current  int
+	peak     int
+	failOnce map[string]bool
+}
+
+func (c *countingStart) run(ctx context.Context, symbol string, _ symbolHooks) {
+	c.mu.Lock()
+	if c.starts == nil {
+		c.starts = map[string]int{}
+	}
+	c.starts[symbol]++
+	if c.failOnce[symbol] && c.starts[symbol] == 1 {
+		c.mu.Unlock()
+		return
+	}
+	c.current++
+	c.peak = max(c.peak, c.current)
+	c.mu.Unlock()
+	<-ctx.Done()
+	c.mu.Lock()
+	c.current--
+	c.mu.Unlock()
+}
+
+func (c *countingStart) count(symbol string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.starts[symbol]
+}
+
+func (c *countingStart) peakRunning() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.peak
+}
+
+// Architect review of 4.1a, item 2: pipelines in their removal grace hold
+// a connection, so they count against the cap. A wanted symbol that needs
+// a slot stops the grace pipeline that left first.
+func TestSupervisor_GracePipelinesCountAgainstTheCapAndTheOldestIsStoppedForANewSymbol(t *testing.T) {
+	store := &fakeTracking{}
+	store.set(tr(1, "AAA"), tr(2, "BBB"), tr(3, "CCC"))
+	clk := clock.NewMutable(time.Date(2026, 11, 22, 4, 0, 0, 0, time.UTC))
+	c := &countingStart{}
+	s := newSupervisor(nil, 3, 10*time.Minute, 2, store, c.run, clk, supervisorTestLogger())
+	defer s.stopAll()
+	ctx := context.Background()
+	step := func(after time.Duration, want map[string]bool, tracked ...tracking.Tracked) {
+		t.Helper()
+		clk.Advance(after)
+		store.set(tracked...)
+		if err := s.reconcile(ctx); err != nil {
+			t.Fatal(err)
+		}
+		got := s.runningSymbols()
+		if len(got) > 3 {
+			t.Fatalf("running %v: more than the cap of 3", got)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("running %v, want %v", got, want)
+		}
+		for sym := range want {
+			if !got[sym] {
+				t.Fatalf("running %v, want %v", got, want)
+			}
+		}
+	}
+	step(0, map[string]bool{"AAA": true, "BBB": true, "CCC": true}, tr(1, "AAA"), tr(2, "BBB"), tr(3, "CCC"))
+	// Remove the three, one minute apart: all three stay in their grace.
+	step(time.Minute, map[string]bool{"AAA": true, "BBB": true, "CCC": true}, tr(2, "BBB"), tr(3, "CCC"))
+	step(time.Minute, map[string]bool{"AAA": true, "BBB": true, "CCC": true}, tr(3, "CCC"))
+	step(time.Minute, map[string]bool{"AAA": true, "BBB": true, "CCC": true})
+	// Add three new symbols within the grace, one at a time: each stops
+	// the grace pipeline that left first.
+	step(time.Minute, map[string]bool{"DDD": true, "BBB": true, "CCC": true}, tr(4, "DDD"))
+	if st := store.state(1); st.State != tracking.Stopped || !strings.Contains(st.Reason, "cut short") {
+		t.Fatalf("AAA = %+v, want stopped with its grace cut short", st)
+	}
+	step(time.Minute, map[string]bool{"DDD": true, "EEE": true, "CCC": true}, tr(4, "DDD"), tr(5, "EEE"))
+	// An undo of the evicted AAA: it starts again (in CCC's slot).
+	step(time.Minute, map[string]bool{"DDD": true, "EEE": true, "AAA": true}, tr(4, "DDD"), tr(5, "EEE"), tr(1, "AAA"))
+	waitFor(t, func() bool { return c.count("AAA") == 2 })
+	waitFor(t, func() bool { return c.count("DDD") == 1 && c.count("EEE") == 1 })
+	if p := c.peakRunning(); p > 3 {
+		t.Fatalf("at most %d pipelines ran at once, want never more than the cap of 3", p)
+	}
+}
+
+// Architect review of 4.1a, item 4: a pipeline whose start function
+// returned (it reported Failed) is not left in running forever; the next
+// pass starts it again while its symbol is still wanted.
+func TestSupervisor_APipelineThatEndedOnItsOwnIsStartedAgain(t *testing.T) {
+	store := &fakeTracking{}
+	store.set(tr(1, "BTC"), tr(2, "NEW"))
+	clk := clock.NewMutable(time.Date(2026, 11, 22, 4, 0, 0, 0, time.UTC))
+	c := &countingStart{failOnce: map[string]bool{"NEW": true}}
+	s := newSupervisor(nil, 8, 10*time.Minute, 2, store, c.run, clk, supervisorTestLogger())
+	defer s.stopAll()
+	ctx := context.Background()
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return c.count("NEW") == 1 })
+	// Let the failed pipeline's goroutine finish closing its done channel.
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		p, ok := s.running[2]
+		if !ok {
+			return true
+		}
+		select {
+		case <-p.done:
+			return true
+		default:
+			return false
+		}
+	})
+	if err := s.reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return c.count("NEW") == 2 })
+	if !s.runningSymbols()["NEW"] || c.count("BTC") != 1 {
+		t.Fatalf("running %v, BTC starts %d: want NEW running again and BTC untouched", s.runningSymbols(), c.count("BTC"))
+	}
+}
+
+// Architect review of 4.1a, item 3: an empty listing, or one under half
+// of the stored catalog, changes nothing and marks nothing.
+func TestRefreshCatalog_AnEmptyOrUnderHalfListingChangesNothing(t *testing.T) {
+	stored := []store.Instrument{
+		{ID: 1, NativeSymbol: "BTC", PriceScale: 1, QtyScale: 5, Enabled: true},
+		{ID: 2, NativeSymbol: "ETH", PriceScale: 2, QtyScale: 4, Enabled: true},
+		{ID: 3, NativeSymbol: "SOL", PriceScale: 4, QtyScale: 2, Enabled: true},
+		{ID: 4, NativeSymbol: "LINK", PriceScale: 5, QtyScale: 1, Enabled: true},
+		{ID: 5, NativeSymbol: "AVAX", PriceScale: 4, QtyScale: 2, Enabled: true},
+	}
+	clk := clock.NewMutable(time.Date(2026, 11, 22, 4, 0, 0, 0, time.UTC))
+	cases := map[string][]ingestion.ProviderInstrument{
+		"empty": nil,
+		// 2 of 5 stored is under half. LINK's precision differs and a new
+		// symbol is listed: neither may be acted on.
+		"under half": {perp("LINK", 2), perp("NEWCOIN", 2)},
+	}
+	for name, listing := range cases {
+		t.Run(name, func(t *testing.T) {
+			cs := &fakeCatalogStore{stored: stored}
+			ins := &fakeInserter{}
+			_, err := refreshCatalog(context.Background(), listing, ins, cs, clk, supervisorTestLogger())
+			if !errors.Is(err, errCatalogListingTooSmall) {
+				t.Fatalf("err = %v, want errCatalogListingTooSmall", err)
+			}
+			if len(cs.writes) != 0 || len(ins.inserted) != 0 {
+				t.Fatalf("states written %+v, rows inserted %+v: want nothing changed", cs.writes, ins.inserted)
+			}
+		})
+	}
+	// Exactly half is accepted (the guard is "under half"): 3 of 5 listed,
+	// the 2 unlisted enabled symbols are marked.
+	cs := &fakeCatalogStore{stored: stored}
+	if _, err := refreshCatalog(context.Background(), []ingestion.ProviderInstrument{perp("BTC", 5), perp("ETH", 4), perp("SOL", 2)}, &fakeInserter{}, cs, clk, supervisorTestLogger()); err != nil {
+		t.Fatalf("a listing of 3 of 5 was refused: %v", err)
+	}
+	if cs.state(4).State != tracking.NeedsAttention || cs.state(5).State != tracking.NeedsAttention {
+		t.Fatalf("states %+v, want LINK and AVAX marked when the listing is usable", cs.states)
+	}
+}
+
+// Architect review of 4.1a, item 1: a supervised symbol's startup backfill
+// retries up to NewSymbolBackfillRetryCap (about 5 minutes); the shared
+// live feed cap (30 s) is used everywhere else.
+func TestStartupBackfillOptions_RetryCapAndSlot(t *testing.T) {
+	live := config.LiveFeed{ReconnectBackoffBase: time.Second, ReconnectBackoffCap: 30 * time.Second}
+	cfg := config.Config{Live: live, Hyperliquid: config.Hyperliquid{NewSymbolBackfillRetryCap: 5 * time.Minute}}
+	gate := make(chan struct{}, 2)
+	supervised := startupBackfillOptions(cfg, symbolHooks{gate: gate})
+	if supervised.slot != gate || supervised.retryCap != 5*time.Minute {
+		t.Fatalf("supervised options: slot %v, cap %s; want the gate and 5m", supervised.slot, supervised.retryCap)
+	}
+	if plain := startupBackfillOptions(cfg, symbolHooks{}); plain.slot != nil || plain.retryCap != 0 {
+		t.Fatalf("unsupervised options: slot %v, cap %s; want none (the shared cap)", plain.slot, plain.retryCap)
+	}
+	var longest, longestShared time.Duration
+	for i := 0; i < 400; i++ {
+		longest = max(longest, supervised.retryDelay(20, live))
+		longestShared = max(longestShared, backfillOptions{}.retryDelay(20, live))
+	}
+	if longest <= 30*time.Second || longest > 5*time.Minute {
+		t.Fatalf("longest supervised delay %s, want past 30s and at most 5m", longest)
+	}
+	if longestShared > 30*time.Second {
+		t.Fatalf("longest shared delay %s, want the shared 30s cap", longestShared)
+	}
+}
+
+// The slot is given back after a failed attempt (not held into the retry
+// delay) and taken again for the next one.
+func TestBackfillOptions_SlotIsHeldPerAttemptOnly(t *testing.T) {
+	gate := make(chan struct{}, 1)
+	opt := backfillOptions{slot: gate}
+	if !opt.acquire(context.Background()) || len(gate) != 1 {
+		t.Fatal("acquire did not take the slot")
+	}
+	opt.release()
+	if len(gate) != 0 {
+		t.Fatal("release did not give the slot back")
+	}
+	gate <- struct{}{} // someone else holds it
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if opt.acquire(ctx) {
+		t.Fatal("acquire succeeded with the slot taken and ctx done")
 	}
 }

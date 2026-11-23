@@ -103,6 +103,12 @@ type Hyperliquid struct {
 	// BackfillConcurrency is how many new symbols backfill their history
 	// at once (D15.4, 2); the rest wait their turn.
 	BackfillConcurrency int `env:"ARGUS_HYPERLIQUID_BACKFILL_CONCURRENCY" envDefault:"2"`
+	// NewSymbolBackfillRetryCap caps the retry delay of a tracked symbol's
+	// history backfill (architect review of 4.1a: about 5 minutes), so a
+	// symbol the provider keeps rejecting retries rarely. That path only:
+	// the shared live feed cap (ARGUS_LIVE_RECONNECT_BACKOFF_CAP) is
+	// unchanged everywhere else.
+	NewSymbolBackfillRetryCap time.Duration `env:"ARGUS_HYPERLIQUID_NEW_SYMBOL_BACKFILL_RETRY_CAP" envDefault:"5m"`
 	// SupervisorInterval is how often the worker re-reads the tracked set
 	// and starts or stops symbol pipelines; the catalog refresh runs at
 	// CatalogRefreshInterval. Implementation values. [U]

@@ -24,6 +24,10 @@ import (
 //     provider's REST budget.
 //   - A symbol that leaves the set keeps running for the removal grace
 //     (D15.4, 10 minutes), so a remove then an undo does not restart it.
+//     Grace pipelines count against the cap: one is stopped early when a
+//     wanted symbol needs its slot.
+//   - A pipeline that ended on its own (Failed) is started again on the
+//     next pass while its symbol is still wanted.
 //   - A symbol marked needs_attention (D15.5, price precision changed) is
 //     never started, and a running one is stopped at once.
 
@@ -111,6 +115,7 @@ func (s *supervisor) reconcile(ctx context.Context) error {
 	now := s.clk.Now()
 
 	want := map[int64]string{}
+	var order []int64 // wanted ids in cap order
 	for i, t := range tracked {
 		if states[t.ID].State == tracking.NeedsAttention {
 			continue // D15.5: never ingested until the operator clears it
@@ -120,19 +125,31 @@ func (s *supervisor) reconcile(ctx context.Context) error {
 			continue
 		}
 		want[t.ID] = t.Symbol
+		order = append(order, t.ID)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for id, symbol := range want {
-		if p, ok := s.running[id]; ok {
-			p.leftAt = time.Time{} // back in the set (an undo within the grace)
-			continue
+
+	// 1. A pipeline whose start function returned (it reported Failed,
+	// e.g. no instrument row) is dropped; if its symbol is still wanted,
+	// step 3 starts it again.
+	for id, p := range s.running {
+		select {
+		case <-p.done:
+			delete(s.running, id)
+			if _, ok := want[id]; ok {
+				s.logger.Warn("worker: a symbol pipeline ended on its own; starting it again", "symbol", p.symbol)
+			}
+		default:
 		}
-		s.startLocked(ctx, id, symbol)
 	}
+
+	// 2. Pipelines no longer wanted: back in the set (an undo within the
+	// grace), into the grace, or stopped.
 	for id, p := range s.running {
 		if _, ok := want[id]; ok {
+			p.leftAt = time.Time{}
 			continue
 		}
 		attention := states[id].State == tracking.NeedsAttention
@@ -151,7 +168,52 @@ func (s *supervisor) reconcile(ctx context.Context) error {
 			}
 		}
 	}
+
+	// 3. Start the wanted symbols, in cap order. A pipeline in its
+	// removal grace still holds a connection, so running never exceeds
+	// the cap (Hyperliquid allows 10 connections per IP): when a wanted
+	// symbol needs a slot and running is at the cap, the grace pipeline
+	// that left the set first is stopped to make room.
+	for _, id := range order {
+		if _, ok := s.running[id]; ok {
+			continue
+		}
+		for len(s.running) >= s.cap {
+			if !s.evictOldestGraceLocked() {
+				break
+			}
+		}
+		if len(s.running) >= s.cap {
+			// Cannot happen while want holds at most cap symbols; kept so
+			// a mistake can never open an eleventh connection.
+			s.logger.Error("worker: no free pipeline slot; not starting a tracked symbol", "symbol", want[id], "cap", s.cap)
+			continue
+		}
+		s.startLocked(ctx, id, want[id])
+	}
 	return nil
+}
+
+// evictOldestGraceLocked stops the pipeline in its removal grace that left
+// the tracked set first (ties: lowest id); false when none is in its grace.
+func (s *supervisor) evictOldestGraceLocked() bool {
+	var victim int64
+	var vp *pipeline
+	for id, p := range s.running {
+		if p.leftAt.IsZero() {
+			continue
+		}
+		if vp == nil || p.leftAt.Before(vp.leftAt) || (p.leftAt.Equal(vp.leftAt) && id < victim) {
+			victim, vp = id, p
+		}
+	}
+	if vp == nil {
+		return false
+	}
+	s.stopLocked(victim, vp)
+	s.setState(victim, tracking.Stopped, "removed from every watchlist (its removal grace was cut short to make room for another symbol)", 0)
+	s.logger.Info("worker: stopped a symbol in its removal grace to stay within the cap", "symbol", vp.symbol, "cap", s.cap)
+	return true
 }
 
 func (s *supervisor) startLocked(parent context.Context, id int64, symbol string) {

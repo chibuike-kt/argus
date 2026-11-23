@@ -99,6 +99,28 @@ func startHyperliquidIngest(
 	go sup.run(ctx, cfg.Hyperliquid.SupervisorInterval)
 }
 
+// startupBackfillOptions shape a symbol's startup history backfill: a
+// backfill slot is held per attempt only (never across the retry delay),
+// and the retry delay grows to cfg.Hyperliquid.NewSymbolBackfillRetryCap
+// when the pipeline is supervised (hooks carry the gate).
+func startupBackfillOptions(cfg config.Config, hooks symbolHooks) backfillOptions {
+	opt := backfillOptions{
+		onRetry: func(attempt int, err error) {
+			hooks.set(tracking.Retrying, "history backfill failed: "+err.Error(), attempt)
+		},
+		onSlot: func(attempt int) {
+			if attempt == 0 {
+				hooks.set(tracking.LoadingHistory, "", 0)
+			}
+		},
+		slot: hooks.gate,
+	}
+	if hooks.gate != nil {
+		opt.retryCap = cfg.Hyperliquid.NewSymbolBackfillRetryCap
+	}
+	return opt
+}
+
 // symbolHooks connect one symbol pipeline to the supervisor (Phase 4.1a,
 // D15): gate queues the history backfill of new symbols (D15.4: at most
 // BackfillConcurrency at once), report records the pipeline's state for
@@ -133,19 +155,8 @@ func (h symbolHooks) set(state tracking.State, reason string, attempt int) {
 func runHyperliquidSymbolWith(ctx context.Context, symbol string, svc *ingestion.Service, state integrityState, cfg config.Config, logger *slog.Logger, clk clock.Clock, hooks symbolHooks) {
 	if hooks.gate != nil {
 		hooks.set(tracking.Waiting, "queued for the history backfill", 0)
-		select {
-		case hooks.gate <- struct{}{}:
-		case <-ctx.Done():
-			return
-		}
 	}
-	hooks.set(tracking.LoadingHistory, "", 0)
-	ok := backfillUntilCaughtUp(ctx, "startup", symbol, svc, state, cfg, logger, clk, func(attempt int, err error) {
-		hooks.set(tracking.Retrying, "history backfill failed: "+err.Error(), attempt)
-	})
-	if hooks.gate != nil {
-		<-hooks.gate
-	}
+	ok := backfillUntilCaughtUpWith(ctx, "startup", symbol, svc, state, cfg, logger, clk, startupBackfillOptions(cfg, hooks))
 	if !ok {
 		if ctx.Err() == nil {
 			hooks.set(tracking.Failed, "no instrument row for this symbol", 0)
