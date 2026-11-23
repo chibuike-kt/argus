@@ -37,7 +37,7 @@ is unchanged by this update.
 | High | Swing tie policy | Affects structure, POIs and reproducibility | Exact deterministic algorithm |
 | High | Base and impulse thresholds | Affects supply/demand detection | Numerical parameters and fixtures |
 | High | ATR and FVG thresholds | Affects displacement and confluence | Numerical parameters and edge cases |
-| High | Trend and timeframe mapping | Determines how higher-timeframe context qualifies setups | Explicit versioned timeframe profile |
+| High | Trend and timeframe mapping | Determines how higher-timeframe context qualifies setups | Explicit versioned timeframe profile. Partly decided by D13: setup timeframes 15m and 1h, context one step up; the rest stays open. |
 | High | Material plan changes | Prevents excessive revisions or silent updates | Versioned change policy |
 | High | Re-entry and candidate identity | Prevents duplicates without suppressing valid setups | Stable identity and re-entry rules |
 | High | Instrument-aware sizing | Incorrect contract assumptions distort risk calculations | Verified instrument metadata and formulas |
@@ -51,3 +51,18 @@ is unchanged by this update.
 | Medium | Paper-trading launch timing | Adds cost and simulation complexity | Release-scope decision |
 | Medium | Shadow promotion criteria | Prevents unsafe or resource-intensive strategy rollout | Explicit comparison thresholds |
 | Medium | Export and deletion details | Privacy and operational requirements | Format, expiry, exceptions and backup policy |
+
+## Strategy spec amendments v0.9.0 (owner decisions of 22 November 2026)
+
+- Decided (D16): one target, the nearest liquidity level at or above 2.0 R:R. Not open.
+- [U] Whether a fixed 2R target should be offered later as an alternative to the liquidity target.
+- [U] When a setup is finished after its target is reached (the end state, and whether the stop still
+  matters after the target). Waiting for the owner's answer. Do not implement.
+- [U] Re-evaluate a rejected identity when a candidate at or above `min_rr` appears, or when context
+  alignment changes. Measure in L5.
+- [U] Minimum stop distance and volatility stop buffer; trading cost estimation. A plan can pass the 2.0
+  gate and still be smaller than the fees.
+- [U] Whether the UI hides rejected setups by default (proposed: hidden by default, labelled "skipped").
+- [U] Confirmation entry (all of 17.8).
+- [U] A maximum target distance.
+- Known limitation: the context timeframe's mechanical "last major break" may differ from the trader's.
