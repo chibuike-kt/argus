@@ -110,6 +110,11 @@ func (s *Store) Count(ctx context.Context, userID int64) (int, error) {
 // repeat an instrument id, and every id must name an existing, enabled
 // instrument -- all three checked before anything is written.
 //
+// It applies the same system cap of tracked symbols as Add (architect
+// review of 4.1a, item 5): a list that would track new Hyperliquid symbols
+// beyond capOpt.Max is refused with a *TrackedCapError
+// (ErrTrackedCapReached), and nothing is written.
+//
 // Architect review (of Part 2) item 4: this used to delete the old
 // list, then insert the new one, with no transaction -- a duplicate id
 // in the request failed UNIQUE(user_id, instrument_id) on its second
@@ -119,7 +124,7 @@ func (s *Store) Count(ctx context.Context, userID int64) (int, error) {
 // all, and the delete and every insert now share one transaction, so
 // any other failure during that phase rolls back to the previous list
 // instead of leaving a partial one.
-func (s *Store) Replace(ctx context.Context, userID int64, instrumentIDs []int64, maxItems int) ([]Item, error) {
+func (s *Store) Replace(ctx context.Context, userID int64, instrumentIDs []int64, maxItems int, capOpt TrackedCapOptions) ([]Item, error) {
 	if len(instrumentIDs) > maxItems {
 		return nil, ErrTooManyItems
 	}
@@ -150,6 +155,22 @@ func (s *Store) Replace(ctx context.Context, userID int64, instrumentIDs []int64
 	defer func() { _ = tx.Rollback() }()
 	q := s.q.WithTx(tx)
 
+	// The same tracked cap as Add (architect review of 4.1a, item 5),
+	// under the same lock: the set before and after the change, inside
+	// this transaction; refused only when the change tracks a symbol that
+	// was not tracked before and leaves the set over the cap.
+	if err := q.LockTrackedCap(ctx); err != nil {
+		return nil, fmt.Errorf("watchlist: replace: lock tracked cap: %w", err)
+	}
+	floor := capOpt.Floor
+	if floor == nil {
+		floor = []string{}
+	}
+	before, err := q.ListTrackedInstruments(ctx, floor)
+	if err != nil {
+		return nil, fmt.Errorf("watchlist: replace: tracked set: %w", err)
+	}
+
 	if err := q.DeleteWatchlistItems(ctx, userID); err != nil {
 		return nil, fmt.Errorf("watchlist: replace: delete existing: %w", err)
 	}
@@ -163,6 +184,23 @@ func (s *Store) Replace(ctx context.Context, userID int64, instrumentIDs []int64
 		}
 		items[i] = Item{InstrumentID: row.InstrumentID, Position: int(row.Position)}
 	}
+	after, err := q.ListTrackedInstruments(ctx, floor)
+	if err != nil {
+		return nil, fmt.Errorf("watchlist: replace: tracked set after: %w", err)
+	}
+	wasTracked := make(map[int64]bool, len(before))
+	for _, t := range before {
+		wasTracked[t.ID] = true
+	}
+	adding := 0
+	for _, t := range after {
+		if !wasTracked[t.ID] {
+			adding++
+		}
+	}
+	if adding > 0 && len(after) > capOpt.Max {
+		return nil, capError(before, capOpt.Max, adding)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("watchlist: replace: commit: %w", err)
 	}
@@ -175,12 +213,57 @@ func (s *Store) Replace(ctx context.Context, userID int64, instrumentIDs []int64
 // symbols than the system cap (D15.3).
 var ErrTrackedCapReached = errors.New("watchlist: the system is tracking the maximum number of symbols")
 
+// TrackedCapError is ErrTrackedCapReached with the numbers behind it, so
+// the message says how many more symbols can be added (architect review
+// of 4.1a, item 6). errors.Is(err, ErrTrackedCapReached) holds.
+type TrackedCapError struct {
+	// Cap is the system cap; Tracked is the tracked set now, the
+	// configured floor symbols included (Floor of them); Adding is how
+	// many new symbols the refused change would have tracked.
+	Cap, Tracked, Floor, Adding int
+}
+
+// Remaining is how many more symbols can be tracked (never below 0).
+func (e *TrackedCapError) Remaining() int { return max(e.Cap-e.Tracked, 0) }
+
+func (e *TrackedCapError) Error() string {
+	more := "no more symbols can be added"
+	if r := e.Remaining(); r == 1 {
+		more = "1 more symbol can be added"
+	} else if r > 1 {
+		more = fmt.Sprintf("%d more symbols can be added", r)
+	}
+	return fmt.Sprintf("ARGUS tracks at most %d symbols at once and is tracking %d (%d of them always tracked by configuration), so %s; this change would add %d. Remove a symbol from every watchlist first.",
+		e.Cap, e.Tracked, e.Floor, more, e.Adding)
+}
+
+// Is makes errors.Is(err, ErrTrackedCapReached) true for a TrackedCapError.
+func (e *TrackedCapError) Is(target error) bool { return target == ErrTrackedCapReached }
+
 // ErrOrderMismatch is a reorder whose ids are not exactly the user's
 // current list (another tab added or removed one meanwhile).
 var ErrOrderMismatch = errors.New("watchlist: the order does not match the current list")
 
 // EnableReason is the audit reason of an enablement made by an add (D15.1).
 const EnableReason = "watchlist add"
+
+// TrackedCapOptions are the system cap of distinct tracked symbols and the
+// configured floor that counts against it (D15.3).
+type TrackedCapOptions struct {
+	Floor []string
+	Max   int
+}
+
+// capError describes a refused change against the tracked set it saw.
+func capError(tracked []store.ListTrackedInstrumentsRow, capSymbols, adding int) error {
+	floor := 0
+	for _, t := range tracked {
+		if t.IsFloor {
+			floor++
+		}
+	}
+	return &TrackedCapError{Cap: capSymbols, Tracked: len(tracked), Floor: floor, Adding: adding}
+}
 
 // AddOptions are the limits and permissions of one add.
 type AddOptions struct {
@@ -269,7 +352,7 @@ func (s *Store) Add(ctx context.Context, userID, instrumentID int64, opt AddOpti
 			}
 		}
 		if !already && len(tracked) >= opt.TrackedCap {
-			return AddResult{}, ErrTrackedCapReached
+			return AddResult{}, capError(tracked, opt.TrackedCap, 1)
 		}
 	}
 

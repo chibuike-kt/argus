@@ -13,6 +13,32 @@ import (
 	"github.com/lib/pq"
 )
 
+const clearNeedsAttention = `-- name: ClearNeedsAttention :one
+DELETE FROM tracked_symbol_states s
+USING instruments i
+WHERE s.instrument_id = i.id
+  AND i.provider = 'hyperliquid'
+  AND i.native_symbol = $1
+  AND s.state = 'needs_attention'
+RETURNING s.instrument_id, s.reason, s.updated_at
+`
+
+type ClearNeedsAttentionRow struct {
+	InstrumentID int64     `json:"instrument_id"`
+	Reason       string    `json:"reason"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// ClearNeedsAttention removes a Hyperliquid symbol's needs_attention state
+// (the operator's decision, argus-instruments clear-attention): with no
+// state row the supervisor starts the symbol again if it is tracked.
+func (q *Queries) ClearNeedsAttention(ctx context.Context, nativeSymbol string) (ClearNeedsAttentionRow, error) {
+	row := q.db.QueryRowContext(ctx, clearNeedsAttention, nativeSymbol)
+	var i ClearNeedsAttentionRow
+	err := row.Scan(&i.InstrumentID, &i.Reason, &i.UpdatedAt)
+	return i, err
+}
+
 const enableInstrumentForWatchlist = `-- name: EnableInstrumentForWatchlist :execrows
 UPDATE instruments SET enabled = TRUE, updated_at = now() WHERE id = $1 AND enabled = FALSE
 `

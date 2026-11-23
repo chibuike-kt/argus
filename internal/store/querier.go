@@ -28,6 +28,10 @@ type Querier interface {
 	// room for a replacement row if one is being inserted; a pure
 	// retraction (no replacement) stops after step 1 and never calls step 2.
 	BeginSupersedeSwing(ctx context.Context, arg BeginSupersedeSwingParams) (int64, error)
+	// ClearNeedsAttention removes a Hyperliquid symbol's needs_attention state
+	// (the operator's decision, argus-instruments clear-attention): with no
+	// state row the supervisor starts the symbol again if it is tracked.
+	ClearNeedsAttention(ctx context.Context, nativeSymbol string) (ClearNeedsAttentionRow, error)
 	// CloseCandle freezes a forming candle. The is_closed = false guard makes a
 	// repeat close of an already-closed candle affect zero rows instead of
 	// hitting trg_candles_enforce_lifecycle's handshake-step rejection, so the

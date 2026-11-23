@@ -81,3 +81,15 @@ SELECT * FROM tracked_symbol_states WHERE instrument_id = ANY(sqlc.arg(instrumen
 
 -- name: ListHyperliquidInstruments :many
 SELECT * FROM instruments WHERE provider = 'hyperliquid' ORDER BY id;
+
+-- ClearNeedsAttention removes a Hyperliquid symbol's needs_attention state
+-- (the operator's decision, argus-instruments clear-attention): with no
+-- state row the supervisor starts the symbol again if it is tracked.
+-- name: ClearNeedsAttention :one
+DELETE FROM tracked_symbol_states s
+USING instruments i
+WHERE s.instrument_id = i.id
+  AND i.provider = 'hyperliquid'
+  AND i.native_symbol = $1
+  AND s.state = 'needs_attention'
+RETURNING s.instrument_id, s.reason, s.updated_at;

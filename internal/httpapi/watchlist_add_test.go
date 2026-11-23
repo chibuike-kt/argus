@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,13 +22,16 @@ type fakeWatchlistStore struct {
 	reorderErr error
 	gotUser    int64
 	gotOpts    watchlist.AddOptions
+	replaceErr error
+	gotCap     watchlist.TrackedCapOptions
 }
 
 func (f *fakeWatchlistStore) List(context.Context, int64) ([]watchlist.Item, error) {
 	return f.items, nil
 }
-func (f *fakeWatchlistStore) Replace(context.Context, int64, []int64, int) ([]watchlist.Item, error) {
-	return f.items, nil
+func (f *fakeWatchlistStore) Replace(_ context.Context, userID int64, _ []int64, _ int, capOpt watchlist.TrackedCapOptions) ([]watchlist.Item, error) {
+	f.gotUser, f.gotCap = userID, capOpt
+	return f.items, f.replaceErr
 }
 func (f *fakeWatchlistStore) Remove(context.Context, int64, int64) (bool, error) { return true, nil }
 func (f *fakeWatchlistStore) Add(_ context.Context, userID, _ int64, opt watchlist.AddOptions) (watchlist.AddResult, error) {
@@ -179,5 +183,63 @@ func TestGetWatchlistTracking_StatesAndTheCap(t *testing.T) {
 	}
 	if got.Items[2].Tracked || *got.Items[2].State != "waiting" {
 		t.Fatalf("LINK: %+v, want untracked (over the cap) and waiting", got.Items[2])
+	}
+}
+
+// Architect review of 4.1a, items 5 and 6: PUT /watchlist applies the same
+// tracked cap as the add, with the same error code, and both say how many
+// more symbols can be added.
+func TestUpdateWatchlist_TrackedCapIsThe409OfTheAdd(t *testing.T) {
+	capErr := &watchlist.TrackedCapError{Cap: 8, Tracked: 7, Floor: 3, Adding: 2}
+	wl := &fakeWatchlistStore{replaceErr: capErr}
+	h := watchlistHandler(wl, false)
+	resp, err := h.UpdateWatchlist(asUser(42), UpdateWatchlistRequestObject{Body: &UpdateWatchlistJSONRequestBody{InstrumentIds: []int64{1, 2}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := resp.(UpdateWatchlist409JSONResponse)
+	if !ok || r.Error.Code != "tracked_cap_reached" {
+		t.Fatalf("got %T %+v, want 409 tracked_cap_reached", resp, resp)
+	}
+	for _, want := range []string{"tracking 7", "3 of them always tracked", "1 more symbol can be added", "would add 2"} {
+		if !strings.Contains(r.Error.Message, want) {
+			t.Fatalf("message %q lacks %q", r.Error.Message, want)
+		}
+	}
+	if wl.gotUser != 42 || wl.gotCap.Max != 8 || len(wl.gotCap.Floor) != 1 || wl.gotCap.Floor[0] != "BTC" {
+		t.Fatalf("store asked user %d with cap %+v, want the session user, cap 8 and the floor", wl.gotUser, wl.gotCap)
+	}
+
+	add := watchlistHandler(&fakeWatchlistStore{addErr: &watchlist.TrackedCapError{Cap: 8, Tracked: 8, Floor: 3, Adding: 1}}, false)
+	aresp, err := add.AddWatchlistItem(asUser(1), AddWatchlistItemRequestObject{Body: &AddWatchlistItemJSONRequestBody{InstrumentId: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar, ok := aresp.(AddWatchlistItem409JSONResponse)
+	if !ok || ar.Error.Code != "tracked_cap_reached" || !strings.Contains(ar.Error.Message, "no more symbols can be added") {
+		t.Fatalf("add: got %T %+v, want 409 saying no more can be added", aresp, aresp)
+	}
+}
+
+func TestWatchlistTracking_RemainingCountsTheFloor(t *testing.T) {
+	wl := &fakeWatchlistStore{items: []watchlist.Item{{InstrumentID: 9}}}
+	h := watchlistHandler(wl, false)
+	h.trackedCap = 5
+	// BTC, ETH and SOL are the floor (on nobody's watchlist), 9 is watched.
+	h.tracking = fakeTrackingStore{tracked: []tracking.Tracked{
+		{ID: 1, Symbol: "BTC", IsFloor: true}, {ID: 2, Symbol: "ETH", IsFloor: true}, {ID: 3, Symbol: "SOL", IsFloor: true}, {ID: 9, Symbol: "AVAX"},
+	}}
+	resp, err := h.GetWatchlistTracking(asUser(1), GetWatchlistTrackingRequestObject{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.(GetWatchlistTracking200JSONResponse)
+	if got.Remaining != 1 {
+		t.Fatalf("remaining = %d, want 1 (cap 5 minus 4 tracked, the 3 floor symbols included)", got.Remaining)
+	}
+	h.trackedCap = 2
+	resp, _ = h.GetWatchlistTracking(asUser(1), GetWatchlistTrackingRequestObject{})
+	if got := resp.(GetWatchlistTracking200JSONResponse); got.Remaining != 0 {
+		t.Fatalf("over the cap: remaining = %d, want 0", got.Remaining)
 	}
 }

@@ -312,3 +312,124 @@ func TestIntegration_TrackingState_NeedsAttentionIsNeverOverwrittenByThePipeline
 		t.Fatalf("state = %+v, want needs_attention kept, at %s in UTC", got, at.Add(time.Minute))
 	}
 }
+
+// Architect review of 4.1a, item 3: clear-attention removes only a
+// needs_attention state, only for that Hyperliquid symbol; afterwards the
+// pipeline's states are recorded again.
+func TestIntegration_TrackingState_ClearNeedsAttention(t *testing.T) {
+	for _, zone := range []string{"Etc/UTC", "America/New_York"} {
+		t.Run(zone, func(t *testing.T) {
+			db := dbInZone(t, zone)
+			ctx := context.Background()
+			ts := tracking.NewStore(db)
+			id := hlInstrument(t, db, true)
+			other := hlInstrument(t, db, true)
+			var sym string
+			if err := db.QueryRow(`SELECT native_symbol FROM instruments WHERE id = $1`, id).Scan(&sym); err != nil {
+				t.Fatal(err)
+			}
+			at := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC)
+			if err := ts.SetState(ctx, id, tracking.NeedsAttention, "precision changed", 0, at); err != nil {
+				t.Fatal(err)
+			}
+			if err := ts.SetState(ctx, other, tracking.NeedsAttention, "other", 0, at); err != nil {
+				t.Fatal(err)
+			}
+			prev, err := ts.ClearNeedsAttention(ctx, sym)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prev.InstrumentID != id || prev.Reason != "precision changed" || !prev.UpdatedAt.Equal(at) || prev.UpdatedAt.Location() != time.UTC {
+				t.Fatalf("cleared %+v, want the symbol's own state at %s in UTC", prev, at)
+			}
+			if _, err := ts.ClearNeedsAttention(ctx, sym); !errors.Is(err, tracking.ErrNoAttention) {
+				t.Fatalf("second clear err = %v, want ErrNoAttention", err)
+			}
+			if err := ts.SetState(ctx, id, tracking.Live, "", 0, at.Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			st, err := ts.States(ctx, []int64{id, other})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st[id].State != tracking.Live || st[other].State != tracking.NeedsAttention {
+				t.Fatalf("states %+v, want the cleared symbol live again and the other still needs_attention", st)
+			}
+			// A live symbol is not cleared (nothing to clear).
+			if _, err := ts.ClearNeedsAttention(ctx, sym); !errors.Is(err, tracking.ErrNoAttention) {
+				t.Fatalf("clearing a live symbol err = %v, want ErrNoAttention", err)
+			}
+		})
+	}
+}
+
+// Architect review of 4.1a, items 5 and 6: Replace (PUT /watchlist) applies
+// the same tracked cap as Add, counting the configured floor as tracked,
+// writes nothing when refused, and says how many more can be added.
+func TestIntegration_Replace_AppliesTheTrackedCap(t *testing.T) {
+	for _, zone := range zones {
+		t.Run(zone, func(t *testing.T) {
+			db := dbInZone(t, zone)
+			ctx := context.Background()
+			s := NewStore(db, instruments.NewStore(db))
+			u := userWithCleanup(t, db)
+			a, b, c := hlInstrument(t, db, true), hlInstrument(t, db, true), hlInstrument(t, db, true)
+			list := func() []int64 {
+				items, err := s.List(ctx, u)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out := make([]int64, len(items))
+				for i, it := range items {
+					out[i] = it.InstrumentID
+				}
+				return out
+			}
+			base := trackedCount(t, db)
+			one := TrackedCapOptions{Floor: []string{}, Max: base + 1}
+			if _, err := s.Replace(ctx, u, []int64{a}, 50, one); err != nil {
+				t.Fatalf("a list within the cap was refused: %v", err)
+			}
+			// Two new symbols with no slot left: refused, the list unchanged.
+			_, err := s.Replace(ctx, u, []int64{a, b, c}, 50, one)
+			var ce *TrackedCapError
+			if !errors.Is(err, ErrTrackedCapReached) || !errors.As(err, &ce) {
+				t.Fatalf("err = %v, want a TrackedCapError", err)
+			}
+			if ce.Adding != 2 || ce.Tracked != base+1 || ce.Remaining() != 0 || !strings.Contains(ce.Error(), "no more symbols can be added") {
+				t.Fatalf("cap error %+v (%q), want adding 2, tracked %d, none remaining", ce, ce.Error(), base+1)
+			}
+			if got := list(); len(got) != 1 || got[0] != a {
+				t.Fatalf("a refused replace changed the list to %v", got)
+			}
+			// Swapping a for b frees a's slot: allowed.
+			if _, err := s.Replace(ctx, u, []int64{b}, 50, one); err != nil {
+				t.Fatalf("swapping one tracked symbol for another was refused: %v", err)
+			}
+
+			// The floor counts as tracked: with a floor symbol on nobody's
+			// list, a cap that would fit c without the floor refuses it.
+			f := hlInstrument(t, db, false)
+			var floorSym string
+			if err := db.QueryRow(`SELECT native_symbol FROM instruments WHERE id = $1`, f).Scan(&floorSym); err != nil {
+				t.Fatal(err)
+			}
+			withFloor := TrackedCapOptions{Floor: []string{floorSym}, Max: base + 2}
+			_, err = s.Replace(ctx, u, []int64{b, c}, 50, withFloor)
+			if !errors.As(err, &ce) || ce.Floor != 1 || ce.Tracked != base+2 || ce.Remaining() != 0 {
+				t.Fatalf("err = %v, want refused with the floor symbol counted as tracked", err)
+			}
+			if got := list(); len(got) != 1 || got[0] != b {
+				t.Fatalf("a refused replace changed the list to %v", got)
+			}
+
+			// Add refuses c the same way, with the same numbers (item 6).
+			addOpt := opts(base + 2)
+			addOpt.Floor = []string{floorSym}
+			_, err = s.Add(ctx, u, c, addOpt)
+			if !errors.As(err, &ce) || ce.Floor != 1 || ce.Tracked != base+2 || ce.Adding != 1 || !strings.Contains(ce.Error(), "no more symbols can be added") {
+				t.Fatalf("add err = %v, want a TrackedCapError counting the floor", err)
+			}
+		})
+	}
+}

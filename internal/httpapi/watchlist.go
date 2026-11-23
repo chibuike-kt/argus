@@ -15,7 +15,7 @@ import (
 // pattern as setupsStore/instrumentsStore/candlesStore/authService.
 type watchlistStore interface {
 	List(ctx context.Context, userID int64) ([]watchlist.Item, error)
-	Replace(ctx context.Context, userID int64, instrumentIDs []int64, maxItems int) ([]watchlist.Item, error)
+	Replace(ctx context.Context, userID int64, instrumentIDs []int64, maxItems int, capOpt watchlist.TrackedCapOptions) ([]watchlist.Item, error)
 	Remove(ctx context.Context, userID, instrumentID int64) (bool, error)
 	Add(ctx context.Context, userID, instrumentID int64, opt watchlist.AddOptions) (watchlist.AddResult, error)
 	Reorder(ctx context.Context, userID int64, instrumentIDs []int64) ([]watchlist.Item, error)
@@ -46,7 +46,8 @@ func (h *apiHandler) UpdateWatchlist(ctx context.Context, request UpdateWatchlis
 		return UpdateWatchlist400JSONResponse(apiError("invalid_argument", "request body is required")), nil
 	}
 	user, _ := identity.UserFromContext(ctx)
-	items, err := h.watchlist.Replace(ctx, user.ID, request.Body.InstrumentIds, h.authPolicy.WatchlistMaxItems)
+	items, err := h.watchlist.Replace(ctx, user.ID, request.Body.InstrumentIds, h.authPolicy.WatchlistMaxItems,
+		watchlist.TrackedCapOptions{Floor: h.trackingFloor, Max: h.trackedCap})
 	if err == nil {
 		return UpdateWatchlist200JSONResponse(toWatchlistItems(items)), nil
 	}
@@ -56,6 +57,8 @@ func (h *apiHandler) UpdateWatchlist(ctx context.Context, request UpdateWatchlis
 		errors.Is(err, watchlist.ErrInstrumentNotFound),
 		errors.Is(err, watchlist.ErrInstrumentDisabled):
 		return UpdateWatchlist400JSONResponse(apiError("invalid_argument", err.Error())), nil
+	case errors.Is(err, watchlist.ErrTrackedCapReached):
+		return UpdateWatchlist409JSONResponse(apiError("tracked_cap_reached", err.Error())), nil
 	}
 	h.logger.Error("httpapi: update watchlist", "user_id", user.ID, "error", err)
 	return nil, fmt.Errorf("update watchlist: %w", err)
@@ -120,7 +123,7 @@ func (h *apiHandler) AddWatchlistItem(ctx context.Context, request AddWatchlistI
 	case errors.Is(err, watchlist.ErrTooManyItems):
 		return AddWatchlistItem409JSONResponse(apiError("watchlist_full", fmt.Sprintf("a watchlist holds at most %d instruments", h.authPolicy.WatchlistMaxItems))), nil
 	case errors.Is(err, watchlist.ErrTrackedCapReached):
-		return AddWatchlistItem409JSONResponse(apiError("tracked_cap_reached", fmt.Sprintf("ARGUS is already tracking the maximum of %d symbols; a symbol already tracked can still be added", h.trackedCap))), nil
+		return AddWatchlistItem409JSONResponse(apiError("tracked_cap_reached", err.Error()+" A symbol already tracked can still be added.")), nil
 	}
 	h.logger.Error("httpapi: add watchlist item", "user_id", user.ID, "instrument_id", request.Body.InstrumentId, "error", err)
 	return nil, fmt.Errorf("add watchlist item: %w", err)
@@ -163,6 +166,9 @@ func (h *apiHandler) GetWatchlistTracking(ctx context.Context, _ GetWatchlistTra
 			h.logger.Error("httpapi: watchlist tracking: tracked set", "error", err)
 			return nil, fmt.Errorf("watchlist tracking: %w", err)
 		}
+		// What is left counts the configured floor as tracked (architect
+		// review of 4.1a, item 6): all is the whole tracked set, floor first.
+		out.Remaining = int32(max(h.trackedCap-len(all), 0)) //nolint:gosec // a small configured cap
 		for i, t := range all {
 			if i >= h.trackedCap {
 				break

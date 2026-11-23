@@ -959,6 +959,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          description: >
+            tracked_cap_reached: the list would make ARGUS track new
+            Hyperliquid symbols beyond the system cap (D15.3), the same rule
+            and error as POST /watchlist/items. The message says how many
+            more symbols can be added.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /watchlist/items:
     post:
       operationId: addWatchlistItem
@@ -2132,8 +2142,12 @@ components:
           format: int64
     WatchlistTracking:
       type: object
-      required: [cap, tracked_instrument_ids, items, can_enable]
+      required: [cap, tracked_instrument_ids, items, can_enable, remaining]
       properties:
+        remaining:
+          type: integer
+          format: int32
+          description: How many more symbols can be tracked before the cap, counting the configured floor symbols as tracked (cap minus the tracked set, never below 0).
         can_enable:
           type: boolean
           description: "Whether adding a disabled Hyperliquid perpetual enables it here (D15.1, never in production)."
