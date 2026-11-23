@@ -39,8 +39,13 @@ import (
 // so no other package's rows can change it.
 
 type flakyExchange struct {
-	killFirst  map[string]int // coin -> how many candleSnapshot requests to cut
-	reject     map[string]bool
+	killFirst map[string]int // coin -> how many candleSnapshot requests to cut
+	reject    map[string]bool
+	// history is how far back the exchange has candles (a recently
+	// listed symbol). It keeps the fixture small: on the dev Docker
+	// stack each stored candle costs about 13 ms, so a full day (1,440)
+	// took 17-20 s and filled the tests' 20 s wait by itself.
+	history    time.Duration
 	mu         sync.Mutex
 	calls      map[string]int
 	connection atomic.Int64
@@ -94,9 +99,13 @@ func (x *flakyExchange) rest(w http.ResponseWriter, r *http.Request) {
 	if now := time.Now().UTC(); end.After(now) {
 		end = now
 	}
+	start := time.UnixMilli(body.Req.StartTime).UTC()
+	if listed := time.Now().UTC().Add(-x.history); x.history > 0 && start.Before(listed) {
+		start = listed
+	}
 	out := []wire{}
-	for m := time.UnixMilli(body.Req.StartTime).UTC().Truncate(time.Minute); !m.After(end); m = m.Add(time.Minute) {
-		if m.Before(time.UnixMilli(body.Req.StartTime)) {
+	for m := start.Truncate(time.Minute); !m.After(end); m = m.Add(time.Minute) {
+		if m.Before(start) {
 			continue
 		}
 		out = append(out, wire{T: m.UnixMilli(), C: m.Add(time.Minute).UnixMilli() - 1, S: coin, I: "1m", O: "10.00", H: "10.00", L: "10.00", Cl: "10.00", V: "1", N: 1})
@@ -126,7 +135,7 @@ func TestIntegration_Supervisor_NewSymbol_ProviderFailuresShowOnTheRow(t *testin
 			stamp := time.Now().UnixNano()
 			newSym, badSym := fmt.Sprintf("SUPNEW%d", stamp), fmt.Sprintf("SUPBAD%d", stamp)
 
-			x := &flakyExchange{killFirst: map[string]int{newSym: 2}, reject: map[string]bool{badSym: true}, calls: map[string]int{}}
+			x := &flakyExchange{killFirst: map[string]int{newSym: 2}, reject: map[string]bool{badSym: true}, calls: map[string]int{}, history: 2 * time.Hour}
 			restSrv := httptest.NewServer(http.HandlerFunc(x.rest))
 			defer restSrv.Close()
 			wsSrv := httptest.NewServer(http.HandlerFunc(x.socket))
@@ -231,7 +240,7 @@ func TestIntegration_Supervisor_RejectedSymbolsDoNotHoldEveryBackfillSlot(t *tes
 	stamp := time.Now().UnixNano()
 	bad1, bad2, good := fmt.Sprintf("SLOTBADA%d", stamp), fmt.Sprintf("SLOTBADB%d", stamp), fmt.Sprintf("SLOTGOOD%d", stamp)
 
-	x := &flakyExchange{killFirst: map[string]int{}, reject: map[string]bool{bad1: true, bad2: true}, calls: map[string]int{}}
+	x := &flakyExchange{killFirst: map[string]int{}, reject: map[string]bool{bad1: true, bad2: true}, calls: map[string]int{}, history: 2 * time.Hour}
 	restSrv := httptest.NewServer(http.HandlerFunc(x.rest))
 	defer restSrv.Close()
 	wsSrv := httptest.NewServer(http.HandlerFunc(x.socket))
