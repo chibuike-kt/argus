@@ -1,8 +1,8 @@
 # ARGUS Strategy Specification
 
-- Version: 0.12.1
-- Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure; batch 7: setup lifecycle persistence; batch 8: anchor invalidation by close-through, setup creation state; stop-breach invalidation of persisted setups)
-- Last updated: 27 October 2026
+- Version: 0.13.0
+- Status: Approved for implementation (batch 1: swings and market structure; batch 2: liquidity sweeps and protected structure; batch 7: setup lifecycle persistence; batch 8: anchor invalidation by close-through, setup creation state; stop-breach invalidation of persisted setups; amendments v0.9.0, owner decisions D12 to D14 and D16 of 22 November 2026: single target and 2.0 viability gate, rejected state, higher timeframe context and alignment in section 17)
+- Last updated: 22 November 2026
 - Related: ADR-009 (analysis engine), ADR-011 (immutable decisions), ADR-019 (reproducibility)
 
 This is the versioned, approved specification the deterministic analysis engine is
@@ -66,6 +66,21 @@ the structural-liquidity fib "from the break of structure to the low," and that 
 protected (main) low, so the low anchor is the protected-low extreme (reversal origin), not the
 swept swing, exactly as section 9 implemented. Inferred from the transcripts (audio screen-share,
 not a pixel-marked chart) and submitted for product-owner confirmation with the POI batch.
+
+Open items added by the strategy spec amendments v0.9.0 (owner decisions of 22 November 2026):
+
+- Decided (D16): one target, the nearest liquidity level at or above 2.0 R:R. Not open.
+- [U] Whether a fixed 2R target should be offered later as an alternative to the liquidity target.
+- [U] When a setup is finished after its target is reached (the end state, and whether the stop still
+  matters after the target). Waiting for the owner's answer. Do not implement.
+- [U] Re-evaluate a rejected identity when a candidate at or above `min_rr` appears, or when context
+  alignment changes. Measure in L5.
+- [U] Minimum stop distance and volatility stop buffer; trading cost estimation. A plan can pass the 2.0
+  gate and still be smaller than the fees.
+- [U] Whether the UI hides rejected setups by default (proposed: hidden by default, labelled "skipped").
+- [U] Confirmation entry (all of 17.8).
+- [U] A maximum target distance.
+- Known limitation: the context timeframe's mechanical "last major break" may differ from the trader's.
 
 ## 1. Swing detection
 
@@ -514,13 +529,13 @@ Evidence and scope:
 
 ## 14. Trade plan (risk entry)
 
-_Provenance: [S] enter at the POI, the stop covering the protected level, targets at opposing liquidity, and R:R as information only (ADR-012); [R] the proximal-edge entry, no V1 stop buffer, the first-three-opposing-levels target selection, and the minimal status set; [A] derived, point-in-time, no persistence._
+_Provenance: [S] enter at the POI, the stop covering the protected level, targets at opposing liquidity, and a single target chosen by the minimum 2.0 viability gate (owner decisions D12 and D16, v0.9.0); [R] the proximal-edge entry, no V1 stop buffer, the first-three-opposing-levels target selection (swing-structure-v1; swing-structure-v2 takes every eligible level, see Targets), and the minimal status set; [A] derived, point-in-time, no persistence._
 
 Batch 6. The trade plan turns the POI (section 13) into a proposed risk entry: an entry, a stop,
-ordered targets, and an R:R per target, with a minimal derived status. No order is ever submitted
+a single target and its R:R, with a minimal derived status. No order is ever submitted
 (ADR-001). It is derived, point-in-time, and persists nothing, like sections 8 through 13. Position
-sizing, the volatility stop buffer (ADR-012), the full setup lifecycle (ADR-010), the confirmation
-entry, and multi-timeframe are deferred to later batches.
+sizing, the volatility stop buffer (ADR-012), the full setup lifecycle (ADR-010), and the confirmation
+entry are deferred to later batches; multi-timeframe context is section 17.
 
 Inputs: a POI (section 13, type qmr or order_block, with its zone and direction), the protected
 anchor (section 7), the confirmed opposing swings (section 1) and transactional liquidity (section
@@ -546,8 +561,11 @@ Targets:
 - The target sources are the confirmed opposing swings (section 1) and the transactional-liquidity
   level (section 10). The targets are those source levels lying strictly beyond the entry in the
   trade direction (above the entry for bullish, below for bearish), ordered by distance from the
-  entry nearest first, de-duplicated (levels within a minimum tick distance collapse to one), and
-  capped at three. [S], [R] In a standard setup the transactional-liquidity level sits behind the
+  entry nearest first, de-duplicated (levels within a minimum tick distance collapse to one), and,
+  in swing-structure-v1, capped at three (the first three opposing levels rule is v1). In
+  swing-structure-v2 the cap of three does not apply: the candidates are every eligible opposing
+  structural level beyond the entry, nearest first, and the target is the first with R:R at or above
+  `min_rr` (R:R below). [S], [R] In a standard setup the transactional-liquidity level sits behind the
   entry and is excluded by the beyond-the-entry filter; it is kept as a source only for the cases
   where it does not.
 - Targets are directionally ordered and distinct (ADR-012). When no source level lies beyond the
@@ -555,9 +573,18 @@ Targets:
 
 R:R:
 
-- Computed per target and shown as information only, never an eligibility filter (ADR-012). For
-  target i, bullish R:R is (target_i minus entry) divided by (entry minus stop); bearish mirrors.
-  The plan carries the R:R alongside each target. [S from ADR-012]
+- Candidate targets. The liquidity levels that section 14 already identifies as targets, ordered by
+  distance from the entry, are the candidates. For candidate c, bullish R:R is (c minus entry) divided
+  by (entry minus stop); bearish mirrors. [S from ADR-012]
+- Single target and viability gate. [S owner decisions D12 and D16, [R] for the selection rule] The plan
+  carries exactly one target: the nearest candidate whose R:R is at least `min_rr` = 2.0 (equality
+  passes). Candidates nearer than that are skipped and are never targets. A plan with no candidate at or
+  above `min_rr`, or with no candidates, has no target and is not viable. The comparison uses exact
+  decimal arithmetic, never floating point. `min_rr` belongs to the strategy configuration and to the
+  strategy version. The gate decides only whether the plan may ever become actionable (section 15). It
+  never changes the plan's entry or stop. Section 16 credits the plan's single target
+  (target_before_stop is the headline result).
+- Not chosen (D16): a fixed 2R target that ignores the chart, and plans with up to three targets.
 
 Plan status (minimal, derived, as of asOf):
 
@@ -569,7 +596,7 @@ Plan status (minimal, derived, as of asOf):
 - triggered: not invalidated, and a finalized candle after the POI formed has reached the entry
   level (bullish: a candle low at or below the entry; bearish: a candle high at or above the entry). [R]
 - actionable: a POI is present, the setup is not invalidated, and price has not yet reached the
-  entry. [R]
+  entry, subject to the viability gate and alignment, sections 14 and 17. [R]
 - Precedence within V1: invalidated outranks triggered outranks actionable, evaluated in that order
   against the finalized candle sequence up to asOf. The full ADR-010 lifecycle (detected, awaiting
   confirmation, confirmed, expired, cancelled), candidate identity and deduplication, re-entry, and
@@ -579,8 +606,8 @@ Evidence and scope:
 
 - Derived from the POI (section 13), the protected anchor (section 7), the confirmed opposing swings
   (section 1), transactional liquidity (section 10), and the candle series. No migration, no new table.
-- The result carries: the plan status, direction, entry, stop, the ordered targets each with its
-  R:R, and references to the POI and the protected anchor it was built from.
+- The result carries: the plan status, direction, entry, stop, the single target with its R:R
+  (or none), and references to the POI and the protected anchor it was built from.
 - Point-in-time: every candle consulted is bounded by close_time <= asOf; entry, stop, and targets
   are levels from the POI and confirmed swings, already asOf-bounded; the status reflects only
   finalized candles up to asOf, so triggered and invalidated flip as asOf advances. A candle
@@ -600,6 +627,10 @@ A setup is created the first time `ResolveTradePlan` (section 14) returns a `Tra
 persisted while `Status == PlanNone` — there is no setup yet, only the absence of one, exactly as
 section 14 already defines it.
 
+A plan that fails the viability gate (section 14), or whose context alignment is misaligned (section
+17), still creates a setup, in the state `rejected` (15.2). A plan whose context is unevaluable creates
+nothing at that step (section 17.5).
+
 ### 15.2 Lifecycle states, v1 [R]
 
 `PlanStatus` (section 14) already defines the complete, already-decided precedence for the part
@@ -608,7 +639,7 @@ which outranks `PlanActionable`, evaluated within the same candle window
 (`resolvePlanStatus`).
 
 Creation state. `[R]` The persisted state of a setup always equals the lifecycle state mapped from
-`TradePlan.Status` at the most recent evaluation of that identity. When a setup is created at a
+`TradePlan.Status` at the most recent evaluation of that identity, except `rejected`, which is decided by the gates and is never mapped from `TradePlan.Status`. When a setup is created at a
 step whose `TradePlan.Status` is `PlanActionable`, `PlanTriggered` or `PlanInvalidated`, the
 engine records the `detected` event and, in the same transaction and the same evaluation step,
 the event for the mapped state, so the setup is never persisted in a state that disagrees with
@@ -630,10 +661,11 @@ setup, not the live plan, is therefore the record of the invalidation.
 
 The setup lifecycle is a persisted shadow of that same value's
 transitions over time, plus the one state `PlanStatus` has no reason to represent (there being no
-plan yet):
+plan yet), and `rejected`, which `PlanStatus` does not represent either because the gates decide it
+(sections 14 and 17):
 
 - **Detected** — `[R]` The persisted state of a setup always equals the lifecycle state mapped from
-  `TradePlan.Status` at the most recent evaluation of that identity. Equivalent to ADR-010's "Detected" and "Awaiting confirmation" collapsed into
+  `TradePlan.Status` at the most recent evaluation of that identity, except `rejected`, which is decided by the gates and is never mapped from `TradePlan.Status`. Equivalent to ADR-010's "Detected" and "Awaiting confirmation" collapsed into
   one state, because section 14 does not currently distinguish a plan that exists but has
   unresolved mandatory conditions from one that is already actionable — that distinction belongs
   to confluence/condition grouping, explicitly out of scope (see "Not yet decided" below).
@@ -642,6 +674,16 @@ plan yet):
   end.
 - **Triggered** — `TradePlan.Status == PlanTriggered`.
 - **Invalidated** — `TradePlan.Status == PlanInvalidated`. Terminal.
+- **Rejected** [R]. The plan was found, but at the evaluation step that would have created the setup it
+  fails the viability gate (section 14), the context alignment gate (section 17), or both. Terminal.
+  The engine records the `detected` event and, in the same transaction and step, a `rejected` event that
+  carries every reason that applied (`no_target_at_min_rr`, `misaligned_with_context`) with the evidence
+  for each. If any gate fails, the setup is created as `rejected` whatever `TradePlan.Status` is. A
+  rejected setup never becomes actionable, triggered or invalidated, and is not evaluated for stop
+  breach. Its identity (15.3) stays occupied, so the same POI never spawns a second setup. Both gates
+  are evaluated once, at that step; a later step that would pass them does not revive the identity.
+  [U] Whether a rejected identity should be re-evaluated when a candidate at or above `min_rr` appears,
+  or when context alignment changes. Measure in L5.
 
 A setup transitions between these exactly when `TradePlan.Status` changes on a later evaluation
 step for the same identity. No new precedence rule is introduced here — section 14's existing
@@ -686,7 +728,8 @@ a cooldown-based scheme would.
 
 Per ADR-011, every creation and every state transition is appended, never rewritten, as its own
 event row carrying: the setup identity, the evaluation time (`asOf`), the `TradePlan` snapshot
-that produced it (status, entry, stop, targets, POI), the candle/revision it was computed from,
+that produced it (status, entry, stop, target, POI; the candidates and their R:R are in the evidence,
+section 17.6), the candle/revision it was computed from,
 and the strategy version. A correction that changes the POI's source-candle revision without
 changing identity appends an **amendment** event on the same setup, preserving the original
 decision and evidence per ADR-011 — it does not rewrite the original event.
@@ -715,7 +758,7 @@ and carry the rules version and the candle revision they were computed from. Pri
 decimals, never floats. R multiples are exact and are shown to two decimals, rounded half away from
 zero. One outcome module serves both the backtest and paper trading, so the two cannot disagree.
 
-Terms (bullish; bearish mirrors): `entry`, `stop`, ordered `targets` come from the trade plan
+Terms (bullish; bearish mirrors): `entry`, `stop` and the single `target` come from the trade plan
 (section 14). `tick` is the instrument's price tick.
 
 Fill:
@@ -731,15 +774,18 @@ Fill:
 
 After the fill:
 - On the fill candle, if the stop level is reached (bullish `low <= stop`), the outcome is `stopped`.
-  Otherwise no target is credited on the fill candle, because the order of events inside the candle
-  is unknown. Targets count from the next candle on. [R]
-- On a later candle, if both the stop and any target are reached, the stop is taken first and the
+  Otherwise the target is not credited on the fill candle, because the order of events inside the candle
+  is unknown. The target counts from the next candle on. [R]
+- On a later candle, if both the stop and the target are reached, the stop is taken first and the
   outcome is flagged `ambiguous_resolved_as_stop`. Lower timeframe resolution is not part of V1. [R]
-- Each target is recorded as its own fact, with the candle that first reached it. Tracking for later
-  targets ends at the first candle that reaches the stop level, or at the end of the data. [R]
-- Headline result: `target_1_before_stop` is a win. `stopped` is a loss of exactly 1R in the gross
-  figure. For the R figure, the whole position is assumed closed at the first target, so a win at
-  target i is the plan's R:R for that target. No partial exits, no stop moves (ADR-014). [R]
+- The target is recorded as reached or not, with the candle that first reached it. Tracking ends at
+  the earlier of the candle that reaches the target and the candle that reaches the stop level, or at
+  the end of the data. [R] This is outcome measurement only. It says nothing about the setup's
+  lifecycle state, which stays open (the open item on when a setup is finished after its target is
+  reached).
+- Headline result: `target_before_stop` is a win. `stopped` is a loss of exactly 1R in the gross
+  figure. For the R figure, the whole position is assumed closed at the target, so a win is the
+  plan's R:R for that target. No partial exits, no stop moves (ADR-014). [R]
 - Setups with a fill and no stop or target reached by the end of the data are `open`. [R]
 
 Costs:
@@ -756,9 +802,98 @@ Exclusions and reporting:
   `ambiguous_resolved_as_stop`, counts of never filled and open, and the sample size per bucket. A
   small sample is labelled as such. No result is presented as a forecast. [R]
 
+## 17. Higher timeframe context and alignment
+
+_Provenance: [S] the three checks, the idea of validating against the next higher timeframe, the
+discount/premium rule, and the timeframes (owner D13); [R] the mapping to the engine's own range and
+the states; [A] determinism and data requirements; [U] listed in 17.8._
+
+### 17.1 The three checks the trader runs [S]
+
+1. A setup exists (sweep, break of structure, structural liquidity, POI). Sections 1 to 14.
+2. The liquidity is valid (multi candle shape, below the 50% line for buys). Sections 6, 8 and 9.
+3. Where price is coming from: whether the setup sits in the right half of the higher timeframe's range.
+   This section.
+
+### 17.2 Timeframes [S, owner D13]
+
+- Setup timeframes: 15m and 1h. Context timeframe is exactly one step up: 15m uses 1h, 1h uses 4h.
+- The 1m and 5m produce no setups. The 1m stays the canonical live stream (ADR-006).
+- Deeper context (a second higher timeframe, daily, weekly) is [U] and out of v2.
+
+### 17.3 Context range [S, R]
+
+- The trader takes the last major break of structure on the context timeframe and treats the swing from
+  that break's origin to the extreme as the range, with its 50% line as the equilibrium. [S]
+- [R] Reuse section 8 unchanged, evaluated on the context timeframe's own candles and structure state.
+  Do not write a second definition. The context timeframe therefore runs sections 1 to 8 (structure and
+  range only). It creates no POI, plan or setup unless it is itself a setup timeframe (1h is both the
+  context for 15m and a setup timeframe).
+- Known limitation, from the open items register: the mechanical structure engine may call a different
+  "last major break" than the trader would by eye.
+
+### 17.4 Alignment rule [S]
+
+- A buy setup should sit in the discount of the context range, a sell setup in the premium. A sell from a
+  discount, or a buy from a premium, does not align, and the trader's instruction is to skip it.
+- Trend direction does not decide alignment. A buy in a discount inside a bearish trend is aligned
+  (a counter trend trade of lower probability, but location only is checked).
+- [R] Classify using the plan's entry price (section 14) against the context equilibrium: a buy is
+  aligned when entry is below it, a sell when entry is above it. [R] An entry exactly on the
+  equilibrium is not aligned.
+
+### 17.5 States and effect [A]
+
+- Three results: `aligned`, `misaligned`, `unevaluable`.
+- `unevaluable`: the context timeframe has no active range at the evaluation time (section 8 returns
+  none), or it has no closed candles. It is never treated as misaligned or as a market invalidation
+  (ADR-009). [R] At that step no setup is created and nothing is persisted. The evaluation repeats at
+  the next step while the POI exists, so the setup is created once the context can be evaluated. Count
+  these steps in the engine status.
+- `misaligned`: the setup is created in the state `rejected` with the reason `misaligned_with_context`
+  (section 15.2).
+- `aligned`: the setup is created and proceeds as in section 15.
+- Point in time: only context candles with close_time at or before the evaluation time are used; the
+  context candle still forming is never used.
+
+### 17.6 Evidence [A]
+
+Each alignment result is part of the immutable evidence chain (ADR-011): context timeframe, the two
+swings that define the context range, equilibrium, the entry, the classification, the candle open
+times and revisions used, and the strategy version. The viability result is recorded the same way:
+min_rr, each candidate's R:R, the chosen target (or none), and the result.
+
+### 17.7 Data requirement [A]
+
+The context timeframes need enough closed candles to establish a range. Stored 1 minute history is not
+enough (about 18 four hour candles in 3 days). Higher timeframe candles (15m, 1h, 4h, later 1d) are
+backfilled and kept natively from the provider and kept current by the provider's candle stream
+(ADR-006 amendment). Before either representation is relied on, native candles and candles aggregated
+from 1 minute must be compared on real overlapping data, and any difference reported.
+
+### 17.8 Not decided, do not implement
+
+Confirmation entry (what counts as a tap, the lower timeframe, how long a pending confirmation may
+wait, the lifecycle states it adds), deeper or weekly context, whether the UI hides rejected setups by
+default, a minimum stop distance or a volatility stop buffer, trading cost estimation (a plan can pass
+the 2.0 gate yet be smaller than the fees), setup expiry and cancellation, supply and demand zones,
+equal highs and lows, fair value gaps, displacement.
+
+### 17.9 Golden fixtures required
+
+A 1h sell whose entry is in the 4h discount (misaligned, rejected); a setup of the same shape on a different order block, with its entry in the 4h
+premium (aligned); a 4h context with no active range (unevaluable, nothing persisted, then created
+when the range exists); an entry exactly on the equilibrium (not aligned); a counter trend buy in the
+discount (aligned); a plan whose only candidate is 1.99R (rejected, no target) and one whose candidate
+is exactly 2.00R (viable, that candidate is the target); a plan with a near candidate at 1.5R and a
+farther one at 2.4R (the 2.4R candidate is the single target, the 1.5R one is skipped); a plan with no
+candidates (rejected); a 1m candle series produces no setup. Each asserts the
+evidence as well as the decision. Replay determinism: the same candles and revisions give the same
+result.
+
 ## Scope of this version
 
-In scope: single instrument, single timeframe. Batch 1: swing detection, structural
+In scope for swing-structure-v1: single instrument, single timeframe. Batch 1: swing detection, structural
 direction state, and BOS / CHOCH classification with the threshold and determinism rules
 above. Batch 2: single-candle liquidity sweeps (strict, same-candle reclaim), two independent
 protected anchors (one per side, each designated until invalidated), and sweep-validation of
@@ -774,11 +909,13 @@ confirmation entry and the multi-timeframe top-down flow follow as later batches
 lifecycle persistence (section 15) — candidate identity, deduplication, re-entry, and immutable
 lifecycle events for the `Detected`, `Actionable`, `Triggered`, and `Invalidated` states, reusing
 section 14's existing precedence unchanged. Expiry and cancellation remain future batches (see
-section 15.2).
+section 15.2). Swing-structure-v2 (amendments v0.9.0) adds section 17: setup timeframes 15m and 1h,
+each with its context timeframe one step up; the confirmation entry, trading cost estimation and
+deeper context stay deferred.
 
 Not yet decided, do not implement: supply/demand and support/resistance zones; equal highs and lows;
-fair value gaps; displacement and ATR; retests; higher-timeframe context and multi-timeframe
-alignment; the confirmation entry type; position sizing and the volatility stop buffer; mandatory
+fair value gaps; displacement and ATR; retests; higher-timeframe context deeper than section 17
+(17.2, 17.8); the confirmation entry type; position sizing and the volatility stop buffer; mandatory
 condition grouping and the resulting distinction between a plan that exists and one with unresolved
 conditions (would refine the collapsed Detected/Actionable boundary in section 15.2 if resolved
 later); setup expiry and cancellation (section 15.2); and trading-cost estimation. (The order block
@@ -866,6 +1003,8 @@ Batch 5 (QMR and POI selection):
 - POI selection recomputing deterministically under a candle correction.
 
 Batch 6 (trade plan, risk entry):
+
+These fixtures describe swing-structure-v1; the v2 fixtures are in section 17.9.
 
 - a bullish plan from a QMR POI: entry at the zone's proximal (top) edge, stop at the protected low, targets the opposing structural levels beyond entry ordered nearest-first, and the bearish mirror,
 - targets de-duplicated (two opposing levels within the minimum tick distance collapse to one) and capped at three when more than three lie beyond the entry,
