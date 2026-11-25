@@ -49,7 +49,7 @@ ARGUS must not silently present an aggregate as complete when required source ca
 
 The 1 minute candle remains the canonical live representation. Higher timeframe candles (15m, 1h, 4h
 and later 1d) are also stored natively from the provider, backfilled from the provider's historical
-endpoint and kept current from its candle stream, because aggregating a short 1 minute history cannot
+endpoint and kept current by fetching each candle from the provider as soon as the 1 minute stream shows its window closed, because aggregating a short 1 minute history cannot
 establish higher timeframe structure. Native and aggregated candles are compared on real overlapping
 data before either is relied on. Closed candle finality, revisions and corrections follow the same
 rules at every timeframe.
