@@ -35,7 +35,10 @@ func (h *Hub) scaleFor(ctx context.Context, instrumentID int64) (quant.Scale, qu
 // 10) so a test can fake it without a real Postgres connection.
 type AggregateReader interface {
 	AggregateRange(ctx context.Context, instrumentID int64, windows []marketdata.Window) ([]marketdata.AggregateOHLCV, error)
-	LatestCompleteWindow(ctx context.Context, instrumentID int64, d time.Duration) (*marketdata.AggregateOHLCV, error)
+	// LatestJoinWindow is the snapshot's join point: the same one GET
+	// /instruments/{id}/candles reports (native aware for 15m, 1h and 4h,
+	// L1.2), so the history and the live stream join at the same window.
+	LatestJoinWindow(ctx context.Context, instrumentID int64, d time.Duration) (*marketdata.AggregateOHLCV, error)
 	AggregatePartial(ctx context.Context, instrumentID int64, w marketdata.Window) (marketdata.PartialAggregate, error)
 }
 
@@ -643,7 +646,7 @@ func (h *Hub) buildSnapshot(ctx context.Context, instrumentID int64, interval In
 		return SnapshotPayload{}, err
 	}
 
-	join, err := h.candles.LatestCompleteWindow(ctx, instrumentID, d)
+	join, err := h.candles.LatestJoinWindow(ctx, instrumentID, d)
 	if err != nil {
 		return SnapshotPayload{}, fmt.Errorf("hub: latest complete window instrument=%d interval=%s: %w", instrumentID, interval, err)
 	}

@@ -63,7 +63,7 @@ func (f *fakeCandles) AggregateRange(_ context.Context, instrumentID int64, _ []
 	return f.rangeResult[instrumentID], nil
 }
 
-func (f *fakeCandles) LatestCompleteWindow(_ context.Context, instrumentID int64, _ time.Duration) (*marketdata.AggregateOHLCV, error) {
+func (f *fakeCandles) LatestJoinWindow(_ context.Context, instrumentID int64, _ time.Duration) (*marketdata.AggregateOHLCV, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.latestResult[instrumentID], nil

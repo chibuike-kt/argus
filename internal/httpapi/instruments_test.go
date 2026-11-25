@@ -71,6 +71,9 @@ type fakeCandlesStore struct {
 	aggregateErr error
 	joinPoint    *marketdata.AggregateOHLCV
 	joinPointErr error
+
+	native    []marketdata.AggregateOHLCV
+	nativeErr error
 }
 
 func (f *fakeCandlesStore) ListClosedInRangeLimited(_ context.Context, _ int64, _, _ time.Time, _ int32) ([]marketdata.Candle, error) {
@@ -98,7 +101,11 @@ func (f *fakeCandlesStore) AggregateRange(_ context.Context, _ int64, _ []market
 	return f.aggregates, nil
 }
 
-func (f *fakeCandlesStore) LatestCompleteWindow(_ context.Context, _ int64, _ time.Duration) (*marketdata.AggregateOHLCV, error) {
+func (f *fakeCandlesStore) NativeHistory(_ context.Context, _ marketdata.Interval, _ int64, _, _ *time.Time, _ bool, _ int32, _ time.Time) ([]marketdata.AggregateOHLCV, error) {
+	return f.native, f.nativeErr
+}
+
+func (f *fakeCandlesStore) LatestJoinWindow(_ context.Context, _ int64, _ time.Duration) (*marketdata.AggregateOHLCV, error) {
 	if f.joinPointErr != nil {
 		return nil, f.joinPointErr
 	}
