@@ -8,6 +8,14 @@
 -- runs a single statement without a wrapping transaction). If the build
 -- fails it leaves an INVALID index and a dirty migration version: drop the
 -- index and force the version back before retrying.
-CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_candles_current_by_interval
+--
+-- No IF NOT EXISTS, on purpose: a failed CONCURRENTLY build leaves an
+-- INVALID index of this name behind, and IF NOT EXISTS would skip it on a
+-- retry and record the migration as applied over an index that enforces
+-- nothing. Without it, a retry fails with "already exists" until the
+-- leftover is dropped (DROP INDEX CONCURRENTLY <name>) and the dirty
+-- version is forced back, so an invalid index can never pass for a built
+-- one.
+CREATE UNIQUE INDEX CONCURRENTLY idx_candles_current_by_interval
     ON candles (instrument_id, interval, open_time)
     WHERE superseded_at IS NULL;
