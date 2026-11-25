@@ -121,12 +121,20 @@ func (p *slotProbeProvider) HistoricalIntervalCandles(context.Context, string, m
 		// channel completes the moment a receive frees room, so if the
 		// backfill gives the slot back before its retry delay, the
 		// competitor has it before the second attempt starts.
+		ready := make(chan struct{})
 		go func() {
+			close(ready)
 			p.gate <- struct{}{}
 			close(p.competitor)
 			time.Sleep(20 * time.Millisecond)
 			<-p.gate
 		}()
+		// The competitor must already be waiting on the slot when this
+		// attempt returns, or the backfill can release and take it again
+		// before the competitor ever runs (seen once under -race in L1.2's
+		// full run: a scheduling race in this test, not in the code).
+		<-ready
+		time.Sleep(10 * time.Millisecond)
 		return nil, errors.New("provider unavailable")
 	}
 	return nil, nil
