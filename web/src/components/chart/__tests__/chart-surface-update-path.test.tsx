@@ -31,6 +31,8 @@ const legendState = vi.hoisted(() => ({
   loadHistoryBack: undefined as
     | ((fromISO: string) => Promise<import("@/lib/use-live-candles").HistoryBackResult>)
     | undefined,
+  loadOlder: undefined as (() => Promise<import("@/lib/use-live-candles").OlderPageOutcome>) | undefined,
+  historyEdge: undefined as import("@/lib/use-live-candles").HistoryEdge | undefined,
 }));
 
 vi.mock("@/components/workspace/analysis-workspace", () => ({
@@ -60,6 +62,8 @@ vi.mock("@/components/workspace/analysis-workspace", () => ({
       fatal: null,
     },
     loadHistoryBack: legendState.loadHistoryBack,
+    loadOlder: legendState.loadOlder,
+    historyEdge: legendState.historyEdge,
     candles: legendState.apiCandles,
     candlesLoading: false,
     candlesError: undefined,
@@ -1345,5 +1349,80 @@ describe("price scale top margin clears the legend (polish pass, item 2)", () =>
     expect(m * 500).toBeGreaterThanOrEqual(90);
     // Never more than 45% of the pane.
     expect(legendTopMargin(400, 500)).toBe(0.45);
+  });
+});
+
+// L1.2: scrolling back through stored history. Older bars added in front
+// keep the same bars in view (no jump), the live forming bar stays on the
+// chart with no duplicate, the left edge reads the next page, and the
+// oldest stored bar says where the history starts.
+describe("scrolling back through stored history", () => {
+  afterEach(() => {
+    cleanup();
+    legendState.loadOlder = undefined;
+    legendState.historyEdge = undefined;
+  });
+
+  const full = candleSet(150, 100);
+  const nextOpen = new Date(Date.UTC(2026, 0, 1, 0, 150)).toISOString();
+  const forming = liveTick(nextOpen, 777, { seq: 1 });
+  const props = { className: "", symbol: "BTC-PERP", venue: "test", formationOutsideWindow: false };
+
+  function seriesTimes(): number[] {
+    const series = lastSeries as { data: () => readonly { time: unknown }[] };
+    return series.data().map((d) => d.time as number);
+  }
+
+  it("older bars added in front keep the same bars in view, and the live bar stays, once", () => {
+    const view = render(<Harness {...props} candles={full.slice(50)} forming={forming} />);
+    const ts = lastCreatedChart!.timeScale();
+    vi.spyOn(ts, "getVisibleLogicalRange").mockReturnValue({ from: 3, to: 40 } as never);
+    const setRange = vi.spyOn(ts, "setVisibleLogicalRange").mockImplementation(() => {});
+    const series = lastSeries as { update: (...a: unknown[]) => void; data: () => readonly { time: unknown; close?: number }[] };
+    const update = vi.spyOn(series, "update");
+
+    view.rerender(<Harness {...props} candles={full} forming={forming} />);
+
+    // 50 bars were added in front: the view moves by exactly 50.
+    expect(setRange).toHaveBeenCalledWith({ from: 53, to: 90 });
+    // The live bar was put straight back after setData, not at the next tick.
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ time: Date.parse(nextOpen) / 1000, close: 777 }));
+    const times = seriesTimes();
+    expect(times.length).toBe(151);
+    for (let i = 1; i < times.length; i++) expect(times[i]).toBeGreaterThan(times[i - 1]);
+    const last = series.data()[series.data().length - 1];
+    expect(last).toMatchObject({ time: Date.parse(nextOpen) / 1000, close: 777 });
+  });
+
+  it("a switch to another instrument never shifts the view", () => {
+    const view = render(<Harness {...props} candles={full.slice(50)} />);
+    const ts = lastCreatedChart!.timeScale();
+    vi.spyOn(ts, "getVisibleLogicalRange").mockReturnValue({ from: 3, to: 40 } as never);
+    const setRange = vi.spyOn(ts, "setVisibleLogicalRange").mockImplementation(() => {});
+    view.rerender(<Harness {...props} symbol="ETH-PERP" candles={full} />);
+    expect(setRange).not.toHaveBeenCalledWith({ from: 53, to: 90 });
+  });
+
+  it("the left edge reads one older page; the middle of the chart does not", () => {
+    const loadOlder = vi.fn(async () => "loaded" as const);
+    legendState.loadOlder = loadOlder;
+    legendState.historyEdge = { exhausted: false, capped: false };
+    render(<Harness {...props} candles={full} />);
+    loadOlder.mockClear();
+    act(() => capturedRangeHandler?.({ from: 80, to: 140 }));
+    expect(loadOlder).not.toHaveBeenCalled();
+    act(() => capturedRangeHandler?.({ from: 10, to: 70 }));
+    expect(loadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("at the oldest stored bar, a quiet note says where the history starts", () => {
+    legendState.loadOlder = vi.fn(async () => "exhausted" as const);
+    legendState.historyEdge = { exhausted: true, capped: false };
+    render(<Harness {...props} candles={full} />);
+    act(() => capturedRangeHandler?.({ from: 60, to: 120 }));
+    expect(screen.queryByTestId("history-start")).toBeNull();
+    act(() => capturedRangeHandler?.({ from: -2, to: 50 }));
+    expect(screen.getByTestId("history-start").textContent).toBe("History starts 1 January 2026");
+    expect(legendState.loadOlder).not.toHaveBeenCalled();
   });
 });
