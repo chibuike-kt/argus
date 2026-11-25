@@ -15,8 +15,10 @@ import (
 // maxInstrumentCandles is ListInstrumentCandles' hard cap (worker-
 // hardening brief, Part C): a client cannot request the whole table
 // in one call regardless of how wide [from, to) is. Matches the
-// OpenAPI spec's own documented maximum.
-const maxInstrumentCandles = 1000
+// OpenAPI spec's own documented maximum. 5,000 (L1.2): the provider's own
+// retention of one native interval, so a symbol's whole stored 15m, 1h or
+// 4h history fits one response; the chart itself pages at 1,000.
+const maxInstrumentCandles = 5000
 
 // defaultInstrumentCandles is the limit applied when the caller omits
 // the query parameter entirely.
@@ -54,7 +56,13 @@ type candlesStore interface {
 	// so this interface never needs to import internal/store just to be
 	// satisfied.
 	AggregateRange(ctx context.Context, instrumentID int64, windows []marketdata.Window) ([]marketdata.AggregateOHLCV, error)
-	LatestCompleteWindow(ctx context.Context, instrumentID int64, d time.Duration) (*marketdata.AggregateOHLCV, error)
+	// LatestJoinWindow is the per-interval join point (native aware for
+	// 15m, 1h and 4h; LatestCompleteWindow for the rest), the same one the
+	// hub's snapshot uses. NativeHistory is the 15m, 1h and 4h read path
+	// (L1.2): stored native candles, filled from complete 1 minute
+	// aggregates where a window has none.
+	LatestJoinWindow(ctx context.Context, instrumentID int64, d time.Duration) (*marketdata.AggregateOHLCV, error)
+	NativeHistory(ctx context.Context, interval marketdata.Interval, instrumentID int64, from, to *time.Time, desc bool, limit int32, now time.Time) ([]marketdata.AggregateOHLCV, error)
 }
 
 var _ candlesStore = (*marketdata.Store)(nil)
@@ -210,14 +218,27 @@ func (h *apiHandler) ListInstrumentCandles(ctx context.Context, request ListInst
 	// could be well behind the latest closed minute. Also this
 	// response's own anchor for "latest N" (addendum item C) when
 	// from/to are both omitted, below.
-	joinPoint, err := h.candles.LatestCompleteWindow(ctx, request.Id, d)
+	joinPoint, err := h.candles.LatestJoinWindow(ctx, request.Id, d)
 	if err != nil {
 		h.logger.Error("httpapi: latest complete window", "instrument_id", request.Id, "interval", interval, "error", err)
 		return nil, fmt.Errorf("latest complete window for instrument %d: %w", request.Id, err)
 	}
 
 	var apiCandles []Candle
-	if interval == N1m {
+	if native, ok := marketdata.NativeIntervalFor(d); ok {
+		// 15m, 1h, 4h (L1.2): the stored native candles, a window with none
+		// filled from its complete 1 minute aggregate (never partially),
+		// native winning on the same open time.
+		rows, err := h.candles.NativeHistory(ctx, native, request.Id, request.Params.From, request.Params.To, desc, limit, h.clock().Now())
+		if err != nil {
+			h.logger.Error("httpapi: native instrument candles", "instrument_id", request.Id, "interval", interval, "error", err)
+			return nil, fmt.Errorf("native candles for instrument %d: %w", request.Id, err)
+		}
+		apiCandles = make([]Candle, 0, len(rows))
+		for _, row := range rows {
+			apiCandles = append(apiCandles, toAPIAggregateCandle(row, inst.PriceScale, inst.QtyScale))
+		}
+	} else if interval == N1m {
 		var rows []marketdata.Candle
 		if desc {
 			rows, err = h.candles.ListClosedInRangeLimitedDesc(ctx, request.Id, request.Params.From, request.Params.To, limit)

@@ -25,7 +25,8 @@ import type { LiveStatsSnapshot } from "@/lib/live-stats";
 import { useAnalysisWorkspace } from "@/components/workspace/analysis-workspace";
 import { formatMoney } from "@/api/mappers";
 import { useDrawing } from "./drawing-context";
-import type { HistoryBackOutcome, LiveTick } from "@/lib/use-live-candles";
+import type { HistoryBackOutcome, HistoryEdge, LiveTick, OlderPageOutcome } from "@/lib/use-live-candles";
+import { historyCapNote, historyStartNote, prependShift, shouldLoadOlder } from "./history-paging";
 import type { ConnectionState, WireStatusPayload } from "@/lib/live-socket";
 import { isNewerCandleKey, decideApplyAction, type CandleKey } from "@/lib/live-candles-reducer";
 import { fromSavedView, loadChartView, saveChartView, toSavedView } from "./chart-view-persistence";
@@ -736,6 +737,18 @@ export function ChartSurfaceInner({
   const lastAppliedOpenTimeRef = useRef<string | null>(hasCandles ? candles[candles.length - 1].openTime : null);
   const appliedLiveKeyRef = useRef<CandleKey | null>(null);
   const appliedEpochRef = useRef<number | null>(null);
+  // formingRef: the latest live tick, so a full setData can put the live
+  // bar straight back (applyCandleData) instead of leaving it off the
+  // chart until the next tick arrives.
+  const formingRef = useRef<LiveTick | null>(forming);
+  formingRef.current = forming;
+  // Scrolling back (L1.2): the range handler is registered once, so it
+  // reads the workspace's loader and history edge through refs.
+  const loadOlderRef = useRef<(() => Promise<OlderPageOutcome>) | undefined>(undefined);
+  const historyEdgeRef = useRef<HistoryEdge | undefined>(undefined);
+  // atStart: the oldest held bar is in view (for the history start note).
+  const [atStart, setAtStart] = useState(false);
+  const atStartRef = useRef(false);
 
   // withProgrammaticRangeChange brackets fn so any visible-range change
   // it causes is not mistaken for a user gesture by
@@ -767,10 +780,15 @@ export function ChartSurfaceInner({
   // 2A's own rule). A live single-bar update (Part 2D) calls
   // series.update() directly, from its own effect below, and never
   // routes through here, which always does a full setData.
-  function applyCandleData() {
+  function applyCandleData(preserveView = false) {
     const series = seriesRef.current;
     const chart = chartRef.current;
     if (!series || !chart) return;
+    // preserveView (same instrument and timeframe): if this data only adds
+    // older bars in front (scrolling back, L1.2), the same bars stay in
+    // view: the logical range is shifted by the number of bars added.
+    const prevTimes = dataTimesRef.current;
+    const prevRange = preserveView ? chart.timeScale().getVisibleLogicalRange() : null;
     // Any full setData makes whatever the live-tick effect last applied
     // stale -- this is new data (a reload, a gap-fill, an instrument or
     // interval switch), so the next live tick must be compared against
@@ -815,6 +833,16 @@ export function ChartSurfaceInner({
     liveLegendRef.current = nextLive;
     setLiveBar(nextLive);
     setLegend((l) => (l.hovering ? l : { bar: nextLive, hovering: false }));
+
+    // The live bar back on at once, not at the next tick: setData above
+    // holds closed candles only. A tick older than the newest closed bar is
+    // dropped as usual (applyLiveTick).
+    if (formingRef.current) applyLiveTick(formingRef.current);
+
+    if (prevRange) {
+      const added = prependShift(prevTimes, dataTimesRef.current);
+      if (added > 0) chart.timeScale().setVisibleLogicalRange({ from: prevRange.from + added, to: prevRange.to + added });
+    }
   }
 
   // restoreOrDefaultView applies the scope's saved view when it still fits
@@ -965,6 +993,8 @@ export function ChartSurfaceInner({
         const view = toSavedView(range, dataTimesRef.current, chart.timeScale().options().barSpacing);
         if (view) saveChartView(chartViewScopeRef.current, view);
       }
+      noteRange(range?.from);
+      if (range && shouldLoadOlder(range.from, historyEdgeRef.current)) void loadOlderRef.current?.();
     });
 
     const controller = new DrawingController(chart, series, hostRef.current, store, {
@@ -1027,6 +1057,7 @@ export function ChartSurfaceInner({
     // which was correct while symbol/timeframe genuinely never changed
     // after that; now they can.
     const newScope = viewScope;
+    const sameScope = chartViewScopeRef.current === newScope;
     if (chartViewScopeRef.current !== newScope) {
       chartViewScopeRef.current = newScope;
       // Owe this scope a restore-or-default -- not necessarily on THIS
@@ -1036,7 +1067,7 @@ export function ChartSurfaceInner({
       staleDataRef.current = appliedSignatureRef.current;
     }
 
-    withProgrammaticRangeChange(() => applyCandleData());
+    withProgrammaticRangeChange(() => applyCandleData(sameScope));
     flushPendingRange();
 
     if (!hasCandles) staleDataRef.current = null; // emptied: whatever comes next is new
@@ -1048,6 +1079,11 @@ export function ChartSurfaceInner({
       withProgrammaticRangeChange(() => restoreOrDefaultView(chart, newScope));
     }
     tryApplyFocus();
+    // Still at the left edge after an older page landed (a fast scroll, or
+    // a short page): read the next one, until the stored start or the cap.
+    const r = chart.timeScale().getVisibleLogicalRange();
+    noteRange(r?.from);
+    if (sameScope && r && shouldLoadOlder(r.from, historyEdgeRef.current)) void loadOlderRef.current?.();
     // applyCandleData/symbol/timeframe/hasCandles are read fresh each
     // run via closure, same convention the create effect above already
     // uses (this project's own lint config does not enforce
@@ -1165,9 +1201,9 @@ export function ChartSurfaceInner({
   //     bar anyway (that is candle_corrected's own job, which never
   //     reaches `forming` at all -- see use-live-candles.ts's own doc
   //     comment).
-  useEffect(() => {
+  function applyLiveTick(forming: LiveTick) {
     const series = seriesRef.current;
-    if (!series || !forming) return;
+    if (!series) return;
 
     const nextKey: CandleKey = {
       openTime: forming.candle.open_time,
@@ -1222,6 +1258,9 @@ export function ChartSurfaceInner({
     setLiveBar(text);
     // Hovering the live bar itself keeps it moving too.
     setLegend((l) => (!l.hovering || hoveredTimeRef.current === t ? { bar: text, hovering: l.hovering } : l));
+  }
+  useEffect(() => {
+    if (forming) applyLiveTick(forming);
   }, [forming]);
 
   // A click on an ARGUS element (not on a user drawing, not while a
@@ -1289,6 +1328,20 @@ export function ChartSurfaceInner({
   // everything held and says so, never doing nothing silently.
   const workspace = useAnalysisWorkspace();
   const loadHistoryBack = workspace.loadHistoryBack;
+  loadOlderRef.current = workspace.loadOlder;
+  historyEdgeRef.current = workspace.historyEdge;
+  // noteRange tracks whether the oldest held bar is in view (logical index
+  // 0), changing state only when that flips.
+  function noteRange(from: number | undefined) {
+    const next = from !== undefined && from < 1;
+    if (next !== atStartRef.current) {
+      atStartRef.current = next;
+      setAtStart(next);
+    }
+  }
+  const edge = workspace.historyEdge;
+  const startNote =
+    atStart && hasCandles && edge ? (edge.exhausted ? historyStartNote(candles[0].openTime) : edge.capped ? historyCapNote() : null) : null;
   function applyRange(key: RangeKey, outcome: HistoryBackOutcome) {
     const chart = chartRef.current;
     const times = dataTimesRef.current;
@@ -1558,6 +1611,11 @@ export function ChartSurfaceInner({
             })}
           </div>
         </div>
+        {startNote && (
+          <div className="pointer-events-none absolute bottom-9 left-2 z-10 text-[11px] text-fg-subtle" data-testid="history-start">
+            {startNote}
+          </div>
+        )}
         {rangeNotice && (
           <div className="pointer-events-none absolute inset-x-0 bottom-2 z-10 flex justify-center">
             <div className="rounded-md border border-line bg-surface px-2 py-1 text-[11px] text-fg-subtle shadow-sm" data-testid="range-notice">

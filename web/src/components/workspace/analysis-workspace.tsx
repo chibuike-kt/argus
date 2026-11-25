@@ -8,7 +8,7 @@ import type { ApiCandle, ApiInstrument, ApiInstrumentStats, ApiSetup, ApiSetupEv
 import { toInstrumentStats, useLiveStat, type LiveStatsEntry, type LiveStatsSnapshot } from "@/lib/live-stats";
 import { listSetupEvents } from "@/api/setups";
 import { ApiClientError } from "@/api/client";
-import { useLiveCandles, type HistoryBackResult, type LiveTick } from "@/lib/use-live-candles";
+import { useLiveCandles, type HistoryBackResult, type HistoryEdge, type LiveTick, type OlderPageOutcome } from "@/lib/use-live-candles";
 import { preferences, usePreferences, usePreferencesSynced } from "@/lib/preferences";
 import { useWatchlist } from "@/api/hooks";
 import type { CandleInterval, ConnectionState, WireStatusPayload } from "@/lib/live-socket";
@@ -125,6 +125,11 @@ interface AnalysisWorkspace {
   // pages of older candles until it is covered, nothing older is stored
   // (exhausted) or the chart's own bar cap is reached (capped).
   loadHistoryBack: (fromISO: string) => Promise<HistoryBackResult>;
+  // One older page in front of the chart's history, for scrolling back to
+  // the left edge (L1.2); historyEdge says when the start of the stored
+  // history (or the chart's bar cap) has been reached.
+  loadOlder: () => Promise<OlderPageOutcome>;
+  historyEdge: HistoryEdge;
 }
 
 const Ctx = createContext<AnalysisWorkspace | null>(null);
@@ -499,6 +504,8 @@ export function AnalysisWorkspaceProvider({ children }: { children: ReactNode })
     statsEntry,
     statsSnapshot,
     loadHistoryBack: live.loadHistoryBack,
+    loadOlder: live.loadOlder,
+    historyEdge: live.historyEdge,
   };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

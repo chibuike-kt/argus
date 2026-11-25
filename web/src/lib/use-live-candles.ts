@@ -32,14 +32,18 @@ import {
 } from "./live-socket";
 import { checkSnapshotGap, INTERVAL_MS } from "./live-candles-reducer";
 
-const MAX_CANDLES = 1000;
+// FIRST_PAGE_BARS: the chart's first load, the latest bars only (L1.2), so
+// the first paint never waits for a symbol's whole stored history.
+export const FIRST_PAGE_BARS = 1000;
+const MAX_CANDLES = FIRST_PAGE_BARS;
 
-// [U] display values for the range buttons (Phase 3): how far back the
-// chart will page for one range, in bars, and the page size (the
-// server's own per-request cap). 10,000 one-minute bars is about 6.9
-// days; a longer range at 1m says so and suggests a longer timeframe.
+// [U] display values for the range buttons (Phase 3) and for scrolling
+// back (L1.2): the most bars the chart holds in memory, and the size of
+// each older page. 10,000 bars holds a whole native series (5,000 at 15m,
+// 1h or 4h) twice over; at 1m it is about 6.9 days, and a longer range
+// says so and suggests a longer timeframe.
 export const MAX_HISTORY_BARS = 10_000;
-const HISTORY_PAGE = 1000;
+export const HISTORY_PAGE = 1000;
 // [U] a page can fall entirely inside a long data gap and come back
 // empty while older candles exist; this many empty pages in a row are
 // read as "nothing older is stored".
@@ -51,6 +55,23 @@ const MAX_EMPTY_PAGES = 3;
 //   capped    -- MAX_HISTORY_BARS reached before either;
 //   cancelled -- the instrument or interval changed meanwhile, or a read failed.
 export type HistoryBackOutcome = "covered" | "exhausted" | "capped" | "cancelled";
+
+// OlderPageOutcome says how one loadOlder call ended: loaded (older bars
+// were added), exhausted (nothing older is stored), capped
+// (MAX_HISTORY_BARS held), busy (another load was already in flight, so
+// this one did nothing), cancelled (a switch or a failed read).
+export type OlderPageOutcome = "loaded" | "exhausted" | "capped" | "busy" | "cancelled";
+
+// HistoryEdge is what the chart knows about the start of the history it
+// holds: exhausted once a read found nothing older stored, capped once the
+// memory cap stopped the paging. Reset on every instrument or interval
+// switch.
+export interface HistoryEdge {
+  exhausted: boolean;
+  capped: boolean;
+}
+
+const OPEN_EDGE: HistoryEdge = { exhausted: false, capped: false };
 
 // oldest is the open time of the oldest candle held when the call ended
 // (null when none is held), so a caller can tell when that history has
@@ -99,6 +120,11 @@ export interface UseLiveCandlesResult {
   // loadHistoryBack pages older candles into `history` until it starts
   // at or before fromISO (see HistoryBackResult).
   loadHistoryBack: (fromISO: string) => Promise<HistoryBackResult>;
+  // loadOlder adds one older page (HISTORY_PAGE bars) in front of
+  // `history`, for scrolling back. One load is in flight at a time: a call
+  // while loadOlder or loadHistoryBack runs returns "busy" at once.
+  loadOlder: () => Promise<OlderPageOutcome>;
+  historyEdge: HistoryEdge;
 }
 
 export function useLiveCandles(instrumentId: number | undefined, interval: CandleInterval): UseLiveCandlesResult {
@@ -111,6 +137,15 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
   const [lastError, setLastError] = useState<WireErrorPayload | null>(null);
   const [status, setStatus] = useState<WireStatusPayload | null>(null);
   const [fatalReason, setFatalReason] = useState<string | null>(null);
+  const [historyEdge, setHistoryEdgeState] = useState<HistoryEdge>(OPEN_EDGE);
+  // busyRef: an older page is being read (loadOlder or loadHistoryBack).
+  // One at a time, so two reads never merge the same page twice.
+  const busyRef = useRef(false);
+  const edgeRef = useRef<HistoryEdge>(OPEN_EDGE);
+  const setHistoryEdge = useCallback((e: HistoryEdge) => {
+    edgeRef.current = e;
+    setHistoryEdgeState(e);
+  }, []);
 
   // historyRef mirrors `history` for the gap-check and the live-socket
   // callbacks below, which run outside React's own render cycle and
@@ -129,6 +164,8 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
   useEffect(() => {
     generationRef.current++;
     currentRef.current = { instrumentId, interval };
+    busyRef.current = false;
+    setHistoryEdge(OPEN_EDGE);
     if (instrumentId === undefined) {
       // No instrument resolved (yet, or at all) -- reset rather than
       // leave a previous instrument's own history on screen under a
@@ -260,52 +297,110 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
     };
   }, [instrumentId, interval]);
 
-  const loadHistoryBack = useCallback(async (fromISO: string): Promise<HistoryBackResult> => {
-    const gen = generationRef.current;
+  // pageOlder reads one older page in front of the held history: the
+  // HISTORY_PAGE bars before the oldest held candle, walking further back
+  // over empty pages (a page can fall inside a gap of the 1 minute series
+  // at 5m or 1d) until MAX_EMPTY_PAGES in a row say nothing older is
+  // stored. Never duplicates a bar: only candles strictly older than the
+  // oldest held one are added. Never exceeds MAX_HISTORY_BARS: a page that
+  // would cross it adds only its newest bars. The caller holds busyRef.
+  const pageOlder = useCallback(async (gen: number): Promise<"loaded" | "exhausted" | "capped" | "cancelled"> => {
     const { instrumentId: id, interval: iv } = currentRef.current;
-    if (id === undefined) return { outcome: "cancelled", oldest: null };
-    const target = Date.parse(fromISO);
+    if (id === undefined) return "cancelled";
     const stepMs = INTERVAL_MS[iv] * HISTORY_PAGE;
     let empties = 0;
     let to: string | null = null;
-    const end = (outcome: HistoryBackOutcome): HistoryBackResult => {
-      const held = historyRef.current;
-      return { outcome, oldest: held && held.candles.length > 0 ? held.candles[0].open_time : null };
-    };
     for (;;) {
       const held = historyRef.current;
-      if (!held || gen !== generationRef.current) return end("cancelled");
-      const oldest = held.candles.length > 0 ? held.candles[0].open_time : null;
-      if (oldest === null) return end("exhausted");
-      if (Date.parse(oldest) <= target) return end("covered");
-      if (held.candles.length >= MAX_HISTORY_BARS) return end("capped");
-      // Walk back from the oldest held candle, or further back past the
-      // empty pages already read.
+      if (!held || gen !== generationRef.current) return "cancelled";
+      if (held.candles.length === 0) return "exhausted";
+      if (held.candles.length >= MAX_HISTORY_BARS) return "capped";
+      const oldest = held.candles[0].open_time;
       const pageTo: string = to ?? oldest;
       const pageFrom = new Date(Date.parse(pageTo) - stepMs).toISOString();
       let page: ApiCandleHistory;
       try {
         page = await listInstrumentCandles(id, { interval: iv as ApiCandleInterval, order: "asc", from: pageFrom, to: pageTo, limit: HISTORY_PAGE });
       } catch {
-        return end("cancelled");
+        return "cancelled";
       }
-      if (gen !== generationRef.current || !historyRef.current) return end("cancelled");
+      if (gen !== generationRef.current || !historyRef.current) return "cancelled";
       const current = historyRef.current;
-      const currentOldest = current.candles.length > 0 ? current.candles[0].open_time : null;
-      const older = page.candles.filter((c) => currentOldest === null || Date.parse(c.open_time) < Date.parse(currentOldest));
+      const currentOldest = current.candles.length > 0 ? Date.parse(current.candles[0].open_time) : Number.POSITIVE_INFINITY;
+      let older = page.candles.filter((c) => Date.parse(c.open_time) < currentOldest);
       if (older.length === 0) {
         empties++;
-        if (empties >= MAX_EMPTY_PAGES) return end("exhausted");
+        if (empties >= MAX_EMPTY_PAGES) return "exhausted";
         to = pageFrom;
         continue;
       }
-      empties = 0;
-      to = null;
+      const room = MAX_HISTORY_BARS - current.candles.length;
+      if (older.length > room) older = older.slice(older.length - room);
       const merged: ApiCandleHistory = { ...current, candles: [...older, ...current.candles] };
       historyRef.current = merged;
       setHistory(merged);
+      return merged.candles.length >= MAX_HISTORY_BARS ? "capped" : "loaded";
     }
   }, []);
+
+  const loadOlder = useCallback(async (): Promise<OlderPageOutcome> => {
+    if (busyRef.current) return "busy";
+    const edge = edgeRef.current;
+    if (edge.exhausted) return "exhausted";
+    if (edge.capped) return "capped";
+    const gen = generationRef.current;
+    busyRef.current = true;
+    try {
+      const outcome = await pageOlder(gen);
+      if (gen === generationRef.current) {
+        if (outcome === "exhausted") setHistoryEdge({ ...edgeRef.current, exhausted: true });
+        if (outcome === "capped") setHistoryEdge({ ...edgeRef.current, capped: true });
+      }
+      return outcome;
+    } finally {
+      if (gen === generationRef.current) busyRef.current = false;
+    }
+  }, [pageOlder, setHistoryEdge]);
+
+  const loadHistoryBack = useCallback(async (fromISO: string): Promise<HistoryBackResult> => {
+    const gen = generationRef.current;
+    const end = (outcome: HistoryBackOutcome): HistoryBackResult => {
+      const held = historyRef.current;
+      return { outcome, oldest: held && held.candles.length > 0 ? held.candles[0].open_time : null };
+    };
+    if (currentRef.current.instrumentId === undefined) return end("cancelled");
+    // One load at a time: wait for a scroll page already in flight.
+    while (busyRef.current) {
+      await new Promise((r) => setTimeout(r, 25));
+      if (gen !== generationRef.current) return end("cancelled");
+    }
+    const target = Date.parse(fromISO);
+    busyRef.current = true;
+    try {
+      for (;;) {
+        const held = historyRef.current;
+        if (!held || gen !== generationRef.current) return end("cancelled");
+        const oldest = held.candles.length > 0 ? held.candles[0].open_time : null;
+        if (oldest !== null && Date.parse(oldest) <= target) return end("covered");
+        if (edgeRef.current.exhausted) return end("exhausted");
+        if (edgeRef.current.capped) return end("capped");
+        const outcome = await pageOlder(gen);
+        if (outcome === "cancelled") return end("cancelled");
+        if (outcome === "exhausted") {
+          setHistoryEdge({ ...edgeRef.current, exhausted: true });
+          return end("exhausted");
+        }
+        if (outcome === "capped") {
+          setHistoryEdge({ ...edgeRef.current, capped: true });
+          const now = historyRef.current;
+          const nowOldest = now && now.candles.length > 0 ? Date.parse(now.candles[0].open_time) : Number.POSITIVE_INFINITY;
+          return end(nowOldest <= target ? "covered" : "capped");
+        }
+      }
+    } finally {
+      if (gen === generationRef.current) busyRef.current = false;
+    }
+  }, [pageOlder, setHistoryEdge]);
 
   return {
     history,
@@ -318,5 +413,7 @@ export function useLiveCandles(instrumentId: number | undefined, interval: Candl
     status,
     fatalReason,
     loadHistoryBack,
+    loadOlder,
+    historyEdge,
   };
 }
