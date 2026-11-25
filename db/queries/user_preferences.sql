@@ -32,3 +32,32 @@ UPDATE user_drawings
 SET data = $4, version = version + 1, updated_at = $6
 WHERE user_id = $1 AND instrument_id = $2 AND timeframe = $3 AND version = $5
 RETURNING *;
+
+-- Drawings per (user, instrument), owner decision D17 (migration 000026).
+
+-- name: GetUserInstrumentDrawings :one
+SELECT * FROM user_instrument_drawings WHERE user_id = $1 AND instrument_id = $2;
+
+-- InsertUserInstrumentDrawings creates the first version (a first write, or
+-- the merge of the per timeframe documents). ON CONFLICT DO NOTHING: a row
+-- already there means the caller's "version 0" was stale (409), or another
+-- request merged first.
+-- name: InsertUserInstrumentDrawings :one
+INSERT INTO user_instrument_drawings (user_id, instrument_id, data, version, updated_at)
+VALUES ($1, $2, $3, 1, $4)
+ON CONFLICT (user_id, instrument_id) DO NOTHING
+RETURNING *;
+
+-- name: UpdateUserInstrumentDrawings :one
+UPDATE user_instrument_drawings
+SET data = $3, version = version + 1, updated_at = $5
+WHERE user_id = $1 AND instrument_id = $2 AND version = $4
+RETURNING *;
+
+-- ListUserDrawingsAllTimeframes reads the per timeframe documents stored
+-- before D17 (000017's user_drawings) for one instrument, oldest change
+-- first, for the one time merge. Read only.
+-- name: ListUserDrawingsAllTimeframes :many
+SELECT * FROM user_drawings
+WHERE user_id = $1 AND instrument_id = $2
+ORDER BY updated_at, timeframe;
