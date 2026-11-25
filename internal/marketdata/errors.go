@@ -37,6 +37,18 @@ var (
 	// upstream message must not silently become the current value).
 	ErrStaleQuote = errors.New("marketdata: quote is older than the stored latest quote")
 
+	// ErrUnknownInterval is returned for an interval the candles table does
+	// not store (migration 000020 allows 1m, 15m, 1h and 4h).
+	ErrUnknownInterval = errors.New("marketdata: unknown candle interval")
+
+	// ErrNotIntervalAligned is returned when a native candle's open time is
+	// not a boundary of its interval.
+	ErrNotIntervalAligned = errors.New("marketdata: open_time is not aligned to its interval")
+
+	// ErrNativeCandleNotClosed is returned by InsertClosed when the candle's
+	// close time has not passed yet: only closed native candles are stored.
+	ErrNativeCandleNotClosed = errors.New("marketdata: native candle has not closed yet")
+
 	// ErrQuoteNotFound is returned when no latest quote exists yet for an
 	// instrument.
 	ErrQuoteNotFound = errors.New("marketdata: quote not found")

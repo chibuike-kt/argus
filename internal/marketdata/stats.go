@@ -343,6 +343,7 @@ func (s *Store) Stats(ctx context.Context, instrumentID int64) (Stats, error) {
 		VolumeWindowSeconds:           int64(volume24hWindow / time.Second),
 		FormingReferenceOffsetSeconds: int64(formingReferenceOffset / time.Second),
 		ClosedReferenceOffsetSeconds:  int64(closedReferenceOffset / time.Second),
+		Interval:                      string(Interval1m),
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Stats{InstrumentID: instrumentID, Performance: emptyPerformance()}, nil

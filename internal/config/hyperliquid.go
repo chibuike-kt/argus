@@ -114,4 +114,22 @@ type Hyperliquid struct {
 	// CatalogRefreshInterval. Implementation values. [U]
 	SupervisorInterval     time.Duration `env:"ARGUS_HYPERLIQUID_SUPERVISOR_INTERVAL" envDefault:"15s"`      // [U]
 	CatalogRefreshInterval time.Duration `env:"ARGUS_HYPERLIQUID_CATALOG_REFRESH_INTERVAL" envDefault:"24h"` // [U]
+
+	// NativeVolumeNoiseDivisor is L1.1 decision 1's float-noise threshold
+	// for NATIVE higher timeframe candles only: a volume with more decimals
+	// than the instrument's quantity scale is rounded (half to even) when
+	// it differs from the rounded value by less than one unit of the scale
+	// divided by this number (1000: 1/1000 of a unit); anything larger is
+	// rejected. Default ingestion.DefaultNativeVolumeNoiseDivisor, which a
+	// value <= 0 also keeps. 1 minute ingestion never rounds.
+	NativeVolumeNoiseDivisor int64 `env:"ARGUS_HYPERLIQUID_NATIVE_VOLUME_NOISE_DIVISOR" envDefault:"1000"`
+	// NativeRereadInterval is how often each symbol re-reads its two most
+	// recent closed native candles per interval (15m, 1h, 4h) and applies
+	// the 1 minute revision rule to them: L1.1 decision 6, "at the existing
+	// 5 minute periodic backfill". The existing periodic 1 minute backfill
+	// actually runs every PeriodicBackfillInterval (60s) over a 5 minute
+	// window, so this has its own setting at the 5 minutes the decision
+	// names. Cost with 8 symbols: 3 requests of weight 21 per symbol, about
+	// 101 weight per minute at 5 minutes. <= 0 turns the re-read off.
+	NativeRereadInterval time.Duration `env:"ARGUS_HYPERLIQUID_NATIVE_REREAD_INTERVAL" envDefault:"5m"`
 }
