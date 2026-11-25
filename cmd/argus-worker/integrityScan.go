@@ -72,8 +72,8 @@ func integrityScan(ctx context.Context, reason, symbol string, svc *ingestion.Se
 	var missing int64
 	desc := make([]string, len(ranges))
 	for i, r := range ranges {
-		missing += r.Minutes
-		desc[i] = fmt.Sprintf("%s..%s (%dm)", r.Start.Format(time.RFC3339), r.End.Format(time.RFC3339), r.Minutes)
+		missing += r.Slots
+		desc[i] = fmt.Sprintf("%s..%s (%dm)", r.Start.Format(time.RFC3339), r.End.Format(time.RFC3339), r.Slots)
 	}
 	logger.Warn("hyperliquid: integrity scan found holes in the stored candles",
 		"reason", reason, "symbol", symbol, "ranges", desc, "missing_minutes", missing)
@@ -131,7 +131,7 @@ func integrityScan(ctx context.Context, reason, symbol string, svc *ingestion.Se
 	var still int64
 	if err == nil {
 		for _, r := range remaining {
-			still += r.Minutes
+			still += r.Slots
 		}
 	}
 	logger.Info("hyperliquid: integrity scan repaired holes",
@@ -155,6 +155,11 @@ func runPeriodicIntegrityScan(ctx context.Context, symbol string, svc *ingestion
 			return
 		case <-t.C:
 			integrityScan(ctx, "periodic", symbol, svc, state, cfg, logger, clk)
+			if ns, ok := state.(nativeState); ok && svc.SupportsNative() {
+				for _, iv := range marketdata.NativeIntervals() {
+					nativeIntegrityScan(ctx, "periodic", symbol, iv, svc, ns, cfg, logger, clk)
+				}
+			}
 		}
 	}
 }

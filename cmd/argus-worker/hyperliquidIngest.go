@@ -86,6 +86,7 @@ func startHyperliquidIngest(
 	normalizer := ingestion.NewNormalizer(cache, clk)
 	svc := ingestion.NewService(hyperliquid.ProviderName, provider, normalizer, cache, marketdataStore, marketdata.ContinuousCalendar{}, logger)
 	svc.SetPublisher(publisher)
+	svc.SetNativeVolumeNoiseDivisor(cfg.Hyperliquid.NativeVolumeNoiseDivisor)
 
 	logger.Warn("worker: ARGUS_INGEST_PROVIDER=hyperliquid is enabled -- ingesting real Hyperliquid data for private research use only (ADR-007 rights not yet confirmed); no instrument this creates is ever enabled by this process",
 		"symbols", cfg.Hyperliquid.Symbols, "backfill_days", cfg.Hyperliquid.BackfillDays)
@@ -115,6 +116,19 @@ func startupBackfillOptions(cfg config.Config, hooks symbolHooks) backfillOption
 		},
 		slot: hooks.gate,
 	}
+	if hooks.gate != nil {
+		opt.retryCap = cfg.Hyperliquid.NewSymbolBackfillRetryCap
+	}
+	return opt
+}
+
+// nativeBackfillOptions shape a symbol's native first-run backfill: the
+// same slot rules as the 1 minute startup backfill (a slot per attempt,
+// never across the delay; the longer retry cap when supervised), but it
+// reports nothing to the watchlist row, which reflects the 1 minute
+// pipeline.
+func nativeBackfillOptions(cfg config.Config, hooks symbolHooks) backfillOptions {
+	opt := backfillOptions{slot: hooks.gate}
 	if hooks.gate != nil {
 		opt.retryCap = cfg.Hyperliquid.NewSymbolBackfillRetryCap
 	}
@@ -167,6 +181,17 @@ func runHyperliquidSymbolWith(ctx context.Context, symbol string, svc *ingestion
 	// already inside the stored series are found and repaired here.
 	integrityScan(ctx, "startup", symbol, svc, state, cfg, logger, clk)
 
+	// Native 15m, 1h and 4h candles (L1.1): backfilled after the 1 minute
+	// startup backfill, alongside the live stream so it never delays it;
+	// each candle is then fetched as soon as the 1 minute stream closes its
+	// window (onClosed). nativeCandles.go.
+	var onClosed func(time.Time)
+	if ns, ok := state.(nativeState); ok && svc.SupportsNative() {
+		follower := newNativeFollower(symbol, svc, cfg, logger, clk)
+		onClosed = follower.notify
+		startNative(ctx, symbol, svc, ns, cfg, logger, clk, nativeBackfillOptions(cfg, hooks), follower)
+	}
+
 	attempt := 0
 	for {
 		if ctx.Err() != nil {
@@ -194,7 +219,7 @@ func runHyperliquidSymbolWith(ctx context.Context, symbol string, svc *ingestion
 			runPeriodicIntegrityScan(periodicCtx, symbol, svc, state, cfg, logger, clk)
 		}()
 
-		err := svc.WatchCandles(ctx, symbol)
+		err := svc.WatchCandlesNotify(ctx, symbol, onClosed)
 		cancelPeriodic()
 		<-periodicDone
 		<-scanDone

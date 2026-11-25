@@ -56,6 +56,7 @@ func (x *flakyExchange) rest(w http.ResponseWriter, r *http.Request) {
 		Type string `json:"type"`
 		Req  struct {
 			Coin      string `json:"coin"`
+			Interval  string `json:"interval"`
 			StartTime int64  `json:"startTime"`
 			EndTime   int64  `json:"endTime"`
 		} `json:"req"`
@@ -65,6 +66,18 @@ func (x *flakyExchange) rest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	coin := body.Req.Coin
+	if body.Req.Interval != "" && body.Req.Interval != "1m" {
+		// Native 15m/1h/4h requests (L1.1) are served apart from the 1
+		// minute ones, so they never consume killFirst or the call counts
+		// this test asserts on; a rejected coin is rejected at every interval.
+		if x.reject[coin] {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`"Unknown coin ` + coin + `"`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(fakeNativeCandles(coin, body.Req.Interval, body.Req.StartTime, body.Req.EndTime, "10.00", x.history))
+		return
+	}
 	x.mu.Lock()
 	x.calls[coin]++
 	n := x.calls[coin]

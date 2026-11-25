@@ -84,12 +84,19 @@ func (x *fakeExchange) rest(w http.ResponseWriter, r *http.Request) {
 		Type string `json:"type"`
 		Req  struct {
 			Coin      string `json:"coin"`
+			Interval  string `json:"interval"`
 			StartTime int64  `json:"startTime"`
 			EndTime   int64  `json:"endTime"`
 		} `json:"req"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Type != "candleSnapshot" {
 		_, _ = w.Write([]byte("[]"))
+		return
+	}
+	if body.Req.Interval != "" && body.Req.Interval != "1m" {
+		// Native 15m/1h/4h requests (L1.1): a few recent candles of the
+		// requested interval, so this 1 minute test is not slowed by them.
+		_ = json.NewEncoder(w).Encode(fakeNativeCandles(body.Req.Coin, body.Req.Interval, body.Req.StartTime, body.Req.EndTime, "100.0", 0))
 		return
 	}
 	x.snapshots.Add(1)
