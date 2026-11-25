@@ -3,17 +3,20 @@ import { ConflictError, RejectedError, VersionedSync, type Remote, type SyncAdap
 import { LocalStorageDrawingsPersistence, type DrawingsPersistence } from "./store";
 import type { Drawing } from "./types";
 
-// Drawings per chart (instrument + timeframe), stored on the server per user
-// (owner decision D1, brief-argus-product-overhaul.md Phase 1), with the
-// existing localStorage copy as the instant cache. One VersionedSync per
-// chart; drawings merge by id, so two tabs editing different drawings on
-// the same chart never overwrite each other.
+// Drawings per instrument, stored on the server per user (owner decision D1,
+// brief-argus-product-overhaul.md Phase 1), with the existing localStorage
+// copy as the instant cache. A drawing belongs to the instrument and shows
+// on every timeframe (owner decision D17; ADR-008: "User drawings must
+// remain anchored consistently when users change chart timeframes"). One
+// VersionedSync per instrument; drawings merge by id, so two tabs editing
+// different drawings on the same instrument never overwrite each other.
 
 // [U] UI values, the same as preferences.
 const DEBOUNCE_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
 const META_PREFIX = "argus:drawings-sync:v1:";
-const SCOPE = /^([1-9][0-9]*):(1m|5m|15m|1h|4h|1d)$/;
+// A scope is an instrument id (D17). Before D17 it was "id:timeframe".
+const SCOPE = /^([1-9][0-9]*)$/;
 const ORDER_KEY = "__order";
 
 export const drawingsAdapter: SyncAdapter<Drawing[]> = {
@@ -51,8 +54,8 @@ function asDrawings(v: unknown): Drawing[] {
   return Array.isArray(v) ? (v.filter((d) => d && typeof d === "object" && typeof d.id === "string" && typeof d.kind === "string") as Drawing[]) : [];
 }
 
-function remoteFor(instrumentId: number, timeframe: string): Remote<Drawing[]> {
-  const path = `/me/drawings?instrument_id=${instrumentId}&timeframe=${timeframe}`;
+function remoteFor(instrumentId: number): Remote<Drawing[]> {
+  const path = `/me/drawings?instrument_id=${instrumentId}`;
   return {
     async get() {
       const r = await getJSON<{ data: unknown; version: number }>(path);
@@ -113,7 +116,7 @@ function writeMeta(userId: number, scope: string, meta: Meta): void {
 export class SyncedDrawingsPersistence implements DrawingsPersistence {
   private local = new LocalStorageDrawingsPersistence();
   private syncs = new Map<string, VersionedSync<Drawing[]>>();
-  private legacy = new Map<string, string>();
+  private legacy = new Map<string, string[]>();
   // Charts already loaded this session, so a user attached later (session
   // restore finishes after the chart mounts) still starts their sync.
   private loaded = new Set<string>();
@@ -133,18 +136,23 @@ export class SyncedDrawingsPersistence implements DrawingsPersistence {
     if (userId !== null) for (const scope of this.loaded) this.ensureSync(scope, this.local.load(scope) ?? []);
   }
 
-  // aliasLegacy maps a chart's id-based scope to the symbol-based key its
-  // drawings were cached under before they moved to the server.
-  aliasLegacy(scope: string, legacyScope: string): void {
-    this.legacy.set(scope, legacyScope);
+  // aliasLegacy names the keys an instrument's drawings were cached under
+  // before: one per timeframe ("id:1m" ... "id:1d", before D17) and, older
+  // still, by symbol ("BTC:1m" ...). The first load of the instrument with
+  // nothing cached under its own key merges them all, once (mergeDrawingLists).
+  aliasLegacy(scope: string, legacyScopes: string[]): void {
+    this.legacy.set(scope, legacyScopes);
   }
 
   load(scope: string): Drawing[] | null {
     let data = this.local.load(scope);
-    const legacyKey = this.legacy.get(scope);
-    if (data === null && legacyKey) {
-      data = this.local.load(legacyKey);
-      if (data) this.local.save(scope, data);
+    const legacyKeys = this.legacy.get(scope);
+    if (data === null && legacyKeys && legacyKeys.length > 0) {
+      const found = legacyKeys.map((k) => this.local.load(k)).filter((d): d is Drawing[] => d !== null);
+      if (found.length > 0) {
+        data = mergeDrawingLists(found);
+        this.local.save(scope, data);
+      }
     }
     this.loaded.add(scope);
     this.ensureSync(scope, data ?? []);
@@ -176,7 +184,7 @@ export class SyncedDrawingsPersistence implements DrawingsPersistence {
       baseVersion: 0,
       dirty: data.length > 0 ? drawingsAdapter.keys(data) : [],
     };
-    const sync = new VersionedSync(drawingsAdapter, remoteFor(Number(m[1]), m[2]), { data, ...meta }, {
+    const sync = new VersionedSync(drawingsAdapter, remoteFor(Number(m[1])), { data, ...meta }, {
       debounceMs: DEBOUNCE_MS,
       maxBackoffMs: MAX_BACKOFF_MS,
       onChange: (state) => {
@@ -188,4 +196,24 @@ export class SyncedDrawingsPersistence implements DrawingsPersistence {
     this.syncs.set(scope, sync);
     void sync.pull().catch(() => {}); // server down: the local copy stands
   }
+}
+
+// mergeDrawingLists merges drawing lists cached per timeframe before D17
+// into one, the rule the server's merge uses (internal/preferences,
+// MergeTimeframeDrawings): every drawing kept once per id; a duplicate
+// keeps its most recently changed copy (larger updatedAt; a tie goes to
+// the later list); z order (last is in front) follows the lists in the
+// order given, each in its own order, a duplicate sitting where its kept
+// copy sat.
+export function mergeDrawingLists(lists: Drawing[][]): Drawing[] {
+  const best = new Map<string, { seq: number; d: Drawing }>();
+  let seq = 0;
+  for (const list of lists) {
+    for (const d of list) {
+      const prev = best.get(d.id);
+      if (!prev || (d.updatedAt ?? 0) >= (prev.d.updatedAt ?? 0)) best.set(d.id, { seq, d });
+      seq++;
+    }
+  }
+  return [...best.values()].sort((a, b) => a.seq - b.seq).map((x) => x.d);
 }

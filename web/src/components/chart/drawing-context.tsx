@@ -43,8 +43,8 @@ export function DrawingProvider({ children }: { children: ReactNode }) {
   const setLocked = (v: boolean) => preferences.setEntry("drawing_tools", "locked", v);
   const setHidden = (v: boolean) => preferences.setEntry("drawing_tools", "hidden", v);
 
-  // Scoped by instrument + timeframe (ADR-008): switching either swaps
-  // the visible set. instrument.native_symbol is the real selected
+  // Scoped by instrument (D17): switching instrument swaps the visible
+  // set; switching timeframe does not. instrument.native_symbol is the real selected
   // instrument now (GET /instruments, via the workspace this provider
   // is always mounted inside -- analysis-preview.tsx), not a fixture
   // import; a page with no instrument resolved yet scopes to a fixed
@@ -59,11 +59,13 @@ export function DrawingProvider({ children }: { children: ReactNode }) {
   // source of truth has to live there, read back here through the same
   // useAnalysisWorkspace() call this provider already makes.
   const { instrument, timeframe, setTimeframe } = useAnalysisWorkspace();
-  // Scoped by instrument id + timeframe -- the key the server stores
-  // drawings under (D1). The symbol-based key drawings were cached under
-  // before is aliased, so existing drawings carry over once.
-  const scope = instrument ? `${instrument.id}:${timeframe}` : `unresolved:${timeframe}`;
-  if (instrument) getDrawingsPersistence().aliasLegacy(scope, `${instrument.native_symbol}:${timeframe}`);
+  // Scoped by instrument id alone (owner decision D17): a drawing belongs
+  // to the instrument and shows on every timeframe, so a timeframe switch
+  // keeps the same drawings and the same undo history. The keys drawings
+  // were cached under before (per timeframe by id, and older, per
+  // timeframe by symbol) are merged into this one once.
+  const scope = instrument ? `${instrument.id}` : "unresolved";
+  if (instrument) getDrawingsPersistence().aliasLegacy(scope, legacyDrawingScopes(instrument.id, instrument.native_symbol));
   const drawings = useDrawingsStore(scope);
 
   return (
@@ -87,6 +89,14 @@ export function DrawingProvider({ children }: { children: ReactNode }) {
       {children}
     </Ctx.Provider>
   );
+}
+
+// legacyDrawingScopes are the cache keys an instrument's drawings had before
+// D17: one per timeframe by instrument id, and before those, by symbol.
+// Shortest timeframe first, ids before symbols (the newer of the two).
+export function legacyDrawingScopes(instrumentId: number, symbol: string): string[] {
+  const tfs = ["1m", "5m", "15m", "1h", "4h", "1d"];
+  return [...tfs.map((tf) => `${symbol}:${tf}`), ...tfs.map((tf) => `${instrumentId}:${tf}`)];
 }
 
 export function useDrawing() {

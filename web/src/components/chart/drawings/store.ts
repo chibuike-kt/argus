@@ -46,7 +46,7 @@ const EMPTY_STATE: State = { order: [], byId: {}, selectedId: null };
 const MAX_HISTORY = 50;
 
 /**
- * Owns one instrument+timeframe's drawings: the ordered id list (z-order,
+ * Owns one instrument's drawings (every timeframe, owner decision D17): the ordered id list (z-order,
  * last = front), undo/redo as full-state snapshots (drawing counts are small
  * -- a dozen-plus, not thousands -- so snapshotting is simpler than patches
  * and plenty fast), and persistence through a swappable adapter. Selection
@@ -73,7 +73,8 @@ export class DrawingsStore {
 
   getSnapshot = (): State => this.state;
 
-  // Switches which instrument+timeframe this store reflects: persists the
+  // Switches which instrument this store reflects (a timeframe switch does
+  // not call this, so it keeps the drawings and their undo history): persists the
   // outgoing scope (in case a save was pending only in memory), loads the
   // incoming one, and resets undo/redo -- history does not cross scopes.
   setScope(scopeKey: string) {
@@ -203,7 +204,7 @@ export class DrawingsStore {
 }
 
 // A single store instance for the whole app session; scoped internally by
-// instrument+timeframe via setScope. One instance (not one per scope) keeps
+// instrument via setScope. One instance (not one per scope) keeps
 // the undo stack intentionally scope-local (reset on switch) while letting
 // every consumer share the same subscription.
 let sharedStore: DrawingsStore | null = null;
