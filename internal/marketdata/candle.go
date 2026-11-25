@@ -44,6 +44,9 @@ type Candle struct {
 	// acted, not anything the exchange reported.
 	SupersededAt *clock.ProcessingTime
 	SupersededBy *int64
+	// Interval is the series this candle belongs to (1m, or a native
+	// 15m, 1h or 4h candle).
+	Interval Interval
 }
 
 func fromCandleRow(row store.Candle) Candle {
@@ -62,6 +65,7 @@ func fromCandleRow(row store.Candle) Candle {
 		TickAligned:  row.TickAligned,
 		Provider:     row.Provider,
 		IngestedAt:   clock.NewIngestionTime(row.IngestedAt),
+		Interval:     Interval(row.Interval),
 	}
 	if row.SupersededAt.Valid {
 		t := clock.NewProcessingTime(row.SupersededAt.Time)

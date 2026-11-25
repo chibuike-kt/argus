@@ -17,12 +17,13 @@ const beginSupersedeCandle = `-- name: BeginSupersedeCandle :execrows
 
 UPDATE candles
 SET superseded_at = $2
-WHERE id = $1 AND is_closed = true AND superseded_at IS NULL
+WHERE id = $1 AND interval = $3 AND is_closed = true AND superseded_at IS NULL
 `
 
 type BeginSupersedeCandleParams struct {
 	ID           int64        `json:"id"`
 	SupersededAt sql.NullTime `json:"superseded_at"`
+	Interval     string       `json:"interval"`
 }
 
 // The three statements below are the correction handshake's three steps
@@ -30,7 +31,7 @@ type BeginSupersedeCandleParams struct {
 // marketdata.Store.SupersedeCandle, which runs all three in one
 // transaction). None of them is meaningful on its own.
 func (q *Queries) BeginSupersedeCandle(ctx context.Context, arg BeginSupersedeCandleParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, beginSupersedeCandle, arg.ID, arg.SupersededAt)
+	result, err := q.db.ExecContext(ctx, beginSupersedeCandle, arg.ID, arg.SupersededAt, arg.Interval)
 	if err != nil {
 		return 0, err
 	}
@@ -40,13 +41,14 @@ func (q *Queries) BeginSupersedeCandle(ctx context.Context, arg BeginSupersedeCa
 const closeCandle = `-- name: CloseCandle :one
 UPDATE candles
 SET is_closed = true
-WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL AND is_closed = false
-RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by
+WHERE instrument_id = $1 AND open_time = $2 AND interval = $3 AND superseded_at IS NULL AND is_closed = false
+RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval
 `
 
 type CloseCandleParams struct {
 	InstrumentID int64     `json:"instrument_id"`
 	OpenTime     time.Time `json:"open_time"`
+	Interval     string    `json:"interval"`
 }
 
 // CloseCandle freezes a forming candle. The is_closed = false guard makes a
@@ -56,7 +58,7 @@ type CloseCandleParams struct {
 // than a confusing trigger error (guide 14: queue/worker retries must not
 // turn a repeat delivery into a spurious failure).
 func (q *Queries) CloseCandle(ctx context.Context, arg CloseCandleParams) (Candle, error) {
-	row := q.db.QueryRowContext(ctx, closeCandle, arg.InstrumentID, arg.OpenTime)
+	row := q.db.QueryRowContext(ctx, closeCandle, arg.InstrumentID, arg.OpenTime, arg.Interval)
 	var i Candle
 	err := row.Scan(
 		&i.ID,
@@ -75,6 +77,7 @@ func (q *Queries) CloseCandle(ctx context.Context, arg CloseCandleParams) (Candl
 		&i.IngestedAt,
 		&i.SupersededAt,
 		&i.SupersededBy,
+		&i.Interval,
 	)
 	return i, err
 }
@@ -83,8 +86,8 @@ const closeCandleWithValues = `-- name: CloseCandleWithValues :one
 UPDATE candles
 SET open = $3, high = $4, low = $5, close = $6, volume = $7,
     tick_aligned = $8, provider = $9, ingested_at = $10, is_closed = true
-WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL AND is_closed = false
-RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by
+WHERE instrument_id = $1 AND open_time = $2 AND interval = $11 AND superseded_at IS NULL AND is_closed = false
+RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval
 `
 
 type CloseCandleWithValuesParams struct {
@@ -98,6 +101,7 @@ type CloseCandleWithValuesParams struct {
 	TickAligned  bool      `json:"tick_aligned"`
 	Provider     string    `json:"provider"`
 	IngestedAt   time.Time `json:"ingested_at"`
+	Interval     string    `json:"interval"`
 }
 
 // CloseCandleWithValues freezes a forming candle WITH the final values in
@@ -118,6 +122,7 @@ func (q *Queries) CloseCandleWithValues(ctx context.Context, arg CloseCandleWith
 		arg.TickAligned,
 		arg.Provider,
 		arg.IngestedAt,
+		arg.Interval,
 	)
 	var i Candle
 	err := row.Scan(
@@ -137,18 +142,21 @@ func (q *Queries) CloseCandleWithValues(ctx context.Context, arg CloseCandleWith
 		&i.IngestedAt,
 		&i.SupersededAt,
 		&i.SupersededBy,
+		&i.Interval,
 	)
 	return i, err
 }
 
 const countClosedCandlesInRange = `-- name: CountClosedCandlesInRange :one
 SELECT count(*)::bigint FROM candles
-WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
-  AND open_time >= $2::timestamptz AND open_time < $3::timestamptz
+WHERE instrument_id = $1 AND interval = $2
+  AND superseded_at IS NULL AND is_closed = true
+  AND open_time >= $3::timestamptz AND open_time < $4::timestamptz
 `
 
 type CountClosedCandlesInRangeParams struct {
 	InstrumentID int64     `json:"instrument_id"`
+	Interval     string    `json:"interval"`
 	FromTime     time.Time `json:"from_time"`
 	ToTime       time.Time `json:"to_time"`
 }
@@ -157,7 +165,12 @@ type CountClosedCandlesInRangeParams struct {
 // open_time in [from_time, to_time) -- the integrity scan's "how many of
 // this hole's minutes are now filled" check.
 func (q *Queries) CountClosedCandlesInRange(ctx context.Context, arg CountClosedCandlesInRangeParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countClosedCandlesInRange, arg.InstrumentID, arg.FromTime, arg.ToTime)
+	row := q.db.QueryRowContext(ctx, countClosedCandlesInRange,
+		arg.InstrumentID,
+		arg.Interval,
+		arg.FromTime,
+		arg.ToTime,
+	)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -167,7 +180,7 @@ const getCandleStatsInputs = `-- name: GetCandleStatsInputs :one
 WITH anchor AS (
     SELECT a.open_time, a.close, a.volume, a.is_closed, a.ingested_at
     FROM candles a
-    WHERE a.instrument_id = $4
+    WHERE a.instrument_id = $4 AND a.interval = $5
       AND a.superseded_at IS NULL
     ORDER BY a.open_time DESC
     LIMIT 1
@@ -175,7 +188,7 @@ WITH anchor AS (
 latest AS (
     SELECT c.open_time, c.close
     FROM candles c
-    WHERE c.instrument_id = $4
+    WHERE c.instrument_id = $4 AND c.interval = $5
       AND c.superseded_at IS NULL AND c.is_closed = true
     ORDER BY c.open_time DESC
     LIMIT 1
@@ -200,7 +213,7 @@ SELECT
         SELECT r.id IS NOT NULL
         FROM unnest($3::bigint[]) WITH ORDINALITY AS o(secs, ord)
         LEFT JOIN candles r
-          ON r.instrument_id = $4
+          ON r.instrument_id = $4 AND r.interval = $5
          AND r.superseded_at IS NULL AND r.is_closed = true
          AND r.open_time = latest.open_time - o.secs * interval '1 second'
         ORDER BY o.ord
@@ -209,7 +222,7 @@ SELECT
         SELECT coalesce(r.close, 0)
         FROM unnest($3::bigint[]) WITH ORDINALITY AS o(secs, ord)
         LEFT JOIN candles r
-          ON r.instrument_id = $4
+          ON r.instrument_id = $4 AND r.interval = $5
          AND r.superseded_at IS NULL AND r.is_closed = true
          AND r.open_time = latest.open_time - o.secs * interval '1 second'
         ORDER BY o.ord
@@ -219,7 +232,7 @@ LEFT JOIN latest ON true
 LEFT JOIN LATERAL (
     SELECT rc.close
     FROM candles rc
-    WHERE rc.instrument_id = $4
+    WHERE rc.instrument_id = $4 AND rc.interval = $5
       AND rc.superseded_at IS NULL AND rc.is_closed = true
       AND rc.open_time = anchor.open_time - (CASE WHEN anchor.is_closed
           THEN $1::bigint
@@ -228,9 +241,9 @@ LEFT JOIN LATERAL (
 CROSS JOIN LATERAL (
     SELECT count(*)::bigint AS n, coalesce(sum(v.volume), 0)::bigint AS total
     FROM candles v
-    WHERE v.instrument_id = $4
+    WHERE v.instrument_id = $4 AND v.interval = $5
       AND v.superseded_at IS NULL AND v.is_closed = true
-      AND v.open_time > anchor.open_time - $5::bigint * interval '1 second'
+      AND v.open_time > anchor.open_time - $6::bigint * interval '1 second'
       AND v.open_time < anchor.open_time
 ) vol
 `
@@ -240,6 +253,7 @@ type GetCandleStatsInputsParams struct {
 	FormingReferenceOffsetSeconds int64   `json:"forming_reference_offset_seconds"`
 	OffsetsSeconds                []int64 `json:"offsets_seconds"`
 	InstrumentID                  int64   `json:"instrument_id"`
+	Interval                      string  `json:"interval"`
 	VolumeWindowSeconds           int64   `json:"volume_window_seconds"`
 }
 
@@ -305,6 +319,7 @@ func (q *Queries) GetCandleStatsInputs(ctx context.Context, arg GetCandleStatsIn
 		arg.FormingReferenceOffsetSeconds,
 		pq.Array(arg.OffsetsSeconds),
 		arg.InstrumentID,
+		arg.Interval,
 		arg.VolumeWindowSeconds,
 	)
 	var i GetCandleStatsInputsRow
@@ -329,17 +344,21 @@ func (q *Queries) GetCandleStatsInputs(ctx context.Context, arg GetCandleStatsIn
 }
 
 const getCurrentCandle = `-- name: GetCurrentCandle :one
-SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
-WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL
+SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval FROM candles
+WHERE instrument_id = $1 AND open_time = $2 AND interval = $3 AND superseded_at IS NULL
 `
 
 type GetCurrentCandleParams struct {
 	InstrumentID int64     `json:"instrument_id"`
 	OpenTime     time.Time `json:"open_time"`
+	Interval     string    `json:"interval"`
 }
 
+// Every query in this file names its interval explicitly (L1.1): 1m is
+// the canonical live series, 15m, 1h and 4h the native series, all in this
+// one table. A query that left the interval out would mix series.
 func (q *Queries) GetCurrentCandle(ctx context.Context, arg GetCurrentCandleParams) (Candle, error) {
-	row := q.db.QueryRowContext(ctx, getCurrentCandle, arg.InstrumentID, arg.OpenTime)
+	row := q.db.QueryRowContext(ctx, getCurrentCandle, arg.InstrumentID, arg.OpenTime, arg.Interval)
 	var i Candle
 	err := row.Scan(
 		&i.ID,
@@ -358,23 +377,29 @@ func (q *Queries) GetCurrentCandle(ctx context.Context, arg GetCurrentCandlePara
 		&i.IngestedAt,
 		&i.SupersededAt,
 		&i.SupersededBy,
+		&i.Interval,
 	)
 	return i, err
 }
 
 const getLatestClosedCandle = `-- name: GetLatestClosedCandle :one
-SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
-WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval FROM candles
+WHERE instrument_id = $1 AND interval = $2 AND superseded_at IS NULL AND is_closed = true
 ORDER BY open_time DESC
 LIMIT 1
 `
+
+type GetLatestClosedCandleParams struct {
+	InstrumentID int64  `json:"instrument_id"`
+	Interval     string `json:"interval"`
+}
 
 // GetLatestClosedCandle returns the most recent current, closed candle
 // for an instrument -- used to bound a replay (e.g. a candle
 // correction's recompute) at "now" in candle terms, without the caller
 // needing to know what "now" means for this instrument's series.
-func (q *Queries) GetLatestClosedCandle(ctx context.Context, instrumentID int64) (Candle, error) {
-	row := q.db.QueryRowContext(ctx, getLatestClosedCandle, instrumentID)
+func (q *Queries) GetLatestClosedCandle(ctx context.Context, arg GetLatestClosedCandleParams) (Candle, error) {
+	row := q.db.QueryRowContext(ctx, getLatestClosedCandle, arg.InstrumentID, arg.Interval)
 	var i Candle
 	err := row.Scan(
 		&i.ID,
@@ -393,6 +418,76 @@ func (q *Queries) GetLatestClosedCandle(ctx context.Context, instrumentID int64)
 		&i.IngestedAt,
 		&i.SupersededAt,
 		&i.SupersededBy,
+		&i.Interval,
+	)
+	return i, err
+}
+
+const insertClosedCandle = `-- name: InsertClosedCandle :one
+INSERT INTO candles (
+    instrument_id, open_time, close_time, open, high, low, close, volume,
+    revision, is_closed, tick_aligned, provider, ingested_at, interval
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, TRUE, $9, $10, $11, $12)
+ON CONFLICT (instrument_id, interval, open_time) WHERE superseded_at IS NULL
+DO NOTHING
+RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval
+`
+
+type InsertClosedCandleParams struct {
+	InstrumentID int64     `json:"instrument_id"`
+	OpenTime     time.Time `json:"open_time"`
+	CloseTime    time.Time `json:"close_time"`
+	Open         int64     `json:"open"`
+	High         int64     `json:"high"`
+	Low          int64     `json:"low"`
+	Close        int64     `json:"close"`
+	Volume       int64     `json:"volume"`
+	TickAligned  bool      `json:"tick_aligned"`
+	Provider     string    `json:"provider"`
+	IngestedAt   time.Time `json:"ingested_at"`
+	Interval     string    `json:"interval"`
+}
+
+// InsertClosedCandle stores a native candle that is already closed (15m,
+// 1h, 4h: only closed native candles are stored, never a forming row) at
+// revision 1. A current row already at this (instrument, interval,
+// open_time) wins: zero rows, and the caller compares the stored values and
+// corrects through the ordinary handshake if they differ.
+func (q *Queries) InsertClosedCandle(ctx context.Context, arg InsertClosedCandleParams) (Candle, error) {
+	row := q.db.QueryRowContext(ctx, insertClosedCandle,
+		arg.InstrumentID,
+		arg.OpenTime,
+		arg.CloseTime,
+		arg.Open,
+		arg.High,
+		arg.Low,
+		arg.Close,
+		arg.Volume,
+		arg.TickAligned,
+		arg.Provider,
+		arg.IngestedAt,
+		arg.Interval,
+	)
+	var i Candle
+	err := row.Scan(
+		&i.ID,
+		&i.InstrumentID,
+		&i.OpenTime,
+		&i.CloseTime,
+		&i.Open,
+		&i.High,
+		&i.Low,
+		&i.Close,
+		&i.Volume,
+		&i.Revision,
+		&i.IsClosed,
+		&i.TickAligned,
+		&i.Provider,
+		&i.IngestedAt,
+		&i.SupersededAt,
+		&i.SupersededBy,
+		&i.Interval,
 	)
 	return i, err
 }
@@ -400,10 +495,10 @@ func (q *Queries) GetLatestClosedCandle(ctx context.Context, instrumentID int64)
 const insertCorrectingCandle = `-- name: InsertCorrectingCandle :one
 INSERT INTO candles (
     instrument_id, open_time, close_time, open, high, low, close, volume,
-    revision, is_closed, tick_aligned, provider, ingested_at
+    revision, is_closed, tick_aligned, provider, ingested_at, interval
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11, $12)
-RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11, $12, $13)
+RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval
 `
 
 type InsertCorrectingCandleParams struct {
@@ -419,6 +514,7 @@ type InsertCorrectingCandleParams struct {
 	TickAligned  bool      `json:"tick_aligned"`
 	Provider     string    `json:"provider"`
 	IngestedAt   time.Time `json:"ingested_at"`
+	Interval     string    `json:"interval"`
 }
 
 func (q *Queries) InsertCorrectingCandle(ctx context.Context, arg InsertCorrectingCandleParams) (Candle, error) {
@@ -435,6 +531,7 @@ func (q *Queries) InsertCorrectingCandle(ctx context.Context, arg InsertCorrecti
 		arg.TickAligned,
 		arg.Provider,
 		arg.IngestedAt,
+		arg.Interval,
 	)
 	var i Candle
 	err := row.Scan(
@@ -454,13 +551,14 @@ func (q *Queries) InsertCorrectingCandle(ctx context.Context, arg InsertCorrecti
 		&i.IngestedAt,
 		&i.SupersededAt,
 		&i.SupersededBy,
+		&i.Interval,
 	)
 	return i, err
 }
 
 const listClosedCandlesInRangeLimited = `-- name: ListClosedCandlesInRangeLimited :many
-SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
-WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval FROM candles
+WHERE instrument_id = $1 AND interval = $5 AND superseded_at IS NULL AND is_closed = true
   AND open_time >= $2 AND open_time < $3
 ORDER BY open_time
 LIMIT $4
@@ -471,6 +569,7 @@ type ListClosedCandlesInRangeLimitedParams struct {
 	OpenTime     time.Time `json:"open_time"`
 	OpenTime_2   time.Time `json:"open_time_2"`
 	Limit        int32     `json:"limit"`
+	Interval     string    `json:"interval"`
 }
 
 // ListClosedCandlesInRangeLimited is GET /instruments/{id}/candles' own
@@ -487,6 +586,7 @@ func (q *Queries) ListClosedCandlesInRangeLimited(ctx context.Context, arg ListC
 		arg.OpenTime,
 		arg.OpenTime_2,
 		arg.Limit,
+		arg.Interval,
 	)
 	if err != nil {
 		return nil, err
@@ -512,6 +612,7 @@ func (q *Queries) ListClosedCandlesInRangeLimited(ctx context.Context, arg ListC
 			&i.IngestedAt,
 			&i.SupersededAt,
 			&i.SupersededBy,
+			&i.Interval,
 		); err != nil {
 			return nil, err
 		}
@@ -527,10 +628,10 @@ func (q *Queries) ListClosedCandlesInRangeLimited(ctx context.Context, arg ListC
 }
 
 const listClosedCandlesInRangeLimitedDesc = `-- name: ListClosedCandlesInRangeLimitedDesc :many
-SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
-WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
-  AND ($3::timestamptz IS NULL OR open_time >= $3::timestamptz)
-  AND ($4::timestamptz IS NULL OR open_time < $4::timestamptz)
+SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval FROM candles
+WHERE instrument_id = $1 AND interval = $3 AND superseded_at IS NULL AND is_closed = true
+  AND ($4::timestamptz IS NULL OR open_time >= $4::timestamptz)
+  AND ($5::timestamptz IS NULL OR open_time < $5::timestamptz)
 ORDER BY open_time DESC
 LIMIT $2
 `
@@ -538,6 +639,7 @@ LIMIT $2
 type ListClosedCandlesInRangeLimitedDescParams struct {
 	InstrumentID int64        `json:"instrument_id"`
 	Limit        int32        `json:"limit"`
+	Interval     string       `json:"interval"`
 	FromTime     sql.NullTime `json:"from_time"`
 	ToTime       sql.NullTime `json:"to_time"`
 }
@@ -557,6 +659,7 @@ func (q *Queries) ListClosedCandlesInRangeLimitedDesc(ctx context.Context, arg L
 	rows, err := q.db.QueryContext(ctx, listClosedCandlesInRangeLimitedDesc,
 		arg.InstrumentID,
 		arg.Limit,
+		arg.Interval,
 		arg.FromTime,
 		arg.ToTime,
 	)
@@ -584,6 +687,7 @@ func (q *Queries) ListClosedCandlesInRangeLimitedDesc(ctx context.Context, arg L
 			&i.IngestedAt,
 			&i.SupersededAt,
 			&i.SupersededBy,
+			&i.Interval,
 		); err != nil {
 			return nil, err
 		}
@@ -599,8 +703,8 @@ func (q *Queries) ListClosedCandlesInRangeLimitedDesc(ctx context.Context, arg L
 }
 
 const listCurrentCandlesInRange = `-- name: ListCurrentCandlesInRange :many
-SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by FROM candles
-WHERE instrument_id = $1 AND superseded_at IS NULL
+SELECT id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval FROM candles
+WHERE instrument_id = $1 AND interval = $4 AND superseded_at IS NULL
   AND open_time >= $2 AND open_time < $3
 ORDER BY open_time
 `
@@ -609,6 +713,7 @@ type ListCurrentCandlesInRangeParams struct {
 	InstrumentID int64     `json:"instrument_id"`
 	OpenTime     time.Time `json:"open_time"`
 	OpenTime_2   time.Time `json:"open_time_2"`
+	Interval     string    `json:"interval"`
 }
 
 // ListCurrentCandlesInRange is the read path aggregation uses: the current
@@ -617,7 +722,12 @@ type ListCurrentCandlesInRangeParams struct {
 // sum. A missing open_time in the result set is exactly the gap the caller
 // is responsible for detecting; this query does not fill gaps.
 func (q *Queries) ListCurrentCandlesInRange(ctx context.Context, arg ListCurrentCandlesInRangeParams) ([]Candle, error) {
-	rows, err := q.db.QueryContext(ctx, listCurrentCandlesInRange, arg.InstrumentID, arg.OpenTime, arg.OpenTime_2)
+	rows, err := q.db.QueryContext(ctx, listCurrentCandlesInRange,
+		arg.InstrumentID,
+		arg.OpenTime,
+		arg.OpenTime_2,
+		arg.Interval,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -642,6 +752,7 @@ func (q *Queries) ListCurrentCandlesInRange(ctx context.Context, arg ListCurrent
 			&i.IngestedAt,
 			&i.SupersededAt,
 			&i.SupersededBy,
+			&i.Interval,
 		); err != nil {
 			return nil, err
 		}
@@ -662,34 +773,38 @@ WITH missing AS (
     FROM generate_series(
         -- Start at the first stored candle in the window, not before it:
         -- minutes before an instrument's history begins are not holes.
-        greatest($1::timestamptz, (
+        greatest($2::timestamptz, (
             SELECT min(c0.open_time) FROM candles c0
-            WHERE c0.instrument_id = $2 AND c0.superseded_at IS NULL
-              AND c0.is_closed = true AND c0.open_time >= $1::timestamptz)),
-        $3::timestamptz - interval '1 minute', interval '1 minute') AS m
+            WHERE c0.instrument_id = $3 AND c0.interval = $1
+              AND c0.superseded_at IS NULL
+              AND c0.is_closed = true AND c0.open_time >= $2::timestamptz)),
+        $4::timestamptz - candle_interval_seconds($1) * interval '1 second',
+        candle_interval_seconds($1) * interval '1 second') AS m
     WHERE NOT EXISTS (
         SELECT 1 FROM candles c
-        WHERE c.instrument_id = $2 AND c.open_time = m
+        WHERE c.instrument_id = $3 AND c.interval = $1 AND c.open_time = m
           AND c.superseded_at IS NULL AND c.is_closed = true
     )
-    AND NOT (m < $4::timestamptz AND EXISTS (
+    AND NOT (m < $5::timestamptz AND EXISTS (
         SELECT 1 FROM candle_gaps g
-        WHERE g.instrument_id = $2 AND g.resolved_at IS NULL
+        WHERE g.instrument_id = $3 AND g.interval = $1
+          AND g.resolved_at IS NULL
           AND m >= g.gap_start AND m < g.gap_end
     ))
 ), grouped AS (
-    SELECT open_time, open_time - (row_number() OVER (ORDER BY open_time)) * interval '1 minute' AS grp
+    SELECT open_time, open_time - (row_number() OVER (ORDER BY open_time)) * (candle_interval_seconds($1) * interval '1 second') AS grp
     FROM missing
 )
 SELECT min(open_time)::timestamptz AS gap_start,
-       (max(open_time) + interval '1 minute')::timestamptz AS gap_end,
-       count(*)::bigint AS minutes
+       (max(open_time) + candle_interval_seconds($1) * interval '1 second')::timestamptz AS gap_end,
+       count(*)::bigint AS slots
 FROM grouped
 GROUP BY grp
 ORDER BY gap_start
 `
 
 type ListMissingCandleRangesParams struct {
+	Interval     string    `json:"interval"`
 	FromTime     time.Time `json:"from_time"`
 	InstrumentID int64     `json:"instrument_id"`
 	ToTime       time.Time `json:"to_time"`
@@ -699,7 +814,7 @@ type ListMissingCandleRangesParams struct {
 type ListMissingCandleRangesRow struct {
 	GapStart time.Time `json:"gap_start"`
 	GapEnd   time.Time `json:"gap_end"`
-	Minutes  int64     `json:"minutes"`
+	Slots    int64     `json:"slots"`
 }
 
 // ListMissingCandleRanges is the integrity scan's one statement: every
@@ -712,15 +827,18 @@ type ListMissingCandleRangesRow struct {
 // Minutes inside retention are always returned, whatever candle_gaps says:
 // an open gap row there is no proof the minutes cannot be fetched (the
 // dev stack has hundreds of unaligned, unresolved rows recorded by the
-// periodic backfill's own tail), and a fetchable hole must be filled. The series steps a fixed 1 minute, so the session TimeZone
-// (and DST) cannot change which minutes are expected.
+// periodic backfill's own tail), and a fetchable hole must be filled. The series steps a fixed length -- the interval's own,
+// candle_interval_seconds(interval) -- so the session TimeZone (and DST)
+// cannot change which slots are expected; gaps are read for the same
+// interval only. slots counts the missing candles of that interval.
 //
-// Cost: one index probe on idx_candles_current per expected minute (the
+// Cost: one index probe on idx_candles_current_by_interval per expected slot (the
 // anti-join) plus a probe of candle_gaps -- O(window minutes), independent
 // of total history; the grouping is one window function over the missing
 // minutes only.
 func (q *Queries) ListMissingCandleRanges(ctx context.Context, arg ListMissingCandleRangesParams) ([]ListMissingCandleRangesRow, error) {
 	rows, err := q.db.QueryContext(ctx, listMissingCandleRanges,
+		arg.Interval,
 		arg.FromTime,
 		arg.InstrumentID,
 		arg.ToTime,
@@ -733,7 +851,7 @@ func (q *Queries) ListMissingCandleRanges(ctx context.Context, arg ListMissingCa
 	items := []ListMissingCandleRangesRow{}
 	for rows.Next() {
 		var i ListMissingCandleRangesRow
-		if err := rows.Scan(&i.GapStart, &i.GapEnd, &i.Minutes); err != nil {
+		if err := rows.Scan(&i.GapStart, &i.GapEnd, &i.Slots); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -750,16 +868,17 @@ func (q *Queries) ListMissingCandleRanges(ctx context.Context, arg ListMissingCa
 const resolveSupersedeCandle = `-- name: ResolveSupersedeCandle :execrows
 UPDATE candles
 SET superseded_by = $2
-WHERE id = $1 AND superseded_at IS NOT NULL AND superseded_by IS NULL
+WHERE id = $1 AND interval = $3 AND superseded_at IS NOT NULL AND superseded_by IS NULL
 `
 
 type ResolveSupersedeCandleParams struct {
 	ID           int64         `json:"id"`
 	SupersededBy sql.NullInt64 `json:"superseded_by"`
+	Interval     string        `json:"interval"`
 }
 
 func (q *Queries) ResolveSupersedeCandle(ctx context.Context, arg ResolveSupersedeCandleParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, resolveSupersedeCandle, arg.ID, arg.SupersededBy)
+	result, err := q.db.ExecContext(ctx, resolveSupersedeCandle, arg.ID, arg.SupersededBy, arg.Interval)
 	if err != nil {
 		return 0, err
 	}
@@ -769,10 +888,10 @@ func (q *Queries) ResolveSupersedeCandle(ctx context.Context, arg ResolveSuperse
 const upsertFormingCandle = `-- name: UpsertFormingCandle :one
 INSERT INTO candles (
     instrument_id, open_time, close_time, open, high, low, close, volume,
-    revision, is_closed, tick_aligned, provider, ingested_at
+    revision, is_closed, tick_aligned, provider, ingested_at, interval
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, FALSE, $9, $10, $11)
-ON CONFLICT (instrument_id, open_time) WHERE superseded_at IS NULL
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, FALSE, $9, $10, $11, $12)
+ON CONFLICT (instrument_id, interval, open_time) WHERE superseded_at IS NULL
 DO UPDATE SET
     open = EXCLUDED.open,
     high = EXCLUDED.high,
@@ -783,7 +902,7 @@ DO UPDATE SET
     provider = EXCLUDED.provider,
     ingested_at = EXCLUDED.ingested_at
 WHERE candles.is_closed = false
-RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by
+RETURNING id, instrument_id, open_time, close_time, open, high, low, close, volume, revision, is_closed, tick_aligned, provider, ingested_at, superseded_at, superseded_by, interval
 `
 
 type UpsertFormingCandleParams struct {
@@ -798,12 +917,13 @@ type UpsertFormingCandleParams struct {
 	TickAligned  bool      `json:"tick_aligned"`
 	Provider     string    `json:"provider"`
 	IngestedAt   time.Time `json:"ingested_at"`
+	Interval     string    `json:"interval"`
 }
 
 // UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 // a still-forming row in place for a later tick of the same minute.
-// idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE
-// superseded_at IS NULL) is exactly the conflict target.
+// idx_candles_current_by_interval (UNIQUE on (instrument_id, interval,
+// open_time) WHERE superseded_at IS NULL) is exactly the conflict target.
 //
 // An already-CLOSED current row is never touched: the DO UPDATE only
 // applies WHERE the row is still forming, so a closed row yields zero rows
@@ -826,6 +946,7 @@ func (q *Queries) UpsertFormingCandle(ctx context.Context, arg UpsertFormingCand
 		arg.TickAligned,
 		arg.Provider,
 		arg.IngestedAt,
+		arg.Interval,
 	)
 	var i Candle
 	err := row.Scan(
@@ -845,6 +966,7 @@ func (q *Queries) UpsertFormingCandle(ctx context.Context, arg UpsertFormingCand
 		&i.IngestedAt,
 		&i.SupersededAt,
 		&i.SupersededBy,
+		&i.Interval,
 	)
 	return i, err
 }

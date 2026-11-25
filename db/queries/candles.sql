@@ -1,6 +1,9 @@
+-- Every query in this file names its interval explicitly (L1.1): 1m is
+-- the canonical live series, 15m, 1h and 4h the native series, all in this
+-- one table. A query that left the interval out would mix series.
 -- name: GetCurrentCandle :one
 SELECT * FROM candles
-WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL;
+WHERE instrument_id = $1 AND open_time = $2 AND interval = $3 AND superseded_at IS NULL;
 
 -- GetLatestClosedCandle returns the most recent current, closed candle
 -- for an instrument -- used to bound a replay (e.g. a candle
@@ -8,7 +11,7 @@ WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL;
 -- needing to know what "now" means for this instrument's series.
 -- name: GetLatestClosedCandle :one
 SELECT * FROM candles
-WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+WHERE instrument_id = $1 AND interval = $2 AND superseded_at IS NULL AND is_closed = true
 ORDER BY open_time DESC
 LIMIT 1;
 
@@ -19,7 +22,7 @@ LIMIT 1;
 -- is responsible for detecting; this query does not fill gaps.
 -- name: ListCurrentCandlesInRange :many
 SELECT * FROM candles
-WHERE instrument_id = $1 AND superseded_at IS NULL
+WHERE instrument_id = $1 AND interval = $4 AND superseded_at IS NULL
   AND open_time >= $2 AND open_time < $3
 ORDER BY open_time;
 
@@ -33,7 +36,7 @@ ORDER BY open_time;
 -- of the cap (worker-hardening brief, Part C).
 -- name: ListClosedCandlesInRangeLimited :many
 SELECT * FROM candles
-WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+WHERE instrument_id = $1 AND interval = $5 AND superseded_at IS NULL AND is_closed = true
   AND open_time >= $2 AND open_time < $3
 ORDER BY open_time
 LIMIT $4;
@@ -51,7 +54,7 @@ LIMIT $4;
 -- itself regardless of how open the bounds are.
 -- name: ListClosedCandlesInRangeLimitedDesc :many
 SELECT * FROM candles
-WHERE instrument_id = $1 AND superseded_at IS NULL AND is_closed = true
+WHERE instrument_id = $1 AND interval = $3 AND superseded_at IS NULL AND is_closed = true
   AND (sqlc.narg('from_time')::timestamptz IS NULL OR open_time >= sqlc.narg('from_time')::timestamptz)
   AND (sqlc.narg('to_time')::timestamptz IS NULL OR open_time < sqlc.narg('to_time')::timestamptz)
 ORDER BY open_time DESC
@@ -59,8 +62,8 @@ LIMIT $2;
 
 -- UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 -- a still-forming row in place for a later tick of the same minute.
--- idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE
--- superseded_at IS NULL) is exactly the conflict target.
+-- idx_candles_current_by_interval (UNIQUE on (instrument_id, interval,
+-- open_time) WHERE superseded_at IS NULL) is exactly the conflict target.
 --
 -- An already-CLOSED current row is never touched: the DO UPDATE only
 -- applies WHERE the row is still forming, so a closed row yields zero rows
@@ -73,10 +76,10 @@ LIMIT $2;
 -- name: UpsertFormingCandle :one
 INSERT INTO candles (
     instrument_id, open_time, close_time, open, high, low, close, volume,
-    revision, is_closed, tick_aligned, provider, ingested_at
+    revision, is_closed, tick_aligned, provider, ingested_at, interval
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, FALSE, $9, $10, $11)
-ON CONFLICT (instrument_id, open_time) WHERE superseded_at IS NULL
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, FALSE, $9, $10, $11, $12)
+ON CONFLICT (instrument_id, interval, open_time) WHERE superseded_at IS NULL
 DO UPDATE SET
     open = EXCLUDED.open,
     high = EXCLUDED.high,
@@ -98,7 +101,7 @@ RETURNING *;
 -- name: CloseCandle :one
 UPDATE candles
 SET is_closed = true
-WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL AND is_closed = false
+WHERE instrument_id = $1 AND open_time = $2 AND interval = $3 AND superseded_at IS NULL AND is_closed = false
 RETURNING *;
 
 -- CloseCandleWithValues freezes a forming candle WITH the final values in
@@ -111,7 +114,7 @@ RETURNING *;
 UPDATE candles
 SET open = $3, high = $4, low = $5, close = $6, volume = $7,
     tick_aligned = $8, provider = $9, ingested_at = $10, is_closed = true
-WHERE instrument_id = $1 AND open_time = $2 AND superseded_at IS NULL AND is_closed = false
+WHERE instrument_id = $1 AND open_time = $2 AND interval = $11 AND superseded_at IS NULL AND is_closed = false
 RETURNING *;
 
 -- The three statements below are the correction handshake's three steps
@@ -122,20 +125,35 @@ RETURNING *;
 -- name: BeginSupersedeCandle :execrows
 UPDATE candles
 SET superseded_at = $2
-WHERE id = $1 AND is_closed = true AND superseded_at IS NULL;
+WHERE id = $1 AND interval = $3 AND is_closed = true AND superseded_at IS NULL;
 
 -- name: InsertCorrectingCandle :one
 INSERT INTO candles (
     instrument_id, open_time, close_time, open, high, low, close, volume,
-    revision, is_closed, tick_aligned, provider, ingested_at
+    revision, is_closed, tick_aligned, provider, ingested_at, interval
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11, $12)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11, $12, $13)
+RETURNING *;
+
+-- InsertClosedCandle stores a native candle that is already closed (15m,
+-- 1h, 4h: only closed native candles are stored, never a forming row) at
+-- revision 1. A current row already at this (instrument, interval,
+-- open_time) wins: zero rows, and the caller compares the stored values and
+-- corrects through the ordinary handshake if they differ.
+-- name: InsertClosedCandle :one
+INSERT INTO candles (
+    instrument_id, open_time, close_time, open, high, low, close, volume,
+    revision, is_closed, tick_aligned, provider, ingested_at, interval
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, TRUE, $9, $10, $11, $12)
+ON CONFLICT (instrument_id, interval, open_time) WHERE superseded_at IS NULL
+DO NOTHING
 RETURNING *;
 
 -- name: ResolveSupersedeCandle :execrows
 UPDATE candles
 SET superseded_by = $2
-WHERE id = $1 AND superseded_at IS NOT NULL AND superseded_by IS NULL;
+WHERE id = $1 AND interval = $3 AND superseded_at IS NOT NULL AND superseded_by IS NULL;
 
 -- GetCandleStatsInputs is GET /instruments/stats' own read path and the
 -- live `stats` WebSocket message's (re)base: everything the side panel's
@@ -179,7 +197,7 @@ WHERE id = $1 AND superseded_at IS NOT NULL AND superseded_by IS NULL;
 WITH anchor AS (
     SELECT a.open_time, a.close, a.volume, a.is_closed, a.ingested_at
     FROM candles a
-    WHERE a.instrument_id = sqlc.arg(instrument_id)
+    WHERE a.instrument_id = sqlc.arg(instrument_id) AND a.interval = sqlc.arg(interval)
       AND a.superseded_at IS NULL
     ORDER BY a.open_time DESC
     LIMIT 1
@@ -187,7 +205,7 @@ WITH anchor AS (
 latest AS (
     SELECT c.open_time, c.close
     FROM candles c
-    WHERE c.instrument_id = sqlc.arg(instrument_id)
+    WHERE c.instrument_id = sqlc.arg(instrument_id) AND c.interval = sqlc.arg(interval)
       AND c.superseded_at IS NULL AND c.is_closed = true
     ORDER BY c.open_time DESC
     LIMIT 1
@@ -212,7 +230,7 @@ SELECT
         SELECT r.id IS NOT NULL
         FROM unnest(sqlc.arg(offsets_seconds)::bigint[]) WITH ORDINALITY AS o(secs, ord)
         LEFT JOIN candles r
-          ON r.instrument_id = sqlc.arg(instrument_id)
+          ON r.instrument_id = sqlc.arg(instrument_id) AND r.interval = sqlc.arg(interval)
          AND r.superseded_at IS NULL AND r.is_closed = true
          AND r.open_time = latest.open_time - o.secs * interval '1 second'
         ORDER BY o.ord
@@ -221,7 +239,7 @@ SELECT
         SELECT coalesce(r.close, 0)
         FROM unnest(sqlc.arg(offsets_seconds)::bigint[]) WITH ORDINALITY AS o(secs, ord)
         LEFT JOIN candles r
-          ON r.instrument_id = sqlc.arg(instrument_id)
+          ON r.instrument_id = sqlc.arg(instrument_id) AND r.interval = sqlc.arg(interval)
          AND r.superseded_at IS NULL AND r.is_closed = true
          AND r.open_time = latest.open_time - o.secs * interval '1 second'
         ORDER BY o.ord
@@ -231,7 +249,7 @@ LEFT JOIN latest ON true
 LEFT JOIN LATERAL (
     SELECT rc.close
     FROM candles rc
-    WHERE rc.instrument_id = sqlc.arg(instrument_id)
+    WHERE rc.instrument_id = sqlc.arg(instrument_id) AND rc.interval = sqlc.arg(interval)
       AND rc.superseded_at IS NULL AND rc.is_closed = true
       AND rc.open_time = anchor.open_time - (CASE WHEN anchor.is_closed
           THEN sqlc.arg(closed_reference_offset_seconds)::bigint
@@ -240,7 +258,7 @@ LEFT JOIN LATERAL (
 CROSS JOIN LATERAL (
     SELECT count(*)::bigint AS n, coalesce(sum(v.volume), 0)::bigint AS total
     FROM candles v
-    WHERE v.instrument_id = sqlc.arg(instrument_id)
+    WHERE v.instrument_id = sqlc.arg(instrument_id) AND v.interval = sqlc.arg(interval)
       AND v.superseded_at IS NULL AND v.is_closed = true
       AND v.open_time > anchor.open_time - sqlc.arg(volume_window_seconds)::bigint * interval '1 second'
       AND v.open_time < anchor.open_time
@@ -256,10 +274,12 @@ CROSS JOIN LATERAL (
 -- Minutes inside retention are always returned, whatever candle_gaps says:
 -- an open gap row there is no proof the minutes cannot be fetched (the
 -- dev stack has hundreds of unaligned, unresolved rows recorded by the
--- periodic backfill's own tail), and a fetchable hole must be filled. The series steps a fixed 1 minute, so the session TimeZone
--- (and DST) cannot change which minutes are expected.
+-- periodic backfill's own tail), and a fetchable hole must be filled. The series steps a fixed length -- the interval's own,
+-- candle_interval_seconds(interval) -- so the session TimeZone (and DST)
+-- cannot change which slots are expected; gaps are read for the same
+-- interval only. slots counts the missing candles of that interval.
 --
--- Cost: one index probe on idx_candles_current per expected minute (the
+-- Cost: one index probe on idx_candles_current_by_interval per expected slot (the
 -- anti-join) plus a probe of candle_gaps -- O(window minutes), independent
 -- of total history; the grouping is one window function over the missing
 -- minutes only.
@@ -271,26 +291,29 @@ WITH missing AS (
         -- minutes before an instrument's history begins are not holes.
         greatest(sqlc.arg(from_time)::timestamptz, (
             SELECT min(c0.open_time) FROM candles c0
-            WHERE c0.instrument_id = sqlc.arg(instrument_id) AND c0.superseded_at IS NULL
+            WHERE c0.instrument_id = sqlc.arg(instrument_id) AND c0.interval = sqlc.arg(interval)
+              AND c0.superseded_at IS NULL
               AND c0.is_closed = true AND c0.open_time >= sqlc.arg(from_time)::timestamptz)),
-        sqlc.arg(to_time)::timestamptz - interval '1 minute', interval '1 minute') AS m
+        sqlc.arg(to_time)::timestamptz - candle_interval_seconds(sqlc.arg(interval)) * interval '1 second',
+        candle_interval_seconds(sqlc.arg(interval)) * interval '1 second') AS m
     WHERE NOT EXISTS (
         SELECT 1 FROM candles c
-        WHERE c.instrument_id = sqlc.arg(instrument_id) AND c.open_time = m
+        WHERE c.instrument_id = sqlc.arg(instrument_id) AND c.interval = sqlc.arg(interval) AND c.open_time = m
           AND c.superseded_at IS NULL AND c.is_closed = true
     )
     AND NOT (m < sqlc.arg(lost_before)::timestamptz AND EXISTS (
         SELECT 1 FROM candle_gaps g
-        WHERE g.instrument_id = sqlc.arg(instrument_id) AND g.resolved_at IS NULL
+        WHERE g.instrument_id = sqlc.arg(instrument_id) AND g.interval = sqlc.arg(interval)
+          AND g.resolved_at IS NULL
           AND m >= g.gap_start AND m < g.gap_end
     ))
 ), grouped AS (
-    SELECT open_time, open_time - (row_number() OVER (ORDER BY open_time)) * interval '1 minute' AS grp
+    SELECT open_time, open_time - (row_number() OVER (ORDER BY open_time)) * (candle_interval_seconds(sqlc.arg(interval)) * interval '1 second') AS grp
     FROM missing
 )
 SELECT min(open_time)::timestamptz AS gap_start,
-       (max(open_time) + interval '1 minute')::timestamptz AS gap_end,
-       count(*)::bigint AS minutes
+       (max(open_time) + candle_interval_seconds(sqlc.arg(interval)) * interval '1 second')::timestamptz AS gap_end,
+       count(*)::bigint AS slots
 FROM grouped
 GROUP BY grp
 ORDER BY gap_start;
@@ -300,5 +323,6 @@ ORDER BY gap_start;
 -- this hole's minutes are now filled" check.
 -- name: CountClosedCandlesInRange :one
 SELECT count(*)::bigint FROM candles
-WHERE instrument_id = sqlc.arg(instrument_id) AND superseded_at IS NULL AND is_closed = true
+WHERE instrument_id = sqlc.arg(instrument_id) AND interval = sqlc.arg(interval)
+  AND superseded_at IS NULL AND is_closed = true
   AND open_time >= sqlc.arg(from_time)::timestamptz AND open_time < sqlc.arg(to_time)::timestamptz;

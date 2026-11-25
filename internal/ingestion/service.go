@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/chibuike-kt/argus/internal/clock"
@@ -68,6 +69,13 @@ type Service struct {
 	calendar     marketdata.Calendar
 	logger       *slog.Logger
 	publisher    hub.Publisher
+
+	// native is the store the native higher timeframe path writes through
+	// (native.go); the same *marketdata.Store as store.
+	native             nativeStore
+	nativeNoiseDivisor int64
+	nativeRounded      atomic.Int64
+	nativeMismatches   atomic.Int64
 }
 
 // SetPublisher wires the live-chart-pipeline brief's own Phase 3 fan
@@ -131,6 +139,9 @@ func NewService(
 		store:        store,
 		calendar:     calendar,
 		logger:       logger,
+
+		native:             store,
+		nativeNoiseDivisor: DefaultNativeVolumeNoiseDivisor,
 	}
 }
 

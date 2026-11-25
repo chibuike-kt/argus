@@ -4,9 +4,9 @@
 -- original value) purely so RETURNING always yields a row -- ON CONFLICT
 -- DO NOTHING would return zero rows on a repeat and break :one.
 -- name: RecordCandleGap :one
-INSERT INTO candle_gaps (instrument_id, gap_start, gap_end, detected_at)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (instrument_id, gap_start, gap_end)
+INSERT INTO candle_gaps (instrument_id, gap_start, gap_end, detected_at, interval)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (instrument_id, interval, gap_start, gap_end)
 DO UPDATE SET detected_at = candle_gaps.detected_at
 RETURNING *;
 
@@ -19,12 +19,12 @@ RETURNING *;
 -- name: ResolveCandleGap :one
 UPDATE candle_gaps
 SET resolved_at = $4, resolution = $5
-WHERE instrument_id = $1 AND gap_start = $2 AND gap_end = $3 AND resolved_at IS NULL
+WHERE instrument_id = $1 AND gap_start = $2 AND gap_end = $3 AND interval = $6 AND resolved_at IS NULL
 RETURNING *;
 
 -- name: ListOpenCandleGaps :many
 SELECT * FROM candle_gaps
-WHERE instrument_id = $1 AND resolved_at IS NULL
+WHERE instrument_id = $1 AND interval = $2 AND resolved_at IS NULL
 ORDER BY gap_start;
 
 -- GetCandleGap returns a gap regardless of resolved state, so a caller
@@ -32,4 +32,4 @@ ORDER BY gap_start;
 -- from "already resolved" instead of guessing.
 -- name: GetCandleGap :one
 SELECT * FROM candle_gaps
-WHERE instrument_id = $1 AND gap_start = $2 AND gap_end = $3;
+WHERE instrument_id = $1 AND gap_start = $2 AND gap_end = $3 AND interval = $4;

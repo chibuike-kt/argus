@@ -69,6 +69,24 @@ func (c FreshnessConfig) MaxAgeFor(assetClass string) (time.Duration, error) {
 	}
 }
 
+// NativeMaxAge is the staleness threshold of a native higher timeframe
+// series (L1.1 decision 3): the interval's own length plus assetClass's
+// configured maximum age. A native candle can only be stored once its
+// window has closed, so its newest closed close time is expected to lag
+// now by up to one interval; anything beyond that plus the market's own
+// threshold is stale. No new number: both parts already exist.
+func (c FreshnessConfig) NativeMaxAge(assetClass string, interval marketdata.Interval) (time.Duration, error) {
+	d, ok := interval.Duration()
+	if !ok {
+		return 0, interval.Validate()
+	}
+	maxAge, err := c.MaxAgeFor(assetClass)
+	if err != nil {
+		return 0, err
+	}
+	return d + maxAge, nil
+}
+
 // FeedStatus classifies how fresh an instrument's latest known data is.
 type FeedStatus int
 
@@ -142,6 +160,25 @@ func (h *FeedHealth) Evaluate(ctx context.Context, assetClass string, latest clo
 	}
 
 	if now.Sub(latest.Time()) > maxAge {
+		return FeedStatusStale, nil
+	}
+	return FeedStatusFresh, nil
+}
+
+// EvaluateNative is Evaluate for a native interval series: stale when now
+// minus newestClose (the close time of its newest closed candle) exceeds
+// NativeMaxAge. A scheduled closure wins over age, as in Evaluate.
+func (h *FeedHealth) EvaluateNative(ctx context.Context, assetClass string, interval marketdata.Interval, newestClose clock.EventTime) (FeedStatus, error) {
+	now := h.clk.Now()
+	status, calErr := h.calendar.Status(ctx, assetClass, clock.NewEventTime(now))
+	if calErr == nil && status == marketdata.MarketStatusScheduledClosure {
+		return FeedStatusScheduledClosure, nil
+	}
+	maxAge, err := h.freshness.NativeMaxAge(assetClass, interval)
+	if err != nil {
+		return FeedStatusUnknown, err
+	}
+	if now.Sub(newestClose.Time()) > maxAge {
 		return FeedStatusStale, nil
 	}
 	return FeedStatusFresh, nil

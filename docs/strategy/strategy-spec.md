@@ -867,7 +867,7 @@ min_rr, each candidate's R:R, the chosen target (or none), and the result.
 
 The context timeframes need enough closed candles to establish a range. Stored 1 minute history is not
 enough (about 18 four hour candles in 3 days). Higher timeframe candles (15m, 1h, 4h, later 1d) are
-backfilled and kept natively from the provider and kept current by the provider's candle stream
+backfilled and kept natively from the provider and kept current by fetching each candle from the provider as soon as the 1 minute stream shows its window closed
 (ADR-006 amendment). Before either representation is relied on, native candles and candles aggregated
 from 1 minute must be compared on real overlapping data, and any difference reported.
 

@@ -112,6 +112,9 @@ func (s *Store) ListCurrentCandlesInRange(ctx context.Context, instrumentID int6
 		InstrumentID: instrumentID,
 		OpenTime:     start,
 		OpenTime_2:   end,
+		// Derived candles are always built from the canonical 1 minute
+		// series, never from a native one.
+		Interval: string(Interval1m),
 	})
 }
 

@@ -51,12 +51,13 @@ func (s *Store) UpsertForming(ctx context.Context, t Tick) (Candle, error) {
 		TickAligned:  t.TickAligned,
 		Provider:     t.Provider,
 		IngestedAt:   t.IngestedAt.Time(),
+		Interval:     string(Interval1m),
 	}
 	row, err := s.q.UpsertFormingCandle(ctx, params)
 	if isRevisionUniqueViolation(err) {
 		// Two writers created the same new minute at the same instant (the
 		// live stream and a backfill): the second insert can collide on the
-		// (instrument_id, open_time, revision) constraint before the
+		// (instrument_id, interval, open_time, revision) index before the
 		// ON CONFLICT arbiter sees the first row. The row exists now, so one
 		// retry resolves through the ordinary conflict path.
 		row, err = s.q.UpsertFormingCandle(ctx, params)
@@ -81,6 +82,7 @@ func (s *Store) Close(ctx context.Context, instrumentID int64, openTime clock.Ev
 	row, err := s.q.CloseCandle(ctx, store.CloseCandleParams{
 		InstrumentID: instrumentID,
 		OpenTime:     openTime.Time(),
+		Interval:     string(Interval1m),
 	})
 	if err == nil {
 		return fromCandleRow(row), nil
@@ -94,6 +96,7 @@ func (s *Store) Close(ctx context.Context, instrumentID int64, openTime clock.Ev
 	current, getErr := s.q.GetCurrentCandle(ctx, store.GetCurrentCandleParams{
 		InstrumentID: instrumentID,
 		OpenTime:     openTime.Time(),
+		Interval:     string(Interval1m),
 	})
 	switch {
 	case errors.Is(getErr, sql.ErrNoRows):
@@ -130,6 +133,7 @@ func (s *Store) CloseWith(ctx context.Context, t Tick) (Candle, error) {
 		TickAligned:  t.TickAligned,
 		Provider:     t.Provider,
 		IngestedAt:   t.IngestedAt.Time(),
+		Interval:     string(Interval1m),
 	})
 	if err == nil {
 		return fromCandleRow(row), nil
@@ -137,7 +141,7 @@ func (s *Store) CloseWith(ctx context.Context, t Tick) (Candle, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Candle{}, fmt.Errorf("marketdata: close candle with values instrument=%d open_time=%s: %w", t.InstrumentID, t.OpenTime, err)
 	}
-	current, getErr := s.q.GetCurrentCandle(ctx, store.GetCurrentCandleParams{InstrumentID: t.InstrumentID, OpenTime: t.OpenTime.Time()})
+	current, getErr := s.q.GetCurrentCandle(ctx, store.GetCurrentCandleParams{InstrumentID: t.InstrumentID, OpenTime: t.OpenTime.Time(), Interval: string(Interval1m)})
 	switch {
 	case errors.Is(getErr, sql.ErrNoRows):
 		return Candle{}, fmt.Errorf("marketdata: close candle with values instrument=%d open_time=%s: %w", t.InstrumentID, t.OpenTime, ErrCandleNotFound)
@@ -156,8 +160,8 @@ func (s *Store) CloseWith(ctx context.Context, t Tick) (Candle, error) {
 // 000003_candles_quotes_and_gaps.up.sql:
 //
 //  1. mark the current (old) row as being superseded -- this is what lets
-//     it leave idx_candles_current, the partial unique index on
-//     (instrument_id, open_time) WHERE superseded_at IS NULL;
+//     it leave idx_candles_current_by_interval, the partial unique index
+//     on (instrument_id, interval, open_time) WHERE superseded_at IS NULL;
 //  2. insert the new revision, now that the index has room for it;
 //  3. resolve the old row's superseded_by to the new revision's id.
 //
@@ -167,7 +171,20 @@ func (s *Store) CloseWith(ctx context.Context, t Tick) (Candle, error) {
 // ORDER across three separate statements -- a trigger only ever sees one
 // statement at a time. This method is what owns that ordering; nothing in
 // the schema can.
+//
+// This is the 1 minute series; SupersedeCandleAt is the same handshake for
+// any stored interval.
 func (s *Store) SupersedeCandle(ctx context.Context, instrumentID int64, openTime clock.EventTime, corr Correction) (Candle, error) {
+	return s.SupersedeCandleAt(ctx, Interval1m, instrumentID, openTime, corr)
+}
+
+// SupersedeCandleAt is SupersedeCandle for the closed candle of interval
+// at (instrumentID, openTime): the same three-step handshake, the same
+// revision rule (revision + 1), within that interval's own series.
+func (s *Store) SupersedeCandleAt(ctx context.Context, interval Interval, instrumentID int64, openTime clock.EventTime, corr Correction) (Candle, error) {
+	if err := interval.Validate(); err != nil {
+		return Candle{}, err
+	}
 	if err := corr.validate(); err != nil {
 		return Candle{}, err
 	}
@@ -182,6 +199,7 @@ func (s *Store) SupersedeCandle(ctx context.Context, instrumentID int64, openTim
 	old, err := qtx.GetCurrentCandle(ctx, store.GetCurrentCandleParams{
 		InstrumentID: instrumentID,
 		OpenTime:     openTime.Time(),
+		Interval:     string(interval),
 	})
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -202,6 +220,7 @@ func (s *Store) SupersedeCandle(ctx context.Context, instrumentID int64, openTim
 	affected, err := qtx.BeginSupersedeCandle(ctx, store.BeginSupersedeCandleParams{
 		ID:           old.ID,
 		SupersededAt: nullTimeFrom(now),
+		Interval:     string(interval),
 	})
 	if err != nil {
 		return Candle{}, fmt.Errorf("marketdata: supersede candle id=%d step 1 (begin): %w", old.ID, err)
@@ -211,12 +230,12 @@ func (s *Store) SupersedeCandle(ctx context.Context, instrumentID int64, openTim
 	}
 
 	// Step 2: insert the correcting revision. Now legal: step 1 removed
-	// the old row from idx_candles_current.
+	// the old row from idx_candles_current_by_interval.
 	newRevision := old.Revision + 1
 	newRow, err := qtx.InsertCorrectingCandle(ctx, store.InsertCorrectingCandleParams{
 		InstrumentID: instrumentID,
 		OpenTime:     openTime.Time(),
-		CloseTime:    openTime.Time().Add(time.Minute),
+		CloseTime:    openTime.Time().Add(interval.mustDuration()),
 		Open:         int64(corr.Open),
 		High:         int64(corr.High),
 		Low:          int64(corr.Low),
@@ -226,6 +245,7 @@ func (s *Store) SupersedeCandle(ctx context.Context, instrumentID int64, openTim
 		TickAligned:  corr.TickAligned,
 		Provider:     corr.Provider,
 		IngestedAt:   corr.IngestedAt.Time(),
+		Interval:     string(interval),
 	})
 	if err != nil {
 		return Candle{}, fmt.Errorf("marketdata: supersede candle id=%d step 2 (insert revision %d): %w", old.ID, newRevision, err)
@@ -236,6 +256,7 @@ func (s *Store) SupersedeCandle(ctx context.Context, instrumentID int64, openTim
 	affected, err = qtx.ResolveSupersedeCandle(ctx, store.ResolveSupersedeCandleParams{
 		ID:           old.ID,
 		SupersededBy: sql.NullInt64{Int64: newRow.ID, Valid: true},
+		Interval:     string(interval),
 	})
 	if err != nil {
 		return Candle{}, fmt.Errorf("marketdata: supersede candle id=%d step 3 (resolve): %w", old.ID, err)
@@ -250,34 +271,125 @@ func (s *Store) SupersedeCandle(ctx context.Context, instrumentID int64, openTim
 	return fromCandleRow(newRow), nil
 }
 
-// GetCurrent returns the current (non-superseded) candle at
+// GetCurrent returns the current (non-superseded) 1 minute candle at
 // (instrumentID, openTime), or ErrCandleNotFound.
 func (s *Store) GetCurrent(ctx context.Context, instrumentID int64, openTime clock.EventTime) (Candle, error) {
+	return s.GetCurrentAt(ctx, Interval1m, instrumentID, openTime)
+}
+
+// GetCurrentAt returns the current candle of interval at (instrumentID,
+// openTime), or ErrCandleNotFound.
+func (s *Store) GetCurrentAt(ctx context.Context, interval Interval, instrumentID int64, openTime clock.EventTime) (Candle, error) {
+	if err := interval.Validate(); err != nil {
+		return Candle{}, err
+	}
 	row, err := s.q.GetCurrentCandle(ctx, store.GetCurrentCandleParams{
 		InstrumentID: instrumentID,
 		OpenTime:     openTime.Time(),
+		Interval:     string(interval),
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Candle{}, fmt.Errorf("marketdata: get current candle instrument=%d open_time=%s: %w", instrumentID, openTime, ErrCandleNotFound)
+			return Candle{}, fmt.Errorf("marketdata: get current %s candle instrument=%d open_time=%s: %w", interval, instrumentID, openTime, ErrCandleNotFound)
 		}
-		return Candle{}, fmt.Errorf("marketdata: get current candle instrument=%d open_time=%s: %w", instrumentID, openTime, err)
+		return Candle{}, fmt.Errorf("marketdata: get current %s candle instrument=%d open_time=%s: %w", interval, instrumentID, openTime, err)
 	}
 	return fromCandleRow(row), nil
 }
 
-// GetLatestClosed returns the most recent current, closed candle for
-// instrumentID, or ErrCandleNotFound. Used to bound a replay at "now"
+// GetLatestClosed returns the most recent current, closed 1 minute candle
+// for instrumentID, or ErrCandleNotFound. Used to bound a replay at "now"
 // in candle terms (e.g. internal/analysis's correction recompute).
 func (s *Store) GetLatestClosed(ctx context.Context, instrumentID int64) (Candle, error) {
-	row, err := s.q.GetLatestClosedCandle(ctx, instrumentID)
+	return s.GetLatestClosedAt(ctx, Interval1m, instrumentID)
+}
+
+// GetLatestClosedAt is GetLatestClosed for any stored interval.
+func (s *Store) GetLatestClosedAt(ctx context.Context, interval Interval, instrumentID int64) (Candle, error) {
+	if err := interval.Validate(); err != nil {
+		return Candle{}, err
+	}
+	row, err := s.q.GetLatestClosedCandle(ctx, store.GetLatestClosedCandleParams{InstrumentID: instrumentID, Interval: string(interval)})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Candle{}, fmt.Errorf("marketdata: get latest closed candle instrument=%d: %w", instrumentID, ErrCandleNotFound)
+			return Candle{}, fmt.Errorf("marketdata: get latest closed %s candle instrument=%d: %w", interval, instrumentID, ErrCandleNotFound)
 		}
-		return Candle{}, fmt.Errorf("marketdata: get latest closed candle instrument=%d: %w", instrumentID, err)
+		return Candle{}, fmt.Errorf("marketdata: get latest closed %s candle instrument=%d: %w", interval, instrumentID, err)
 	}
 	return fromCandleRow(row), nil
+}
+
+// InsertClosed stores a native candle of interval that has already closed
+// (its close time is at or before now) at revision 1. Only closed native
+// candles are stored (L1.1 decision 5): a candle still forming is refused
+// with ErrNativeCandleNotClosed, never written. When a current candle
+// already exists at this (instrument, interval, open_time), nothing is
+// written and that stored candle is returned with inserted false: the
+// caller compares it and corrects through SupersedeCandleAt if the values
+// differ, the same revision rule as the 1 minute series.
+func (s *Store) InsertClosed(ctx context.Context, interval Interval, t Tick, now time.Time) (stored Candle, inserted bool, err error) {
+	if err := interval.Validate(); err != nil {
+		return Candle{}, false, err
+	}
+	if err := t.validate(); err != nil {
+		return Candle{}, false, err
+	}
+	if !interval.Aligned(t.OpenTime.Time()) {
+		return Candle{}, false, fmt.Errorf("marketdata: insert closed %s candle instrument=%d open_time=%s: %w", interval, t.InstrumentID, t.OpenTime, ErrNotIntervalAligned)
+	}
+	closeTime := t.OpenTime.Time().Add(interval.mustDuration())
+	if closeTime.After(now) {
+		return Candle{}, false, fmt.Errorf("marketdata: insert closed %s candle instrument=%d open_time=%s closes %s, now %s: %w", interval, t.InstrumentID, t.OpenTime, closeTime, now, ErrNativeCandleNotClosed)
+	}
+	row, err := s.q.InsertClosedCandle(ctx, store.InsertClosedCandleParams{
+		InstrumentID: t.InstrumentID,
+		OpenTime:     t.OpenTime.Time(),
+		CloseTime:    closeTime,
+		Open:         int64(t.Open),
+		High:         int64(t.High),
+		Low:          int64(t.Low),
+		Close:        int64(t.Close),
+		Volume:       int64(t.Volume),
+		TickAligned:  t.TickAligned,
+		Provider:     t.Provider,
+		IngestedAt:   t.IngestedAt.Time(),
+		Interval:     string(interval),
+	})
+	if isRevisionUniqueViolation(err) {
+		// Two writers inserted the same new candle at the same instant; the
+		// row exists now, so read it like any other existing candle.
+		err = sql.ErrNoRows
+	}
+	if err == nil {
+		return fromCandleRow(row), true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Candle{}, false, fmt.Errorf("marketdata: insert closed %s candle instrument=%d open_time=%s: %w", interval, t.InstrumentID, t.OpenTime, err)
+	}
+	existing, err := s.GetCurrentAt(ctx, interval, t.InstrumentID, t.OpenTime)
+	if err != nil {
+		return Candle{}, false, err
+	}
+	return existing, false, nil
+}
+
+// ListCurrentInRangeAt returns the current candles of interval for
+// instrumentID with open_time in [start, end), oldest first, closed or not.
+func (s *Store) ListCurrentInRangeAt(ctx context.Context, interval Interval, instrumentID int64, start, end time.Time) ([]Candle, error) {
+	if err := interval.Validate(); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.ListCurrentCandlesInRange(ctx, store.ListCurrentCandlesInRangeParams{
+		InstrumentID: instrumentID, OpenTime: start, OpenTime_2: end, Interval: string(interval),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marketdata: list current %s candles instrument=%d [%s,%s): %w", interval, instrumentID, start, end, err)
+	}
+	out := make([]Candle, len(rows))
+	for i, row := range rows {
+		out[i] = fromCandleRow(row)
+	}
+	return out, nil
 }
 
 // ListClosedInRangeLimited returns up to limit current, closed candles
@@ -292,6 +404,7 @@ func (s *Store) ListClosedInRangeLimited(ctx context.Context, instrumentID int64
 		OpenTime:     start,
 		OpenTime_2:   end,
 		Limit:        limit,
+		Interval:     string(Interval1m),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marketdata: list closed candles instrument=%d [%s,%s): %w", instrumentID, start, end, err)
@@ -318,6 +431,7 @@ func (s *Store) ListClosedInRangeLimitedDesc(ctx context.Context, instrumentID i
 		FromTime:     toNullTime(start),
 		ToTime:       toNullTime(end),
 		Limit:        limit,
+		Interval:     string(Interval1m),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marketdata: list closed candles desc instrument=%d [%v,%v): %w", instrumentID, start, end, err)
@@ -340,9 +454,10 @@ func toNullTime(t *time.Time) sql.NullTime {
 	return sql.NullTime{Time: *t, Valid: true}
 }
 
-// candleRevisionKey is the unique constraint on (instrument_id, open_time,
-// revision) -- distinct from idx_candles_current, the upsert's arbiter.
-const candleRevisionKey = "candles_instrument_id_open_time_revision_key"
+// candleRevisionKey is the unique index on (instrument_id, interval,
+// open_time, revision), migration 000023 -- distinct from
+// idx_candles_current_by_interval, the upsert's arbiter.
+const candleRevisionKey = "candles_identity_by_interval"
 
 // isRevisionUniqueViolation reports a unique violation (23505) on
 // candleRevisionKey: the concurrent-first-insert case UpsertForming retries.
