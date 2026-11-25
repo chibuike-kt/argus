@@ -173,7 +173,7 @@ SELECT
     (
         SELECT count(*)
         FROM candles c
-        WHERE c.instrument_id = i.id AND c.superseded_at IS NULL AND c.is_closed = true
+        WHERE c.instrument_id = i.id AND c.interval = $1 AND c.superseded_at IS NULL AND c.is_closed = true
           AND c.open_time >= coalesce(pc.last_processed_close_time, 'epoch'::timestamptz)
     )::bigint AS closed_candles_after_cursor
 FROM instruments i
@@ -181,7 +181,7 @@ LEFT JOIN processing_cursors pc ON pc.instrument_id = i.id AND pc.timeframe = '1
 LEFT JOIN LATERAL (
     SELECT c.close_time
     FROM candles c
-    WHERE c.instrument_id = i.id AND c.superseded_at IS NULL AND c.is_closed = true
+    WHERE c.instrument_id = i.id AND c.interval = $1 AND c.superseded_at IS NULL AND c.is_closed = true
     ORDER BY c.open_time DESC
     LIMIT 1
 ) lc ON true
@@ -208,8 +208,8 @@ type ListEngineStatusRow struct {
 // cursor -- how far the analysis is behind the data that is stored.
 // has_cursor false: the cursor columns hold the epoch and must not be read;
 // has_closed_candle false likewise for latest_closed_close_time.
-func (q *Queries) ListEngineStatus(ctx context.Context) ([]ListEngineStatusRow, error) {
-	rows, err := q.db.QueryContext(ctx, listEngineStatus)
+func (q *Queries) ListEngineStatus(ctx context.Context, interval string) ([]ListEngineStatusRow, error) {
+	rows, err := q.db.QueryContext(ctx, listEngineStatus, interval)
 	if err != nil {
 		return nil, err
 	}

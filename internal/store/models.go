@@ -37,6 +37,7 @@ type Candle struct {
 	IngestedAt   time.Time     `json:"ingested_at"`
 	SupersededAt sql.NullTime  `json:"superseded_at"`
 	SupersededBy sql.NullInt64 `json:"superseded_by"`
+	Interval     string        `json:"interval"`
 }
 
 type CandleGap struct {
@@ -47,6 +48,7 @@ type CandleGap struct {
 	DetectedAt   time.Time      `json:"detected_at"`
 	ResolvedAt   sql.NullTime   `json:"resolved_at"`
 	Resolution   sql.NullString `json:"resolution"`
+	Interval     string         `json:"interval"`
 }
 
 type ConfirmedSwing struct {

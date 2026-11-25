@@ -141,6 +141,9 @@ type Querier interface {
 	// O(log n + window), independent of how much history the instrument
 	// has. No row means the instrument has no current candle at all.
 	GetCandleStatsInputs(ctx context.Context, arg GetCandleStatsInputsParams) (GetCandleStatsInputsRow, error)
+	// Every query in this file names its interval explicitly (L1.1): 1m is
+	// the canonical live series, 15m, 1h and 4h the native series, all in this
+	// one table. A query that left the interval out would mix series.
 	GetCurrentCandle(ctx context.Context, arg GetCurrentCandleParams) (Candle, error)
 	// GetCurrentEventByTrigger keys on trigger_open_time, not
 	// trigger_candle_id: see 000007's comment on structure_events for why
@@ -158,7 +161,7 @@ type Querier interface {
 	// for an instrument -- used to bound a replay (e.g. a candle
 	// correction's recompute) at "now" in candle terms, without the caller
 	// needing to know what "now" means for this instrument's series.
-	GetLatestClosedCandle(ctx context.Context, instrumentID int64) (Candle, error)
+	GetLatestClosedCandle(ctx context.Context, arg GetLatestClosedCandleParams) (Candle, error)
 	GetLatestQuote(ctx context.Context, instrumentID int64) (LatestQuote, error)
 	// GetLatestSetupEvidence returns the newest evidence a setup's events
 	// recorded (the detected event's, or a later amendment's after a candle
@@ -214,6 +217,12 @@ type Querier interface {
 	// back" the guess.
 	IncrementSignupWrongGuessesIfEligible(ctx context.Context, arg IncrementSignupWrongGuessesIfEligibleParams) (SignupVerification, error)
 	InsertAuthEvent(ctx context.Context, arg InsertAuthEventParams) error
+	// InsertClosedCandle stores a native candle that is already closed (15m,
+	// 1h, 4h: only closed native candles are stored, never a forming row) at
+	// revision 1. A current row already at this (instrument, interval,
+	// open_time) wins: zero rows, and the caller compares the stored values and
+	// corrects through the ordinary handshake if they differ.
+	InsertClosedCandle(ctx context.Context, arg InsertClosedCandleParams) (Candle, error)
 	InsertCorrectingCandle(ctx context.Context, arg InsertCorrectingCandleParams) (Candle, error)
 	InsertEmailToken(ctx context.Context, arg InsertEmailTokenParams) (EmailToken, error)
 	// InsertInstrument always writes enabled = FALSE. There is no parameter for
@@ -403,7 +412,7 @@ type Querier interface {
 	// cursor -- how far the analysis is behind the data that is stored.
 	// has_cursor false: the cursor columns hold the epoch and must not be read;
 	// has_closed_candle false likewise for latest_closed_close_time.
-	ListEngineStatus(ctx context.Context) ([]ListEngineStatusRow, error)
+	ListEngineStatus(ctx context.Context, interval string) ([]ListEngineStatusRow, error)
 	// ListEventsForSetup returns a setup's full history in creation order
 	// -- reconstructing a setup's story (the frontend's eventual "Evidence"
 	// list is exactly this kind of data).
@@ -445,10 +454,12 @@ type Querier interface {
 	// Minutes inside retention are always returned, whatever candle_gaps says:
 	// an open gap row there is no proof the minutes cannot be fetched (the
 	// dev stack has hundreds of unaligned, unresolved rows recorded by the
-	// periodic backfill's own tail), and a fetchable hole must be filled. The series steps a fixed 1 minute, so the session TimeZone
-	// (and DST) cannot change which minutes are expected.
+	// periodic backfill's own tail), and a fetchable hole must be filled. The series steps a fixed length -- the interval's own,
+	// candle_interval_seconds(interval) -- so the session TimeZone (and DST)
+	// cannot change which slots are expected; gaps are read for the same
+	// interval only. slots counts the missing candles of that interval.
 	//
-	// Cost: one index probe on idx_candles_current per expected minute (the
+	// Cost: one index probe on idx_candles_current_by_interval per expected slot (the
 	// anti-join) plus a probe of candle_gaps -- O(window minutes), independent
 	// of total history; the grouping is one window function over the missing
 	// minutes only.
@@ -463,7 +474,7 @@ type Querier interface {
 	// setup. Ordered by id for determinism, matching this package's other
 	// per-instrument list queries.
 	ListNonTerminalSetupsForBreachCheck(ctx context.Context, arg ListNonTerminalSetupsForBreachCheckParams) ([]ListNonTerminalSetupsForBreachCheckRow, error)
-	ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([]CandleGap, error)
+	ListOpenCandleGaps(ctx context.Context, arg ListOpenCandleGapsParams) ([]CandleGap, error)
 	// ListSetupLifecycle summarises each setup's own event history for the
 	// chart (Phase 6): when it was detected, triggered and invalidated (the
 	// events' evaluation times, so a zone ends at its real invalidation, or
@@ -616,8 +627,8 @@ type Querier interface {
 	UpdateUserPreferences(ctx context.Context, arg UpdateUserPreferencesParams) (UserPreference, error)
 	// UpsertFormingCandle inserts the first tick of a new minute, or overwrites
 	// a still-forming row in place for a later tick of the same minute.
-	// idx_candles_current (UNIQUE on (instrument_id, open_time) WHERE
-	// superseded_at IS NULL) is exactly the conflict target.
+	// idx_candles_current_by_interval (UNIQUE on (instrument_id, interval,
+	// open_time) WHERE superseded_at IS NULL) is exactly the conflict target.
 	//
 	// An already-CLOSED current row is never touched: the DO UPDATE only
 	// applies WHERE the row is still forming, so a closed row yields zero rows

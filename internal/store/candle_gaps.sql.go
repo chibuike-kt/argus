@@ -12,21 +12,27 @@ import (
 )
 
 const getCandleGap = `-- name: GetCandleGap :one
-SELECT id, instrument_id, gap_start, gap_end, detected_at, resolved_at, resolution FROM candle_gaps
-WHERE instrument_id = $1 AND gap_start = $2 AND gap_end = $3
+SELECT id, instrument_id, gap_start, gap_end, detected_at, resolved_at, resolution, interval FROM candle_gaps
+WHERE instrument_id = $1 AND gap_start = $2 AND gap_end = $3 AND interval = $4
 `
 
 type GetCandleGapParams struct {
 	InstrumentID int64     `json:"instrument_id"`
 	GapStart     time.Time `json:"gap_start"`
 	GapEnd       time.Time `json:"gap_end"`
+	Interval     string    `json:"interval"`
 }
 
 // GetCandleGap returns a gap regardless of resolved state, so a caller
 // that got zero rows from ResolveCandleGap can tell "never existed" apart
 // from "already resolved" instead of guessing.
 func (q *Queries) GetCandleGap(ctx context.Context, arg GetCandleGapParams) (CandleGap, error) {
-	row := q.db.QueryRowContext(ctx, getCandleGap, arg.InstrumentID, arg.GapStart, arg.GapEnd)
+	row := q.db.QueryRowContext(ctx, getCandleGap,
+		arg.InstrumentID,
+		arg.GapStart,
+		arg.GapEnd,
+		arg.Interval,
+	)
 	var i CandleGap
 	err := row.Scan(
 		&i.ID,
@@ -36,18 +42,24 @@ func (q *Queries) GetCandleGap(ctx context.Context, arg GetCandleGapParams) (Can
 		&i.DetectedAt,
 		&i.ResolvedAt,
 		&i.Resolution,
+		&i.Interval,
 	)
 	return i, err
 }
 
 const listOpenCandleGaps = `-- name: ListOpenCandleGaps :many
-SELECT id, instrument_id, gap_start, gap_end, detected_at, resolved_at, resolution FROM candle_gaps
-WHERE instrument_id = $1 AND resolved_at IS NULL
+SELECT id, instrument_id, gap_start, gap_end, detected_at, resolved_at, resolution, interval FROM candle_gaps
+WHERE instrument_id = $1 AND interval = $2 AND resolved_at IS NULL
 ORDER BY gap_start
 `
 
-func (q *Queries) ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([]CandleGap, error) {
-	rows, err := q.db.QueryContext(ctx, listOpenCandleGaps, instrumentID)
+type ListOpenCandleGapsParams struct {
+	InstrumentID int64  `json:"instrument_id"`
+	Interval     string `json:"interval"`
+}
+
+func (q *Queries) ListOpenCandleGaps(ctx context.Context, arg ListOpenCandleGapsParams) ([]CandleGap, error) {
+	rows, err := q.db.QueryContext(ctx, listOpenCandleGaps, arg.InstrumentID, arg.Interval)
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +75,7 @@ func (q *Queries) ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([
 			&i.DetectedAt,
 			&i.ResolvedAt,
 			&i.Resolution,
+			&i.Interval,
 		); err != nil {
 			return nil, err
 		}
@@ -78,11 +91,11 @@ func (q *Queries) ListOpenCandleGaps(ctx context.Context, instrumentID int64) ([
 }
 
 const recordCandleGap = `-- name: RecordCandleGap :one
-INSERT INTO candle_gaps (instrument_id, gap_start, gap_end, detected_at)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (instrument_id, gap_start, gap_end)
+INSERT INTO candle_gaps (instrument_id, gap_start, gap_end, detected_at, interval)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (instrument_id, interval, gap_start, gap_end)
 DO UPDATE SET detected_at = candle_gaps.detected_at
-RETURNING id, instrument_id, gap_start, gap_end, detected_at, resolved_at, resolution
+RETURNING id, instrument_id, gap_start, gap_end, detected_at, resolved_at, resolution, interval
 `
 
 type RecordCandleGapParams struct {
@@ -90,6 +103,7 @@ type RecordCandleGapParams struct {
 	GapStart     time.Time `json:"gap_start"`
 	GapEnd       time.Time `json:"gap_end"`
 	DetectedAt   time.Time `json:"detected_at"`
+	Interval     string    `json:"interval"`
 }
 
 // RecordCandleGap is idempotent: detecting the same gap twice (a retried
@@ -103,6 +117,7 @@ func (q *Queries) RecordCandleGap(ctx context.Context, arg RecordCandleGapParams
 		arg.GapStart,
 		arg.GapEnd,
 		arg.DetectedAt,
+		arg.Interval,
 	)
 	var i CandleGap
 	err := row.Scan(
@@ -113,6 +128,7 @@ func (q *Queries) RecordCandleGap(ctx context.Context, arg RecordCandleGapParams
 		&i.DetectedAt,
 		&i.ResolvedAt,
 		&i.Resolution,
+		&i.Interval,
 	)
 	return i, err
 }
@@ -120,8 +136,8 @@ func (q *Queries) RecordCandleGap(ctx context.Context, arg RecordCandleGapParams
 const resolveCandleGap = `-- name: ResolveCandleGap :one
 UPDATE candle_gaps
 SET resolved_at = $4, resolution = $5
-WHERE instrument_id = $1 AND gap_start = $2 AND gap_end = $3 AND resolved_at IS NULL
-RETURNING id, instrument_id, gap_start, gap_end, detected_at, resolved_at, resolution
+WHERE instrument_id = $1 AND gap_start = $2 AND gap_end = $3 AND interval = $6 AND resolved_at IS NULL
+RETURNING id, instrument_id, gap_start, gap_end, detected_at, resolved_at, resolution, interval
 `
 
 type ResolveCandleGapParams struct {
@@ -130,6 +146,7 @@ type ResolveCandleGapParams struct {
 	GapEnd       time.Time      `json:"gap_end"`
 	ResolvedAt   sql.NullTime   `json:"resolved_at"`
 	Resolution   sql.NullString `json:"resolution"`
+	Interval     string         `json:"interval"`
 }
 
 // ResolveCandleGap only matches a still-open gap (resolved_at IS NULL):
@@ -145,6 +162,7 @@ func (q *Queries) ResolveCandleGap(ctx context.Context, arg ResolveCandleGapPara
 		arg.GapEnd,
 		arg.ResolvedAt,
 		arg.Resolution,
+		arg.Interval,
 	)
 	var i CandleGap
 	err := row.Scan(
@@ -155,6 +173,7 @@ func (q *Queries) ResolveCandleGap(ctx context.Context, arg ResolveCandleGapPara
 		&i.DetectedAt,
 		&i.ResolvedAt,
 		&i.Resolution,
+		&i.Interval,
 	)
 	return i, err
 }
