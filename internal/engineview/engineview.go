@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chibuike-kt/argus/internal/marketdata"
 	"github.com/chibuike-kt/argus/internal/quant"
 	"github.com/chibuike-kt/argus/internal/store"
 )
@@ -246,7 +247,8 @@ func (st InstrumentStatus) BehindSeconds() (int64, bool) {
 
 // EngineStatus reads every enabled instrument's cursor (one statement).
 func (s *Store) EngineStatus(ctx context.Context) ([]InstrumentStatus, error) {
-	rows, err := s.q.ListEngineStatus(ctx)
+	// The analysis runs on the 1 minute series until L2.
+	rows, err := s.q.ListEngineStatus(ctx, string(marketdata.Interval1m))
 	if err != nil {
 		return nil, fmt.Errorf("engineview: engine status: %w", err)
 	}
