@@ -848,9 +848,13 @@ paths:
     get:
       operationId: getDrawings
       summary: >
-        The signed-in user's own drawings on one chart (instrument and
-        timeframe). Nothing stored yet: an empty array at version 0. An
-        unknown or disabled instrument is a 404.
+        The signed-in user's own drawings on one instrument (owner decision
+        D17: a drawing belongs to the instrument and shows on every
+        timeframe). Nothing stored yet: an empty array at version 0. The
+        first read for an instrument merges the drawings stored per
+        timeframe before D17 into the one instrument document, losing none:
+        a drawing id kept on several timeframes is kept once, as its most
+        recently changed copy. An unknown or disabled instrument is a 404.
       parameters:
         - $ref: "#/components/parameters/DrawingsInstrumentId"
         - $ref: "#/components/parameters/DrawingsTimeframe"
@@ -876,8 +880,9 @@ paths:
     put:
       operationId: updateDrawings
       summary: >
-        Replaces the drawings on one chart, with the same version rule as
-        PUT /me/preferences (409 on a stale version). data is an array of
+        Replaces the drawings on one instrument (every timeframe, D17), with
+        the same version rule as PUT /me/preferences (409 on a stale
+        version). data is an array of
         drawing objects, each with a string id and kind (the rest is the
         web app's own drawing shape); at most 1000 drawings, and a body
         above 256 KB is a 413.
@@ -1114,8 +1119,12 @@ components:
     DrawingsTimeframe:
       name: timeframe
       in: query
-      required: true
-      description: One of 1m, 5m, 15m, 1h, 4h, 1d (validated by the handler; anything else is a 400).
+      required: false
+      deprecated: true
+      description: >
+        Ignored (D17): drawings belong to the instrument, not to a
+        timeframe. Still accepted, so a browser tab running the web app
+        from before D17 keeps saving into the instrument's document.
       schema:
         type: string
   schemas:
@@ -1201,13 +1210,11 @@ components:
           description: The version this change is based on; 0 for the first write.
     Drawings:
       type: object
-      required: [instrument_id, timeframe, data, version]
+      required: [instrument_id, data, version]
       properties:
         instrument_id:
           type: integer
           format: int64
-        timeframe:
-          type: string
         data:
           type: array
           items:

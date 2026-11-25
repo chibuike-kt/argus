@@ -239,7 +239,3 @@ func decodeStrict(raw []byte, v any) error {
 	}
 	return nil
 }
-
-// IsTimeframe reports whether tf is a chart timeframe drawings may be
-// stored under.
-func IsTimeframe(tf string) bool { return timeframes[tf] }

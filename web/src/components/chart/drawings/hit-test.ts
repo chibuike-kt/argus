@@ -6,6 +6,7 @@ import {
   distance,
   distanceToSegment,
   insideRect,
+  timeToX,
   toPixel,
 } from "./geometry";
 
@@ -85,7 +86,11 @@ export function getHandles(d: Drawing, acc: ChartAccessors): Handle[] {
       return [];
     case "position-long":
     case "position-short": {
-      const x = acc.chart.timeScale().timeToCoordinate(d.time);
+      // timeToX, not the library's timeToCoordinate: the latter is null for
+      // any time without a bar of the current timeframe (a position drawn
+      // on 1m seen on 4h, or one outside the loaded history), which left
+      // the position without handles on every other timeframe (D17).
+      const x = timeToX(acc, d.time);
       const yEntry = acc.series.priceToCoordinate(d.entry);
       const yStop = acc.series.priceToCoordinate(d.stop);
       if (x == null) return [];
@@ -108,7 +113,7 @@ export function getHandles(d: Drawing, acc: ChartAccessors): Handle[] {
       const ys = [yEntry, yStop, ...targetYs].filter((v): v is Coordinate => v != null);
       const midY = ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : (yEntry ?? 0);
       handles.push({ id: "left", px: { x, y: midY }, cursor: "resize" });
-      const xRight = acc.chart.timeScale().timeToCoordinate(d.rightTime);
+      const xRight = timeToX(acc, d.rightTime);
       if (xRight != null) {
         handles.push({ id: "right", px: { x: xRight, y: midY }, cursor: "resize" });
       }
@@ -147,7 +152,11 @@ export function hitTest(d: Drawing, acc: ChartAccessors, px: Px, paneWidth: numb
       const p1 = toPixel(acc, d.p1);
       const p2 = toPixel(acc, d.p2);
       if (!p1 || !p2) return null;
-      return insideRect(px, p1, p2) ? { kind: "body" } : null;
+      // A rectangle drawn on a short timeframe and seen on a long one (D17)
+      // can be a fraction of a pixel wide: it is widened to the body
+      // tolerance for hit testing only, so it stays selectable.
+      const [a, b] = minSpanRect(p1, p2, 2 * BODY_TOLERANCE);
+      return insideRect(px, a, b) ? { kind: "body" } : null;
     }
     case "fib": {
       const p1 = toPixel(acc, d.p1);
@@ -166,7 +175,7 @@ export function hitTest(d: Drawing, acc: ChartAccessors, px: Px, paneWidth: numb
       return Math.abs(px.y - y) <= BODY_TOLERANCE ? { kind: "body" } : null;
     }
     case "vline": {
-      const x = acc.chart.timeScale().timeToCoordinate(d.time);
+      const x = timeToX(acc, d.time);
       if (x == null) return null;
       return Math.abs(px.x - x) <= BODY_TOLERANCE ? { kind: "body" } : null;
     }
@@ -179,12 +188,12 @@ export function hitTest(d: Drawing, acc: ChartAccessors, px: Px, paneWidth: numb
     }
     case "position-long":
     case "position-short": {
-      const x = acc.chart.timeScale().timeToCoordinate(d.time);
+      const x = timeToX(acc, d.time);
       const yEntry = acc.series.priceToCoordinate(d.entry);
       const yStop = acc.series.priceToCoordinate(d.stop);
       if (x == null || yEntry == null) return null;
       if (px.x < x - BODY_TOLERANCE) return null; // never behind the anchor: the plan projects forward only
-      const xRight = acc.chart.timeScale().timeToCoordinate(d.rightTime);
+      const xRight = timeToX(acc, d.rightTime);
       if (xRight != null && px.x > xRight + BODY_TOLERANCE) return null; // bounded box: never past the right edge either
 
       // Anywhere inside the risk box (entry-to-stop) or the reward box
@@ -200,6 +209,23 @@ export function hitTest(d: Drawing, acc: ChartAccessors, px: Px, paneWidth: numb
       return null;
     }
   }
+}
+
+// minSpanRect is the rectangle a..b grown about its centre to at least
+// minSpan pixels on each axis (hit testing only; nothing drawn changes).
+export function minSpanRect(a: Px, b: Px, minSpan: number): [Px, Px] {
+  const grow = (lo: number, hi: number): [number, number] => {
+    const span = hi - lo;
+    if (span >= minSpan) return [lo, hi];
+    const mid = (lo + hi) / 2;
+    return [mid - minSpan / 2, mid + minSpan / 2];
+  };
+  const [x0, x1] = grow(Math.min(a.x, b.x), Math.max(a.x, b.x));
+  const [y0, y1] = grow(Math.min(a.y, b.y), Math.max(a.y, b.y));
+  return [
+    { x: x0, y: y0 },
+    { x: x1, y: y1 },
+  ];
 }
 
 // Projects p1->p2 to the pane's right edge (ray) or across the full pane

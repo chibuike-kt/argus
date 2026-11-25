@@ -277,6 +277,14 @@ type UserDrawing struct {
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
+type UserInstrumentDrawing struct {
+	UserID       int64           `json:"user_id"`
+	InstrumentID int64           `json:"instrument_id"`
+	Data         json.RawMessage `json:"data"`
+	Version      int32           `json:"version"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
+
 type UserPreference struct {
 	UserID    int64           `json:"user_id"`
 	Data      json.RawMessage `json:"data"`
