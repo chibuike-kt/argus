@@ -35,6 +35,30 @@ func (q *Queries) GetUserDrawings(ctx context.Context, arg GetUserDrawingsParams
 	return i, err
 }
 
+const getUserInstrumentDrawings = `-- name: GetUserInstrumentDrawings :one
+
+SELECT user_id, instrument_id, data, version, updated_at FROM user_instrument_drawings WHERE user_id = $1 AND instrument_id = $2
+`
+
+type GetUserInstrumentDrawingsParams struct {
+	UserID       int64 `json:"user_id"`
+	InstrumentID int64 `json:"instrument_id"`
+}
+
+// Drawings per (user, instrument), owner decision D17 (migration 000026).
+func (q *Queries) GetUserInstrumentDrawings(ctx context.Context, arg GetUserInstrumentDrawingsParams) (UserInstrumentDrawing, error) {
+	row := q.db.QueryRowContext(ctx, getUserInstrumentDrawings, arg.UserID, arg.InstrumentID)
+	var i UserInstrumentDrawing
+	err := row.Scan(
+		&i.UserID,
+		&i.InstrumentID,
+		&i.Data,
+		&i.Version,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getUserPreferences = `-- name: GetUserPreferences :one
 SELECT user_id, data, version, updated_at FROM user_preferences WHERE user_id = $1
 `
@@ -86,6 +110,42 @@ func (q *Queries) InsertUserDrawings(ctx context.Context, arg InsertUserDrawings
 	return i, err
 }
 
+const insertUserInstrumentDrawings = `-- name: InsertUserInstrumentDrawings :one
+INSERT INTO user_instrument_drawings (user_id, instrument_id, data, version, updated_at)
+VALUES ($1, $2, $3, 1, $4)
+ON CONFLICT (user_id, instrument_id) DO NOTHING
+RETURNING user_id, instrument_id, data, version, updated_at
+`
+
+type InsertUserInstrumentDrawingsParams struct {
+	UserID       int64           `json:"user_id"`
+	InstrumentID int64           `json:"instrument_id"`
+	Data         json.RawMessage `json:"data"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
+
+// InsertUserInstrumentDrawings creates the first version (a first write, or
+// the merge of the per timeframe documents). ON CONFLICT DO NOTHING: a row
+// already there means the caller's "version 0" was stale (409), or another
+// request merged first.
+func (q *Queries) InsertUserInstrumentDrawings(ctx context.Context, arg InsertUserInstrumentDrawingsParams) (UserInstrumentDrawing, error) {
+	row := q.db.QueryRowContext(ctx, insertUserInstrumentDrawings,
+		arg.UserID,
+		arg.InstrumentID,
+		arg.Data,
+		arg.UpdatedAt,
+	)
+	var i UserInstrumentDrawing
+	err := row.Scan(
+		&i.UserID,
+		&i.InstrumentID,
+		&i.Data,
+		&i.Version,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const insertUserPreferences = `-- name: InsertUserPreferences :one
 INSERT INTO user_preferences (user_id, data, version, updated_at)
 VALUES ($1, $2, 1, $3)
@@ -112,6 +172,50 @@ func (q *Queries) InsertUserPreferences(ctx context.Context, arg InsertUserPrefe
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const listUserDrawingsAllTimeframes = `-- name: ListUserDrawingsAllTimeframes :many
+SELECT user_id, instrument_id, timeframe, data, version, updated_at FROM user_drawings
+WHERE user_id = $1 AND instrument_id = $2
+ORDER BY updated_at, timeframe
+`
+
+type ListUserDrawingsAllTimeframesParams struct {
+	UserID       int64 `json:"user_id"`
+	InstrumentID int64 `json:"instrument_id"`
+}
+
+// ListUserDrawingsAllTimeframes reads the per timeframe documents stored
+// before D17 (000017's user_drawings) for one instrument, oldest change
+// first, for the one time merge. Read only.
+func (q *Queries) ListUserDrawingsAllTimeframes(ctx context.Context, arg ListUserDrawingsAllTimeframesParams) ([]UserDrawing, error) {
+	rows, err := q.db.QueryContext(ctx, listUserDrawingsAllTimeframes, arg.UserID, arg.InstrumentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []UserDrawing{}
+	for rows.Next() {
+		var i UserDrawing
+		if err := rows.Scan(
+			&i.UserID,
+			&i.InstrumentID,
+			&i.Timeframe,
+			&i.Data,
+			&i.Version,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateUserDrawings = `-- name: UpdateUserDrawings :one
@@ -144,6 +248,40 @@ func (q *Queries) UpdateUserDrawings(ctx context.Context, arg UpdateUserDrawings
 		&i.UserID,
 		&i.InstrumentID,
 		&i.Timeframe,
+		&i.Data,
+		&i.Version,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateUserInstrumentDrawings = `-- name: UpdateUserInstrumentDrawings :one
+UPDATE user_instrument_drawings
+SET data = $3, version = version + 1, updated_at = $5
+WHERE user_id = $1 AND instrument_id = $2 AND version = $4
+RETURNING user_id, instrument_id, data, version, updated_at
+`
+
+type UpdateUserInstrumentDrawingsParams struct {
+	UserID       int64           `json:"user_id"`
+	InstrumentID int64           `json:"instrument_id"`
+	Data         json.RawMessage `json:"data"`
+	Version      int32           `json:"version"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
+
+func (q *Queries) UpdateUserInstrumentDrawings(ctx context.Context, arg UpdateUserInstrumentDrawingsParams) (UserInstrumentDrawing, error) {
+	row := q.db.QueryRowContext(ctx, updateUserInstrumentDrawings,
+		arg.UserID,
+		arg.InstrumentID,
+		arg.Data,
+		arg.Version,
+		arg.UpdatedAt,
+	)
+	var i UserInstrumentDrawing
+	err := row.Scan(
+		&i.UserID,
+		&i.InstrumentID,
 		&i.Data,
 		&i.Version,
 		&i.UpdatedAt,

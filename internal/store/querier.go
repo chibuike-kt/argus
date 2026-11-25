@@ -202,6 +202,8 @@ type Querier interface {
 	GetUserByEmailNormalized(ctx context.Context, emailNormalized string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
 	GetUserDrawings(ctx context.Context, arg GetUserDrawingsParams) (UserDrawing, error)
+	// Drawings per (user, instrument), owner decision D17 (migration 000026).
+	GetUserInstrumentDrawings(ctx context.Context, arg GetUserInstrumentDrawingsParams) (UserInstrumentDrawing, error)
 	GetUserPreferences(ctx context.Context, userID int64) (UserPreference, error)
 	GetWatchlistItem(ctx context.Context, arg GetWatchlistItemParams) (WatchlistItem, error)
 	// IncrementSignupWrongGuessesIfEligible atomically claims one guess
@@ -248,6 +250,11 @@ type Querier interface {
 	InsertSweep(ctx context.Context, arg InsertSweepParams) (LiquiditySweep, error)
 	InsertSwing(ctx context.Context, arg InsertSwingParams) (ConfirmedSwing, error)
 	InsertUserDrawings(ctx context.Context, arg InsertUserDrawingsParams) (UserDrawing, error)
+	// InsertUserInstrumentDrawings creates the first version (a first write, or
+	// the merge of the per timeframe documents). ON CONFLICT DO NOTHING: a row
+	// already there means the caller's "version 0" was stale (409), or another
+	// request merged first.
+	InsertUserInstrumentDrawings(ctx context.Context, arg InsertUserInstrumentDrawingsParams) (UserInstrumentDrawing, error)
 	// InsertUserPreferences creates the first version. ON CONFLICT DO NOTHING:
 	// a row that already exists means the caller's "version 0" was stale, and
 	// zero rows returned is exactly how the store reports that (409).
@@ -530,6 +537,10 @@ type Querier interface {
 	// a sequential scan per instrument: 70 ms at 50,000 watchlist rows).
 	ListTrackedInstruments(ctx context.Context, floor []string) ([]ListTrackedInstrumentsRow, error)
 	ListTrackedSymbolStates(ctx context.Context, instrumentIds []int64) ([]TrackedSymbolState, error)
+	// ListUserDrawingsAllTimeframes reads the per timeframe documents stored
+	// before D17 (000017's user_drawings) for one instrument, oldest change
+	// first, for the one time merge. Read only.
+	ListUserDrawingsAllTimeframes(ctx context.Context, arg ListUserDrawingsAllTimeframesParams) ([]UserDrawing, error)
 	ListWatchlistItems(ctx context.Context, userID int64) ([]WatchlistItem, error)
 	// ListWatchlistItemsForUpdate locks the user's rows for a reorder, so a
 	// concurrent add or remove waits and the permutation check is exact.
@@ -622,6 +633,7 @@ type Querier interface {
 	// amendment, and a new state for a lifecycle transition.
 	UpdateSetup(ctx context.Context, arg UpdateSetupParams) (Setup, error)
 	UpdateUserDrawings(ctx context.Context, arg UpdateUserDrawingsParams) (UserDrawing, error)
+	UpdateUserInstrumentDrawings(ctx context.Context, arg UpdateUserInstrumentDrawingsParams) (UserInstrumentDrawing, error)
 	// UpdateUserPreferences writes only when the stored version is the one
 	// the caller based its change on; zero rows means stale (409).
 	UpdateUserPreferences(ctx context.Context, arg UpdateUserPreferencesParams) (UserPreference, error)

@@ -168,7 +168,9 @@ func TestIntegration_Preferences_OwnershipValidationAndLimits(t *testing.T) {
 	}
 }
 
-func TestIntegration_Drawings_PerChartVersionedAndCapped(t *testing.T) {
+// D17: one drawings document per instrument, on every timeframe; the
+// timeframe parameter an older tab sends is accepted and ignored.
+func TestIntegration_Drawings_PerInstrumentVersionedAndCapped(t *testing.T) {
 	base, users, sessions := prefsServer(t)
 	db := testDB(t)
 	uid := newUser(t, users)
@@ -189,9 +191,12 @@ func TestIntegration_Drawings_PerChartVersionedAndCapped(t *testing.T) {
 	if code, body := doJSON(t, c, http.MethodPut, u(inst, "1m"), map[string]any{"data": drawing, "version": 0}); code != http.StatusOK {
 		t.Fatalf("PUT = %d %s", code, body)
 	}
-	// Scoped per timeframe: 5m is still empty.
-	if _, body := doJSON(t, c, http.MethodGet, u(inst, "5m"), nil); !strings.Contains(string(body), `"data":[]`) {
-		t.Fatalf("5m leaked 1m drawings: %s", body)
+	// One document per instrument (D17): the drawing made on 1m is there
+	// on 5m, with no timeframe at all, and with a timeframe nobody knows.
+	for _, url := range []string{u(inst, "5m"), fmt.Sprintf("%s/api/v1/me/drawings?instrument_id=%d", base, inst), u(inst, "2h")} {
+		if code, body := doJSON(t, c, http.MethodGet, url, nil); code != http.StatusOK || !strings.Contains(string(body), `"id":"d1"`) || !strings.Contains(string(body), `"version":1`) {
+			t.Fatalf("GET %s = %d %s, want the instrument's drawing at version 1", url, code, body)
+		}
 	}
 	// Stale version: 409.
 	if code, _ := doJSON(t, c, http.MethodPut, u(inst, "1m"), map[string]any{"data": drawing, "version": 0}); code != http.StatusConflict {
@@ -199,12 +204,12 @@ func TestIntegration_Drawings_PerChartVersionedAndCapped(t *testing.T) {
 	}
 	// 200 KB fits the 256 KB drawings cap (above the API's 64 KB default).
 	mid := json.RawMessage(`[{"id":"t","kind":"text","text":"` + strings.Repeat("x", 200*1024) + `"}]`)
-	if code, body := doJSON(t, c, http.MethodPut, u(inst, "1h"), map[string]any{"data": mid, "version": 0}); code != http.StatusOK {
+	if code, body := doJSON(t, c, http.MethodPut, u(inst, "1h"), map[string]any{"data": mid, "version": 1}); code != http.StatusOK {
 		t.Fatalf("200 KB drawings = %d %s", code, body)
 	}
 	// 300 KB: 413.
 	huge := json.RawMessage(`[{"id":"t","kind":"text","text":"` + strings.Repeat("x", 300*1024) + `"}]`)
-	if code, _ := doJSON(t, c, http.MethodPut, u(inst, "4h"), map[string]any{"data": huge, "version": 0}); code != http.StatusRequestEntityTooLarge {
+	if code, _ := doJSON(t, c, http.MethodPut, u(inst, "4h"), map[string]any{"data": huge, "version": 2}); code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("300 KB drawings = %d, want 413", code)
 	}
 	// Disabled or unknown instrument: 404, same answer.
@@ -212,10 +217,6 @@ func TestIntegration_Drawings_PerChartVersionedAndCapped(t *testing.T) {
 		if code, _ := doJSON(t, c, http.MethodGet, u(id, "1m"), nil); code != http.StatusNotFound {
 			t.Fatalf("instrument %d = %d, want 404", id, code)
 		}
-	}
-	// Bad timeframe: 400.
-	if code, _ := doJSON(t, c, http.MethodGet, u(inst, "2h"), nil); code != http.StatusBadRequest {
-		t.Fatalf("bad timeframe = %d, want 400", code)
 	}
 }
 
@@ -246,7 +247,7 @@ func TestIntegration_Preferences_DeletedWithTheAccount(t *testing.T) {
 		t.Fatalf("delete user: %v", err)
 	}
 	var n int
-	if err := db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM user_preferences WHERE user_id = $1) + (SELECT count(*) FROM user_drawings WHERE user_id = $1)`, uid).Scan(&n); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM user_preferences WHERE user_id = $1) + (SELECT count(*) FROM user_drawings WHERE user_id = $1) + (SELECT count(*) FROM user_instrument_drawings WHERE user_id = $1)`, uid).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {

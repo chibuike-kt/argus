@@ -15,8 +15,8 @@ import (
 type preferencesStore interface {
 	GetPreferences(ctx context.Context, userID int64) (preferences.Doc, error)
 	PutPreferences(ctx context.Context, userID int64, raw []byte, baseVersion int32) (preferences.Doc, error)
-	GetDrawings(ctx context.Context, userID, instrumentID int64, timeframe string) (preferences.Doc, error)
-	PutDrawings(ctx context.Context, userID, instrumentID int64, timeframe string, raw []byte, baseVersion int32) (preferences.Doc, error)
+	GetDrawings(ctx context.Context, userID, instrumentID int64) (preferences.Doc, error)
+	PutDrawings(ctx context.Context, userID, instrumentID int64, raw []byte, baseVersion int32) (preferences.Doc, error)
 }
 
 var _ preferencesStore = (*preferences.Store)(nil)
@@ -69,11 +69,10 @@ func (h *apiHandler) drawingsInstrumentOK(ctx context.Context, id int64) (bool, 
 	return inst.Enabled, nil
 }
 
+// GetDrawings: the user's drawings on one instrument, every timeframe
+// (owner decision D17). A timeframe parameter, sent by a tab running the
+// web app from before D17, is accepted and ignored.
 func (h *apiHandler) GetDrawings(ctx context.Context, request GetDrawingsRequestObject) (GetDrawingsResponseObject, error) {
-	tf := request.Params.Timeframe
-	if !preferences.IsTimeframe(tf) {
-		return GetDrawings400JSONResponse(apiError("invalid_argument", "timeframe must be one of 1m, 5m, 15m, 1h, 4h, 1d")), nil
-	}
 	ok, err := h.drawingsInstrumentOK(ctx, request.Params.InstrumentId)
 	if err != nil {
 		return nil, fmt.Errorf("get drawings instrument %d: %w", request.Params.InstrumentId, err)
@@ -82,19 +81,17 @@ func (h *apiHandler) GetDrawings(ctx context.Context, request GetDrawingsRequest
 		return GetDrawings404JSONResponse(apiError("not_found", "instrument not found")), nil
 	}
 	user, _ := identity.UserFromContext(ctx)
-	doc, err := h.prefs.GetDrawings(ctx, user.ID, request.Params.InstrumentId, tf)
+	doc, err := h.prefs.GetDrawings(ctx, user.ID, request.Params.InstrumentId)
 	if err != nil {
 		h.logger.Error("httpapi: get drawings", "user_id", user.ID, "error", err)
 		return nil, fmt.Errorf("get drawings: %w", err)
 	}
-	return GetDrawings200JSONResponse{InstrumentId: request.Params.InstrumentId, Timeframe: tf, Data: doc.Data, Version: doc.Version, UpdatedAt: doc.UpdatedAt}, nil
+	return GetDrawings200JSONResponse{InstrumentId: request.Params.InstrumentId, Data: doc.Data, Version: doc.Version, UpdatedAt: doc.UpdatedAt}, nil
 }
 
+// UpdateDrawings replaces the user's drawings on one instrument (D17); a
+// timeframe parameter is accepted and ignored, as in GetDrawings.
 func (h *apiHandler) UpdateDrawings(ctx context.Context, request UpdateDrawingsRequestObject) (UpdateDrawingsResponseObject, error) {
-	tf := request.Params.Timeframe
-	if !preferences.IsTimeframe(tf) {
-		return UpdateDrawings400JSONResponse(apiError("invalid_argument", "timeframe must be one of 1m, 5m, 15m, 1h, 4h, 1d")), nil
-	}
 	if request.Body == nil || len(request.Body.Data) == 0 {
 		return UpdateDrawings400JSONResponse(apiError("invalid_argument", "data and version are required")), nil
 	}
@@ -106,10 +103,10 @@ func (h *apiHandler) UpdateDrawings(ctx context.Context, request UpdateDrawingsR
 		return UpdateDrawings404JSONResponse(apiError("not_found", "instrument not found")), nil
 	}
 	user, _ := identity.UserFromContext(ctx)
-	doc, err := h.prefs.PutDrawings(ctx, user.ID, request.Params.InstrumentId, tf, request.Body.Data, request.Body.Version)
+	doc, err := h.prefs.PutDrawings(ctx, user.ID, request.Params.InstrumentId, request.Body.Data, request.Body.Version)
 	switch {
 	case err == nil:
-		return UpdateDrawings200JSONResponse{InstrumentId: request.Params.InstrumentId, Timeframe: tf, Data: doc.Data, Version: doc.Version, UpdatedAt: doc.UpdatedAt}, nil
+		return UpdateDrawings200JSONResponse{InstrumentId: request.Params.InstrumentId, Data: doc.Data, Version: doc.Version, UpdatedAt: doc.UpdatedAt}, nil
 	case errors.Is(err, preferences.ErrVersionConflict):
 		return UpdateDrawings409JSONResponse(apiError("version_conflict", "drawings changed elsewhere; re-read and retry")), nil
 	case errors.Is(err, preferences.ErrTooLarge):
